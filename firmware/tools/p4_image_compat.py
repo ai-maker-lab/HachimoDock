@@ -13,7 +13,7 @@ def image_revision_range(data: bytes, offset: int = 0) -> tuple[int, int]:
 
 
 def factory_revision_range(data: bytes) -> tuple[int, int]:
-    # The board's existing partition layout is deliberately unchanged.
+    # Only checks chip revision bounds; the partition layout comes from partitions.csv.
     boot = image_revision_range(data, 0x2000)
     app = image_revision_range(data, 0x10000)
     if boot != app:

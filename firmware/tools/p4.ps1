@@ -109,23 +109,27 @@ function Get-DevicePartitionLayout {
     return $layout
 }
 
+function Get-BuildPartitionLayout {
+    $partitionTool = Join-Path $coreDir `
+        "packages\framework-espidf\components\partition_table\gen_esp32part.py"
+    $layout = (& $python $partitionTool (Join-Path $buildDir "partitions.bin") | Out-String)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to decode the built partition table."
+    }
+    return $layout
+}
+
 function Assert-CurrentAbLayout {
     param([Parameter(Mandatory = $true)][string]$Layout)
 
-    $hasOta0 = $Layout -match "(?m)^ota_0,app,ota_0,0x10000,(2560K|0x280000),"
-    $hasOta1 = $Layout -match "(?m)^ota_1,app,ota_1,0x290000,(2560K|0x280000),"
-    $hasStorage = $Layout -match "(?m)^storage,data,spiffs,0x520000,(9088K|0x8E0000),"
-    $hasAppearance0 = $Layout -match "(?m)^appearance0,data,64,0xe00000,(9M|9216K|0x900000),"
-    $hasAppearance1 = $Layout -match "(?m)^appearance1,data,65,0x1700000,(9M|9216K|0x900000),"
-    $legacy20 = ($Layout -match "(?m)^storage,data,spiffs,0x520000,(7040K|0x6E0000),") -and
-        ($Layout -match "(?m)^appearance0,data,64,0xc00000,(10M|0xA00000),") -and
-        ($Layout -match "(?m)^appearance1,data,65,0x1600000,(10M|0xA00000),")
-    if ($hasOta0 -and $hasOta1 -and $legacy20) {
-        throw "Legacy 20MiB appearance layout detected. Refusing partition-table overwrite: back up and migrate storage/appearances with the preservation tool first. OTA does not update the partition table; do not format SPIFFS."
+    $built = Get-BuildPartitionLayout
+    if ($Layout.Trim() -cne $built.Trim()) {
+        throw "Installed partition table differs from the build. Refusing preserving flash."
     }
-    if (-not ($hasOta0 -and $hasOta1 -and $hasStorage -and $hasAppearance0 -and $hasAppearance1)) {
-        throw "Device layout is not the current 18MiB appearance layout. Refusing preserving flash; inspect and migrate with verified backups. No automatic format or factory reset."
+    if ($built -match "(?m)^otadata,data,ota,(0x[0-9a-fA-F]+),") {
+        return $Matches[1]
     }
+    throw "The built partition table has no otadata entry."
 }
 
 function Read-P4HelloVersion {
@@ -198,7 +202,7 @@ function Invoke-PreservingFlash {
 
     $esptool = Get-HachimoEsptoolPath -PlatformIoCoreDir $coreDir
     $layout = Get-DevicePartitionLayout -SerialPort $Port -Esptool $esptool
-    Assert-CurrentAbLayout -Layout $layout
+    $otadataAddress = Assert-CurrentAbLayout -Layout $layout
 
     $firmware = Join-Path $buildDir "firmware.bin"
     Invoke-CheckedCommand -Label "Firmware image validation" -Command {
@@ -211,7 +215,7 @@ function Invoke-PreservingFlash {
             0x2000 (Join-Path $buildDir "bootloader.bin") `
             0x10000 $firmware `
             0x8000 (Join-Path $buildDir "partitions.bin") `
-            0x510000 (Join-Path $buildDir "ota_data_initial.bin")
+            $otadataAddress (Join-Path $buildDir "ota_data_initial.bin")
     }
 
     if (-not $NoVerify) {
