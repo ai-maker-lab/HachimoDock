@@ -8,6 +8,7 @@ const { ClaudeCodeAdapter } = require("./adapters/claude-code");
 const { CodexAdapter } = require("./adapters/codex");
 const { OpenClawAdapter } = require("./adapters/openclaw");
 const { MiMoCodeAdapter } = require("./adapters/mimocode");
+const { DevinAdapter } = require("./adapters/devin");
 const { WorkBuddyAdapter } = require("./adapters/workbuddy");
 const { DshAdapter } = require("./adapters/dsh");
 const { defaultLog } = require("./log");
@@ -56,6 +57,7 @@ module.exports = {
   CodexAdapter,
   OpenClawAdapter,
   MiMoCodeAdapter,
+  DevinAdapter,
   WorkBuddyAdapter,
   DshAdapter,
 };

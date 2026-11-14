@@ -18,6 +18,7 @@ path:
 | `openclaw`     | spawn helper → `import('openclaw/dist/plugin-sdk/agent-runtime').agentCommand({...})` |
 | `mimocode`     | official `mimo session list --format json`; status comes from the managed MiMoCode plugin |
 | `workbuddy`    | status-only WorkBuddy lifecycle hooks; sessions received during the current Bridge run; text injection and session creation explicitly unsupported |
+| `devin`        | local Devin CLI lifecycle hooks report session state, including permission waits and end of turn |
 
 Centralising the "find the user's latest session, pipe text in, stream tokens
 out" logic here keeps voice-service-node a pure audio frontend, and keeps each

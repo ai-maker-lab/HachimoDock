@@ -17,6 +17,7 @@ const {
   CodexAdapter,
   OpenClawAdapter,
   MiMoCodeAdapter,
+  DevinAdapter,
   WorkBuddyAdapter,
   DshAdapter,
 } = require("./index");
@@ -39,6 +40,7 @@ async function main() {
   adapters.push(new CodexAdapter({ log: withScope(defaultLog, "codex") }));
   adapters.push(new OpenClawAdapter({ log: withScope(defaultLog, "openclaw") }));
   adapters.push(new MiMoCodeAdapter({ log: withScope(defaultLog, "mimocode") }));
+  adapters.push(new DevinAdapter({ log: withScope(defaultLog, "devin") }));
   adapters.push(new WorkBuddyAdapter({ log: withScope(defaultLog, "workbuddy") }));
   adapters.push(new DshAdapter({ log: withScope(defaultLog, "dsh") }));
 

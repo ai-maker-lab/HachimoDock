@@ -34,7 +34,7 @@ const SPEECH_EXPIRES_MS = 30000;
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const STATUS_VALUES = new Set(["idle", "working", "speaking", "done", "reply_complete", "error", "waiting_user"]);
 const LEGACY_WORKING_STATUS_VALUES = new Set(["thinking", "tool_running"]);
-const KNOWN_AGENT_SOURCES = ["codex", "claude-code", "openclaw", "mimocode", "workbuddy"];
+const KNOWN_AGENT_SOURCES = ["codex", "claude-code", "openclaw", "mimocode", "workbuddy", "devin"];
 
 function requireOptional(name) {
   try {
@@ -607,6 +607,18 @@ class LocalStatePublisher {
     const source = normalizeAgentId(payload.source || "unknown");
     this.latestStateBySource.set(source, normalizeStatus(payload.state) || "");
     this._writeLocalState(source, payload);
+  }
+
+  publishMacNotice(source, notice, tsMs = Date.now(), callId) {
+    if (!["devin", "codex"].includes(source) || !notice ||
+        typeof notice.title !== "string" || typeof notice.text !== "string") return;
+    const id = callId ? crypto.createHash("sha256").update(callId).digest("hex").slice(0, 24) : crypto.randomUUID();
+    const file = path.join(os.tmpdir(), "pet-manager-mac-notices", tsMs + "-" + id + ".json");
+    try {
+      writeSnapshotAtomicSync(file, JSON.stringify({ title: notice.title, text: notice.text, expiresAtMs: tsMs + 30000 }));
+    } catch (error) {
+      log("warn", "could not queue Mac reminder", { source, error: error.code });
+    }
   }
 
   publishSpeech(sourceId, payload) {
@@ -1625,8 +1637,8 @@ function buildClaudeHookDisplay(payload, status, event) {
   };
 }
 
-function buildMiMoCodeHookDisplay(payload, status, event) {
-  const title = compactHookText(payload?.display_title || payload?.session_title, 120) || "MiMoCode";
+function buildPluginHookDisplay(payload, status, event, fallbackTitle = "MiMoCode") {
+  const title = compactHookText(payload?.display_title || payload?.session_title, 120) || fallbackTitle;
   let content = compactHookText(payload?.display_content, 320);
   if (!content && status === "working") content = "正在处理";
   else if (!content && status === "speaking") content = "正在回复";
@@ -1643,7 +1655,46 @@ function buildMiMoCodeHookDisplay(payload, status, event) {
   };
 }
 
+function devinSessionTitle(id) {
+  const dataHome = process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share");
+  let db;
+  try {
+    const { DatabaseSync } = require("node:sqlite");
+    db = new DatabaseSync(path.join(dataHome, "devin", "cli", "sessions.db"), { readOnly: true });
+    const session = db.prepare(`
+      SELECT title, (SELECT content FROM prompt_history
+                     WHERE session_id = sessions.id AND is_shell = 0 ORDER BY id LIMIT 1) AS firstPrompt
+      FROM sessions WHERE id = ?
+    `).get(id);
+    const title = session?.title?.trim();
+    if (!title) return;
+    // Devin initially uses the opening prompt as its title until a name is available.
+    const prefix = title.replace(/(?:…|\.\.\.)$/, "").trimEnd().replace(/\s+/g, " ");
+    if (session.firstPrompt?.trimStart().replace(/\s+/g, " ").startsWith(prefix)) return;
+    return title;
+  } catch {
+    return undefined;
+  } finally {
+    db?.close();
+  }
+}
+
+function noticeForSession(config, agent, id, notice, sessionTitle) {
+  const title = agent === "devin" ? devinSessionTitle(id)
+    : sessionTitle || config.metricsTracker?.sessionStatuses(agent).find(entry => entry.id === id)?.title;
+  if (agent === "devin" && !title) return notice;
+  const name = agent === "codex" && (!title || title === "Codex 会话")
+    ? id?.replace(/^codex:/, "").slice(-12) : title;
+  if (!name) return notice;
+  const { displayText } = require("../../../hooks/workbuddy-display");
+  return { ...notice, text: displayText(displayText(name, 16) + " · " + notice.text, 46) };
+}
+
 function publishClawdState(config, payload) {
+  if (payload.notice && (payload.agent_id === "codex" || payload.agent_id === "devin")) {
+    config.publisher.publishMacNotice(payload.agent_id, noticeForSession(config, payload.agent_id, payload.session_id, payload.notice));
+    if (payload.agent_id === "codex") return;
+  }
   const clawdState = typeof payload.state === "string" ? payload.state : "";
   const event = typeof payload.event === "string" ? payload.event : "";
   const source = normalizeAgentId(payload.agent_id || "claude-code");
@@ -1651,8 +1702,8 @@ function publishClawdState(config, payload) {
   const tokenUsage = extractTokenUsageFromPayload(payload);
   const display = source === "claude-code"
     ? buildClaudeHookDisplay(payload, status, event)
-    : source === "mimocode"
-      ? buildMiMoCodeHookDisplay(payload, status, event)
+    : source === "mimocode" || source === "devin"
+      ? buildPluginHookDisplay(payload, status, event, source === "devin" ? "" : "MiMoCode")
       : source === "workbuddy"
         ? buildWorkBuddyHookDisplay(payload, status, event)
         : undefined;
@@ -1747,6 +1798,8 @@ function syncHooks(port, autoStart, options = {}) {
       autoStart: Boolean(autoStart),
       syncLegacyHooks: options.syncLegacyHooks !== false,
       syncMiMoCode: options.syncMiMoCode === true,
+      syncCodex: options.syncCodex === true,
+      syncDevin: options.syncDevin === true,
       syncWorkBuddy: options.syncWorkBuddy === true,
     },
   });
@@ -1923,6 +1976,10 @@ function startCodexMonitor(config) {
   ]);
   try {
     monitor = startAgentLogMonitorWorker("codex", (sessionId, state, event, extra) => {
+      if (event === "codex:user_question") {
+        config.publisher.publishMacNotice("codex", noticeForSession(config, "codex", sessionId, extra.notice, extra.sessionTitle), extra.tsMs, extra.callId);
+        return;
+      }
       if (!allowedCodexEvents.has(event)) return;
       const isVisibleEvent = visibleCodexEvents.has(event);
       const normalized = mapCodexStateToStatus(state, event, extra?.turn?.completedWork);
@@ -2074,7 +2131,21 @@ function startClaudeLogMonitor(config) {
   };
 }
 
+// Following one of these two agents controls the pet and its buttons. Observe
+// the other installed agent as well so its activity and Mac notices stay visible.
+function companionObservers(selectedSource, hasCodexSessions, hasDevinConfig) {
+  return {
+    codex: selectedSource === "devin" && hasCodexSessions,
+    devin: selectedSource === "codex" && hasDevinConfig,
+  };
+}
+
 function resolveConfig() {
+  const observers = companionObservers(
+    getEnv("CLAWD_SELECTED_AGENT_ID", ""),
+    fs.existsSync(require("../../../agents/codex").SESSION_DIR),
+    fs.existsSync(require("../../../hooks/devin-install").configRoot()),
+  );
   const defaultDeviceId = normalizeTopicPart(os.hostname().toLowerCase(), "devbox");
   const stateDirFallback = path.join(os.homedir(), ".status-bridge");
 
@@ -2104,7 +2175,7 @@ function resolveConfig() {
       mockButtonTimeoutMs: Math.max(2000, getEnvInt("CLAWD_MOCK_BUTTON_TIMEOUT_MS", 120000)),
     },
     codex: {
-      enabled: getEnvBool("CLAWD_ENABLE_CODEX_MONITOR", true),
+      enabled: getEnvBool("CLAWD_ENABLE_CODEX_MONITOR", true) || observers.codex,
     },
     claude: {
       enabledLogMonitor: getEnvBool("CLAWD_ENABLE_CLAUDE_LOG_MONITOR", true),
@@ -2137,6 +2208,9 @@ function resolveConfig() {
     },
     mimocode: {
       enabled: getEnvBool("CLAWD_ENABLE_MIMOCODE", true),
+    },
+    devin: {
+      enabled: observers.devin || parseCsvEnv("CLAWD_ENABLED_AGENTS", []).includes("devin") || getEnv("CLAWD_SELECTED_AGENT_ID", "") === "devin",
     },
     workbuddy: {
       // Selected/enabled channel is authoritative in both direct and autostart launches.
@@ -2272,7 +2346,7 @@ async function main() {
     port: config.http.port,
     strictPort: config.http.strictPort,
     publisher,
-    onState: config.http.syncHooks || config.mimocode.enabled || config.workbuddy.enabled
+    onState: config.http.syncHooks || config.codex.enabled || config.mimocode.enabled || config.workbuddy.enabled || config.devin.enabled
       ? (payload) => publishClawdState({
           publisher,
           metricsTracker,
@@ -2351,10 +2425,12 @@ async function main() {
     mockButtonInjectPath: "http://127.0.0.1:" + port + "/mock-button-inject",
   });
 
-  if (config.http.syncHooks || config.mimocode.enabled || config.workbuddy.enabled) {
+  if (config.http.syncHooks || config.codex.enabled || config.mimocode.enabled || config.workbuddy.enabled || config.devin.enabled) {
     syncHooks(port, config.http.autoStartHook, {
       syncLegacyHooks: config.http.syncHooks,
       syncMiMoCode: config.mimocode.enabled,
+      syncCodex: config.codex.enabled,
+      syncDevin: config.devin.enabled,
       syncWorkBuddy: config.workbuddy.enabled,
     });
   } else {
@@ -2408,6 +2484,7 @@ async function main() {
       CodexAdapter,
       OpenClawAdapter,
       MiMoCodeAdapter,
+      DevinAdapter,
       WorkBuddyAdapter,
       DshAdapter,
     } = busModule;
@@ -2417,6 +2494,7 @@ async function main() {
       new CodexAdapter({ log: busLog }),
       new OpenClawAdapter({ log: busLog }),
       new MiMoCodeAdapter({ log: busLog }),
+      new DevinAdapter({ log: busLog }),
       new WorkBuddyAdapter({ log: busLog }),
       new DshAdapter({ log: busLog }),
     ];
@@ -2491,6 +2569,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  companionObservers,
   LocalStatePublisher,
   writeSnapshotAtomicSync,
   HookHttpServer,
@@ -2503,7 +2582,7 @@ module.exports = {
   isAgentBusyState,
   createLatestHardwareInputQueue,
   buildClaudeHookDisplay,
-  buildMiMoCodeHookDisplay,
+  buildMiMoCodeHookDisplay: buildPluginHookDisplay,
   buildWorkBuddyHookDisplay,
   publishClawdState,
   publishPermissionRequest,

@@ -855,3 +855,28 @@ test("only successful work belonging to the completed turn makes it audible", ()
 
   assert.deepEqual(states, ["reply_complete", "done", "reply_complete"]);
 });
+
+test("live native choices emit a passive reminder and startup history stays quiet", () => {
+  const notices = [];
+  const monitor = new CodexLogMonitor({}, (...args) => {
+    if (args[2] === "codex:user_question") {
+      assert.equal(args[3].sessionTitle, "行程排班");
+      notices.push(args[3].notice);
+    }
+  });
+  const entry = monitor.createEntry("codex:test", 0, false);
+  assert.equal(monitor.ensureTitle(entry), "Codex 会话");
+  for (const text of ["<environment_context>\n cwd \n</environment_context>", "行程排班"]) {
+    monitor.processLine(JSON.stringify({ type: "response_item", payload: { type: "message",
+      role: "user", content: [{ type: "input_text", text }] } }), entry);
+  }
+  for (const [name, field] of [["request_user_input", "question"], ["request_user_input_async", "title"]]) {
+    const line = JSON.stringify({ type: "response_item", timestamp: new Date().toISOString(),
+      payload: { type: "function_call", name, arguments: JSON.stringify({ questions: [{ [field]: "继续吗？" }] }) } });
+    entry.suppressEmit = true;
+    monitor.processLine(line, entry);
+    entry.suppressEmit = false;
+    monitor.processLine(line, entry);
+  }
+  assert.deepEqual(notices, Array(2).fill({ title: "Codex 等你选择", text: "继续吗？" }));
+});

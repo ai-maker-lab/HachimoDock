@@ -11,6 +11,7 @@ const fs = require("fs");
 const { createHash } = require("node:crypto");
 const { requestText } = require("./codex-request-text");
 const path = require("path");
+const { macNotice, firstQuestion } = require("../hooks/mac-notice");
 const defaults = require("./codex");
 const {
   isInternalCodexReviewText,
@@ -759,9 +760,8 @@ class CodexLogMonitor {
       entry.sessionTitle = indexed;
       return indexed;
     }
-    const fallback = firstLine(entry.firstUserMessage || entry.lastUserMessage || TEXT_SESSION_FALLBACK, 28);
-    entry.sessionTitle = fallback || TEXT_SESSION_FALLBACK;
-    return entry.sessionTitle;
+    entry.sessionTitle = firstLine(entry.firstUserMessage || entry.lastUserMessage, 28);
+    return entry.sessionTitle || TEXT_SESSION_FALLBACK;
   }
 
   buildDisplay(entry, state, event) {
@@ -894,6 +894,17 @@ class CodexLogMonitor {
 
     const subtype = payload && typeof payload.type === "string" ? payload.type : "";
     let key = subtype ? `${type}:${subtype}` : type;
+    if (key === "response_item:function_call"
+        && ["request_user_input", "request_user_input_async"].includes(payload.name)
+        && !entry.suppressEmit && !entry.internalSession && sourceEventTime > Date.now() - 30000) {
+      let input;
+      try { input = JSON.parse(payload.arguments); } catch { /* A generic reminder still works. */ }
+      this.onState(entry.sessionId, "", "codex:user_question", {
+        notice: macNotice("codex", "question", firstQuestion(input)), tsMs: sourceEventTime,
+        sessionTitle: this.getIndexedTitle(entry.sessionId) || this.ensureTitle(entry),
+        callId: payload.call_id,
+      });
+    }
     const userSource = key === "response_item:message" && payload?.role === "user" ? "response_item" : "event_msg";
     if (userSource === "response_item") {
       // New Desktop rollouts omit event_msg:user_message. Normalize only actual
@@ -901,7 +912,7 @@ class CodexLogMonitor {
       const message = Array.isArray(payload.content) ? payload.content
         .filter(block => block?.type === "input_text" && typeof block.text === "string")
         .map(block => block.text).join("\n").trim() : "";
-      if (!message) return;
+      if (!message || /^<environment_context>[\s\S]*<\/environment_context>$/.test(message)) return;
       payload = { type: "user_message", message };
       key = "event_msg:user_message";
     }

@@ -30,6 +30,18 @@ function syncAllHooks(options = {}) {
       return syncMiMoCodePlugin();
     });
   }
+  if (options.syncCodex === true) {
+    run("codex", () => {
+      const path = require("node:path");
+      const root = process.env.CODEX_HOME || path.join(require("node:os").homedir(), ".codex");
+      if (!require("node:fs").existsSync(root)) return { skipped: true };
+      return require("./command-hooks").syncCommandHooks(path.join(root, "hooks.json"),
+        "codex-permission-notice.js", ["PermissionRequest"], {});
+    });
+  }
+  if (options.syncDevin === true) {
+    run("devin", () => require("./devin-install").syncDevinHooks());
+  }
   if (options.syncWorkBuddy === true) {
     run("workbuddy", () => require("./workbuddy-install.js").syncWorkBuddyHooks());
   }

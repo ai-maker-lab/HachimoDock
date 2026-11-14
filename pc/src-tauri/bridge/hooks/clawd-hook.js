@@ -29,6 +29,8 @@ const EVENT_TO_STATE = {
   WorktreeCreate: "carrying",
 };
 
+// Devin imports Claude hooks too; its own observer reports the actual source.
+if (process.env.DEVIN_PROJECT_DIR) process.exit(0);
 const event = process.argv[2];
 const state = EVENT_TO_STATE[event];
 if (!state) process.exit(0);
