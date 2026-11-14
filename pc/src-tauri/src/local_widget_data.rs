@@ -146,20 +146,60 @@ impl Sampler {
         snapshot(rows, "ok", "")
     }
 }
+// The bridge atomically replaces one summary per agent. Its per-session copies
+// can describe older turns, so only read the canonical summaries here.
+fn agent_activity(directory: &std::path::Path, now_ms: u64) -> Vec<DataRow> {
+    let mut rows = Vec::new();
+    for (id, name) in [
+        ("codex", "Codex"), ("devin", "Devin"), ("claude-code", "Claude Code"),
+        ("deepseek-harness", "DeepSeek Harness"), ("workbuddy", "WorkBuddy"),
+        ("openclaw", "OpenClaw"), ("mimocode", "MiMoCode"),
+    ] {
+        let Ok(bytes) = std::fs::read(directory.join(format!("{id}.json"))) else { continue };
+        let Ok(event) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
+        let Some(ts) = event["tsMs"].as_u64() else { continue };
+        if ts == 0 || ts > now_ms || now_ms - ts > crate::USB_STATE_MAX_AGE_MS { continue; }
+        let (priority, state) = match event["state"].as_str() {
+            Some("waiting_user") => (0, "等你处理"),
+            Some("error") => (1, "执行失败"),
+            Some("working" | "tool_running" | "thinking") => (2, "进行中"),
+            Some("speaking") => (2, "回复中"),
+            Some("done" | "reply_complete") => (3, "已完成"),
+            Some("idle") => (4, "空闲"),
+            _ => continue,
+        };
+        let age = (now_ms - ts) / 60_000;
+        let detail = if age == 0 { "刚刚上报".into() } else { format!("{age} 分钟前上报") };
+        rows.push((priority, std::cmp::Reverse(ts),
+            row(&format!("agent-{id}"), name, state.into(), detail, "最近一次状态")));
+    }
+    rows.sort_by_key(|(priority, time, _)| (*priority, *time));
+    rows.into_iter().map(|(_, _, r)| r).collect()
+}
+
 pub fn start(usb: crate::usb_serial::UsbSerialManager) {
     // Sampling runs away from async audio/network workers and never enumerates processes.
     std::thread::Builder::new()
         .name("local-widget-sampler".into())
         .spawn(move || {
             let mut sampler = Sampler::new();
+            let agent_dir = std::env::var_os("STATUS_BRIDGE_LOCAL_STATE_DIR")
+                .filter(|path| !path.is_empty()).map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::temp_dir().join("pet-manager-bridge-state"));
             let mut location_sent: Option<(Instant, String)> = None;
             loop {
                 std::thread::sleep(Duration::from_secs(2));
-                let sample = sampler.sample();
+                let mut sample = sampler.sample();
+                let agents = agent_activity(&agent_dir, crate::current_timestamp_ms());
+                if agents.is_empty() {
+                    sample.rows.push(row("agent-status", "Agent", "暂无近期上报".into(), String::new(), ""));
+                } else {
+                    sample.rows.extend(agents);
+                }
                 if let Ok(mut data) = cache().lock() {
                     *data = Some((Instant::now(), sample.clone()));
                 }
-                let status = usb.status();
+                let status = usb.link_status();
                 if !status.connected
                     || status
                         .capabilities
@@ -206,6 +246,22 @@ mod tests {
         assert_eq!(rate(2097152, 2.0), "1.0 MiB/s");
         assert_eq!(rate(1, 0.0), "—");
     }
+    #[test]
+    fn simultaneous_agents_show_recent_reports_and_expire_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 2_000_000;
+        for (id, state, ts) in [("codex", "working", now), ("devin", "waiting_user", now-100),
+            ("claude-code", "working", now-crate::USB_STATE_MAX_AGE_MS-1),
+            ("devin--session-old", "done", now), ("openclaw", "idle", now-120_000)] {
+            std::fs::write(dir.path().join(format!("{id}.json")),
+                serde_json::json!({"state":state,"tsMs":ts}).to_string()).unwrap();
+        }
+        let rows = agent_activity(dir.path(), now);
+        let states: Vec<_> = rows.iter().map(|r| (r.id.as_str(), r.value.as_str())).collect();
+        assert_eq!(states, [("agent-devin","等你处理"), ("agent-codex","进行中"), ("agent-openclaw","空闲")]);
+        assert_eq!(rows[2].detail, "2 分钟前上报");
+    }
+
     #[test]
     fn local_sample_is_bounded_and_contains_no_identity() {
         let result = Sampler::new().sample();

@@ -90,7 +90,7 @@ fn prepare_connected_news(h:&Host,board:&str)->Result<Value,&'static str>{
     if inventory["complete"]!=true{return Err("inventory_incomplete");}
     let mut unresolved=false;
     for item in inventory["items"].as_array().into_iter().flatten(){
-        let live=h.usb.status();if !live.connected||live.board_device_id!=board{return Err("connection_changed");}
+        let live=h.usb.link_status();if !live.connected||live.board_device_id!=board{return Err("connection_changed");}
         let Some(id)=item["id"].as_str().filter(|id|crate::component_extension::valid_id(id))else{continue;};
         match crate::component_service_settings::enabled(&h.root.join(id)){
             Ok(false)=>continue,Err(_)=>{unresolved=true;continue;},Ok(true)=>{}
@@ -107,7 +107,7 @@ fn prepare_connected_news(h:&Host,board:&str)->Result<Value,&'static str>{
     if unresolved{Err("library_not_ready")}else{Ok(inventory)}
 }
 pub(crate) fn news_epoch_active(id:&str,generation:u64)->bool{
-    HOST.get().is_some_and(|h|{let board=h.usb.status();let e=h.device_epoch.lock().unwrap();board.connected&&e.board==board.board_device_id&&e.id==id&&e.accepts(generation)})
+    HOST.get().is_some_and(|h|{let board=h.usb.link_status();let e=h.device_epoch.lock().unwrap();board.connected&&e.board==board.board_device_id&&e.id==id&&e.accepts(generation)})
 }
 pub fn configure(root:PathBuf,usb:crate::usb_serial::UsbSerialManager,app:tauri::AppHandle){
     crate::component_news::configure_cache(root.join("component-apps"));
@@ -132,7 +132,7 @@ pub fn configure(root:PathBuf,usb:crate::usb_serial::UsbSerialManager,app:tauri:
                     }}scanned=std::time::Instant::now();
                 }
                 for(id,d)in &declared{if crate::component_service_settings::enabled(&h.root.join(id)).unwrap_or(false){let _=crate::component_news::prefetch(id,d);}else{crate::component_news::disable(id);}}
-                crate::component_news::prepare_audio(&h.usb.status().board_device_id);
+                crate::component_news::prepare_audio(&h.usb.link_status().board_device_id);
             }
             std::thread::sleep(std::time::Duration::from_secs(15));
         }
@@ -141,14 +141,14 @@ pub fn configure(root:PathBuf,usb:crate::usb_serial::UsbSerialManager,app:tauri:
         let mut preparation=ConnectionPreparation::default();
         let clock=std::time::Instant::now();
         loop {
-            let h=HOST.get().expect("configured host");let board=h.usb.status();
+            let h=HOST.get().expect("configured host");let board=h.usb.link_status();
             let now=clock.elapsed().as_secs();
             let connected=if board.connected{board.board_device_id.as_str()}else{""};
             {
                 let mut epoch=h.device_epoch.lock().unwrap();
                 // Re-read after taking ownership lock: an old connection poll
                 // must not revoke a newer device entry received in the meantime.
-                let current=h.usb.status();let current_board=if current.connected{current.board_device_id.as_str()}else{""};
+                let current=h.usb.link_status();let current_board=if current.connected{current.board_device_id.as_str()}else{""};
                 if let Some(owner)=epoch.disconnect_unless(current_board){h.events.cancel(owner);crate::service_bridge::native::detach_device(&epoch.id);}
             }
             if preparation.observe(connected,now){
@@ -605,7 +605,7 @@ fn runtime_acceptance_host(){
     }
 }
 pub fn device_event(event:&Value){
-    let Some(h)=HOST.get()else{return;};let board=h.usb.status();
+    let Some(h)=HOST.get()else{return;};let board=h.usb.link_status();
     if !board.connected||event["boardDeviceId"]!=board.board_device_id{return;}
     let Some(id)=event["componentId"].as_str().filter(|s|crate::component_extension::valid_id(s))else{return;};
     let Some(instance)=event["instance"].as_str().filter(|s|!s.is_empty()&&s.len()<=31&&s.bytes().all(|b|b.is_ascii_hexdigit()||b==b'-'))else{return;};
@@ -640,7 +640,7 @@ pub fn device_event(event:&Value){
     }
 }
 fn process_event(event:Value,lease:Lease){
-    let Some(h)=HOST.get()else{return;};let board=h.usb.status();
+    let Some(h)=HOST.get()else{return;};let board=h.usb.link_status();
     if !board.connected||event["boardDeviceId"]!=board.board_device_id||!h.events.is_current(lease){return;}
     let Some(owner)=h.events.resource_owner(lease)else{return;};
     let _resource_scope=crate::component_runtime_lifecycle::enter_owner(&owner);
@@ -931,7 +931,7 @@ pub(crate) fn publish_fetch(id:&str,generation:u64,result:&Value){
  let Some(h)=HOST.get()else{return;};
  let epoch=h.device_epoch.lock().unwrap();
  if epoch.id!=id||!epoch.accepts(generation){return;}
- let board=h.usb.status();if !board.connected||board.board_device_id!=epoch.board{return;}
+ let board=h.usb.link_status();if !board.connected||board.board_device_id!=epoch.board{return;}
  let snapshot=json!({"componentId":id,"instance":epoch.instance,"sequence":epoch.sequence,"values":result["values"],"variables":result["variables"],"ui":result["ui"]});
  let _=h.usb.try_send_app_snapshot(&board.board_device_id,&snapshot);
  if result["data"].is_object(){let _=h.usb.send("widget/data",&result["data"]);}
@@ -940,7 +940,7 @@ pub(crate) fn publish_fetch(id:&str,generation:u64,result:&Value){
 /// Device's read-only data.refresh request. Reader admission is bounded; file
 /// validation and USB output happen on a worker, with no retry or new URL grant.
 pub(crate) fn data_refresh_event(event:&Value){
-    let Some(h)=HOST.get()else{return;};let board=h.usb.status();
+    let Some(h)=HOST.get()else{return;};let board=h.usb.link_status();
     if !board.connected||event["boardDeviceId"]!=board.board_device_id{return;}
     let Some(id)=event["componentId"].as_str().filter(|id|crate::component_extension::valid_id(id))else{return;};
     let Some(source)=event["source"].as_str().filter(|s|*s=="computer.status"||*s=="todos.upcoming"||s.starts_with("fetch.")&&s.len()<=47)else{return;};
@@ -957,7 +957,7 @@ pub(crate) fn data_refresh_event(event:&Value){
         if !entry.valid{return;}
         let Some(runtime)=entry.app_runtime else{return;};
         if runtime["data"]["source"]!=source||runtime["data"]["refresh_action"]!="data.refresh"{return;}
-        let current=h.usb.status();if !current.connected||current.board_device_id!=expected{return;}
+        let current=h.usb.link_status();if !current.connected||current.board_device_id!=expected{return;}
         if source.starts_with("fetch."){
             let generation={let e=h.device_epoch.lock().unwrap();if e.id!=id||!e.visible||e.board!=expected{return;}e.owner.map(|o|o.generation())};
             if let Some(generation)=generation{let _=request(&id,json!({"operation":"status","_deviceEpoch":generation}));}

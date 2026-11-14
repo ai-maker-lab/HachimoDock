@@ -1,6 +1,6 @@
 /**
  * [Input] DeviceSetup.jsx and App.jsx first-run routing sources.
- * [Output] Static Node coverage for USB-only automatic discovery, binding persistence, shared-context refresh/snapshot consumption, manual rescan, and removal of the legacy Ethernet/Wi-Fi wizard.
+ * [Output] Static Node coverage for USB and BLE connection status, binding persistence, shared-context refresh/snapshot consumption, manual rescan, and removal of the legacy Ethernet/Wi-Fi wizard.
  * [Pos] test node in pc/src
  * [Sync] If this file changes, update `pc/src/.folder.md`.
  */
@@ -17,12 +17,12 @@ function readSource(fileName) {
   return readFileSync(join(srcDir, fileName), "utf8");
 }
 
-test("first-run setup is USB-only and contains no legacy network wizard", () => {
+test("first-run setup supports local devices and contains no legacy network wizard", () => {
   const setup = readSource("DeviceSetup.jsx");
   const app = readSource("App.jsx");
   const combined = `${setup}\n${app}`;
 
-  assert.match(setup, /USB 自动连接/);
+  assert.match(setup, /设备自动连接/);
   assert.match(setup, /连接你的桌宠/);
   assert.doesNotMatch(combined, /插网线绑定|Wi-Fi 绑定|Wi‑Fi 绑定|网络绑定|验证通信|确认形象/);
   assert.doesNotMatch(
@@ -48,7 +48,8 @@ test("verified USB identity is persisted before entering the dashboard", () => {
   assert.match(source, /invoke\("get_or_create_desktop_device_id"\)/);
   assert.match(source, /invoke\("save_device_binding"/);
   assert.match(source, /boardDeviceId: status\.boardDeviceId/);
-  assert.match(source, /wifiSsid: `USB\(/);
+  assert.match(source, /transport: status\?\.transport === "ble" \? "ble" : "usb"/);
+  assert.match(source, /wifiSsid: status\.transport === "ble" \? "BLE" : `USB\(/);
   assert.match(source, /await finish\(\)/);
 });
 

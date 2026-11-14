@@ -550,7 +550,7 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
     if (!appearance.personaVoice?.configured) {
       throw new Error(`「${appearance.name}」还没有设置人设与声音，先在画廊卡片右下角设置`);
     }
-    if (!boardDeviceId) throw new Error("设备未通过 USB 连接");
+    if (!boardDeviceId) throw new Error("设备未连接");
     realtimeReconcilerRef.current?.invalidate();
     const status = await invoke("realtime_chat_start", { input: buildRealtimeChatStartInput(appearance, boardDeviceId) });
     realtimeReconcilerRef.current?.invalidate();

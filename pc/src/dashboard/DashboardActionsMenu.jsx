@@ -80,7 +80,7 @@ export default function DashboardActionsMenu({
               className="dashboard-actions-menu__item"
               role="menuitem"
               onClick={dispatch(onDeviceReturnHome)}
-              title="负一屏物理按键切不回主屏时，通过 USB 强制把设备 .screen-page 切到 main"
+              title="负一屏物理按键切不回主屏时，强制把设备 .screen-page 切到 main"
             >
               <ArrowUpLeft size={14} />
               ⤴ 设备返回主屏

@@ -614,7 +614,7 @@ test("Button-selected conversations are temporary and bound to status and input 
   assert.match(rust, /fn resolve_usb_inject_target/);
   assert.match(rust, /"sessionId": session_id/);
   assert.match(rust, /send_session_current_for_connection/);
-  assert.match(readRepoFile("src-tauri", "src", "usb_serial.rs"), /self.send_inner\("session\/current", payload, true, Some\(board\), Some\(generation\), None\)/);
+  assert.match(readRepoFile("src-tauri", "src", "usb_serial.rs"), /self.send_link_bound\(board, generation, "session\/current", payload\)/);
   assert.match(rust, /"sessions": device_sessions/);
   assert.match(rust, /"content": content/);
   assert.match(rust, /device_title: Option<String>/);
@@ -838,7 +838,7 @@ test("voice action injection avoids stale legacy bridge runtimes", () => {
   assert.doesNotMatch(rust, /let ports = \[DEFAULT_BRIDGE_PORT,\s*LEGACY_BRIDGE_PORT\];/);
 });
 
-test("channel switching is exact-board USB-only with no Bridge MQTT fallback", () => {
+test("channel switching uses the connected USB or BLE board with no Bridge MQTT fallback", () => {
   const rust = readRepoFile("src-tauri", "src", "lib.rs");
   const match = rust.match(
     /async fn dispatch_remote_cli_binding[\s\S]*?\/\/ ── Desktop device ID ──/,
@@ -846,6 +846,7 @@ test("channel switching is exact-board USB-only with no Bridge MQTT fallback", (
   assert.ok(match, "expected dispatch_remote_cli_binding block");
   const dispatch = match[0];
 
+  assert.match(dispatch, /usb_manager\.link_status\(\)/);
   assert.match(dispatch, /if !usb_status\.connected/);
   assert.match(dispatch, /requested_board_device_id != board_device_id/);
   assert.match(dispatch, /follow_connection_generation\(/);
@@ -855,9 +856,23 @@ test("channel switching is exact-board USB-only with no Bridge MQTT fallback", (
   assert.match(dispatch, /"control\/remote-cli-binding"/);
   assert.doesNotMatch(dispatch, /publish-remote-binding/);
   assert.doesNotMatch(dispatch, /mqtt_sent/);
+
+  const binding = rust.split("fn set_p4_session_binding_blocking(")[1].split('#[tauri::command]')[0];
+  assert.match(binding, /let status = usb_manager\.link_status\(\);\s*if !status\.connected \|\| status\.board_device_id != board_device_id/);
+  assert.match(binding, /send_session_current_for_connection\(\s*&board_device_id,\s*connection_id/);
 });
 
 // ---- PORTED: JS-side in orchestrator; panel-side in BoardButtonPanel; Rust stays ----
+
+test("BLE enables manual button mapping sync and keeps microphone setup on USB", () => {
+  const dashboard = readSource("DeviceDashboard.jsx");
+  const panel = readSource("dashboard/BoardButtonPanel.jsx");
+  assert.match(dashboard, /deviceConnected=\{usb\.connected\}/);
+  assert.match(panel, /disabled=\{voiceConfigOtaState\?\.pending \|\| !deviceConnected\}/);
+  const sync = dashboard.slice(dashboard.indexOf("const applyVoiceConfigOverUsb"), dashboard.indexOf("const updateVoiceTrigger"));
+  assert.doesNotMatch(sync.slice(0, sync.indexOf("await dispatchBoardButtonConfig")), /usb\.transport === "ble"/);
+  assert.match(sync, /ack\.transport !== "ble" && isP4Runtime && requestedRuntimeVoiceEnabled/);
+});
 
 test("board button config sends twelve visible gestures as sixteen internal bindings", () => {
   const source = readSource("DeviceDashboard.jsx");
@@ -908,7 +923,7 @@ test("board button config sends twelve visible gestures as sixteen internal bind
   assert.match(rust, /"button_config"/);
   assert.match(rust, /"request_id"/);
   assert.match(rust, /"bindings"/);
-  assert.match(rust, /usb_manager\.send_to_board\(expected_board_device_id, topic, command_payload\)/);
+  assert.match(rust, /usb_manager\.send_link_bound\(expected_board_device_id, generation, topic, command_payload\)/);
   assert.match(rust, /"input\/config"/);
   assert.match(rust, /"input\/config-ack"/);
   assert.match(rust, /value: Option<String>/);

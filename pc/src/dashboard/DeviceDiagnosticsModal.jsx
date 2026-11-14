@@ -118,7 +118,7 @@ export default function DeviceDiagnosticsModal({
     setError("");
     try {
       const result = await invoke("usb_reboot_device", { expectedBoardDeviceId });
-      setNotice(result?.message || "设备正在重启，USB 会短暂断开。");
+      setNotice(result?.message || "设备正在重启，连接会短暂断开。");
       setConfirmAction("");
     } catch (rebootError) {
       setError(typeof rebootError === "string" ? rebootError : String(rebootError));

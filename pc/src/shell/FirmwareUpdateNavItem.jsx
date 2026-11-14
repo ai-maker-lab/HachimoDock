@@ -10,6 +10,7 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { Download, LoaderCircle } from "lucide-react";
 import { firmwareUpdateDisposition } from "../lib/firmware-version.js";
@@ -75,11 +76,15 @@ export default function FirmwareUpdateNavItem({ usb = {} }) {
     : "unknown";
 
   const startUpdate = useCallback(async () => {
-    if (pending || disposition !== "update") return;
+    if (pending || disposition !== "update" || usb.transport === "ble") return;
     setPending(true);
     setPercent(0);
     setStage("begin");
     try {
+      if (usb.capabilities?.ble && !(await confirm(
+        "客户端内置的是上游有线固件。继续升级后，这块板子需要 USB 数据线才能连接。",
+        { title: "换为有线固件？", kind: "warning", okLabel: "安装有线固件", cancelLabel: "保留当前固件" },
+      ))) return;
       const result = await invoke("usb_update_bundled_firmware", {
         expectedBoardDeviceId: usb.boardDeviceId,
       });
@@ -99,7 +104,7 @@ export default function FirmwareUpdateNavItem({ usb = {} }) {
     } finally {
       setPending(false);
     }
-  }, [bundledFirmware?.version, disposition, pending, push, usb.boardDeviceId]);
+  }, [bundledFirmware?.version, disposition, pending, push, usb.boardDeviceId, usb.transport, usb.capabilities?.ble]);
 
   return (
     <div
@@ -116,7 +121,8 @@ export default function FirmwareUpdateNavItem({ usb = {} }) {
           type="button"
           className="sidebar-firmware-update__action"
           onClick={startUpdate}
-          disabled={pending}
+          disabled={pending || usb.transport === "ble"}
+          title={usb.transport === "ble" ? "需要 USB 连接" : undefined}
         >
           {pending ? `${stageLabel}${stage === "upload" ? ` ${percent}%` : "…"}` : "更新"}
         </button>

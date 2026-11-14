@@ -357,7 +357,16 @@ impl UsbSerialManager {
         self.with_appearance_attempt_bound(board,None,work)
     }
     pub(super) fn with_appearance_attempt_bound<T>(&self,board:&str,expected:Option<(u64,&str)>,work:impl FnOnce()->Result<T,String>)->Result<T,String>{
-        let (generation,cancel)={
+        let ble_link = self.link_status();
+        let is_ble = ble_link.connected && ble_link.transport == "ble";
+        let (generation,cancel)=if is_ble {
+            let (status, generation) = self.connected_link_snapshot(board)?;
+            if status.transport != "ble" || expected.is_some_and(|(g,boot)| g != generation || boot != status.boot_id) {
+                return Err("appearance_recovery_connection_changed".into());
+            }
+            self.ensure_wire_available(&status.port_name, Some(board))?;
+            (generation, Arc::new(AtomicBool::new(false)))
+        } else {
             let (_lease,connection)=self.inbound_owner.connection(&self.connection)?;
             let c=connection.as_ref().ok_or("appearance connection missing")?;
             if !c.connected||c.board_device_id!=board||c.cancel_reader.load(Ordering::Acquire)
@@ -382,6 +391,13 @@ impl UsbSerialManager {
             Ok(value)=>{
                 // Retirement cannot linearize between this final admission and
                 // durable intent completion. Never clear unknown on a stale object.
+                if is_ble {
+                    return self.with_current_ble_board(board, attempt.generation, || {
+                        attempt.check(board, attempt.generation)?;
+                        if attempt.submitted.load(Ordering::Acquire) { attempt.journal.complete(&attempt)?; }
+                        Ok(value)
+                    });
+                }
                 let _admission=self.appearance_admission(&attempt)?;
                 if attempt.submitted.load(Ordering::Acquire){attempt.journal.complete(&attempt)?;}
                 Ok(value)

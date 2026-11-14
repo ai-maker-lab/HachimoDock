@@ -5,6 +5,7 @@ import { Disc3, Play, Pause, SkipBack, SkipForward, ListMusic, Volume2, Search, 
 import { EMPTY_MUSIC, MUSIC_STATES, musicTime, musicProgress } from "./music-player-model.js";
 import { MUSIC_SOURCE_URL, openMusicSourceLink } from "./music-source-link.js";
 import "./music-player.css";
+import { useDeviceContext } from "../shell/DeviceContext.jsx";
 
 function useMusic(active = true) {
   const [snapshot, setSnapshot] = useState(EMPTY_MUSIC);
@@ -39,6 +40,7 @@ export function MusicScreenPreview({ active = false }) {
   return <MusicScreen snapshot={snapshot} compact />;
 }
 export default function MusicPlayer() {
+  const { usb } = useDeviceContext();
   const [snapshot, setSnapshot] = useMusic();
   const [query, setQuery] = useState(""), [results, setResults] = useState([]);
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [searched, setSearched] = useState(false);
@@ -46,6 +48,7 @@ export default function MusicPlayer() {
   const mounted = useRef(true), searchEpoch = useRef(0);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   async function command(input) {
+    if (usb.connected && usb.transport === "ble") { setError("需要 USB 连接"); return; }
     setError("");
     try { const reply = await invoke("music_player_request", { input }); if (mounted.current) setSnapshot(reply.accepted ? reply.state : reply); }
     catch (e) { if (mounted.current) setError(String(e)); }
@@ -58,6 +61,7 @@ export default function MusicPlayer() {
     finally { if (mounted.current && epoch === searchEpoch.current) setBusy(false); }
   }
   async function importFiles() {
+    if (usb.connected && usb.transport === "ble") { setError("需要 USB 连接"); return; }
     setError("");
     try { const paths = await open({ multiple: true, directory: false, filters: [{ name: "音频", extensions: ["mp3", "m4a", "wav", "flac", "ogg", "aac"] }] }); if (paths) { const next = await invoke("music_player_import", { paths: Array.isArray(paths) ? paths : [paths] }); if (mounted.current) setSnapshot(next); } }
     catch (e) { if (mounted.current) setError(String(e)); }

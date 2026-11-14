@@ -42,6 +42,7 @@ export const FIXED_AGENT_OPTIONS = [
     label: "WorkBuddy",
     detail: "WorkBuddy 状态与气泡跟随；向当前可见对话追加语音草稿",
   },
+  { id: "devin", label: "Devin", detail: "Devin CLI 本地会话与任务状态" },
 ];
 
 export function loadEnabledAgents() {

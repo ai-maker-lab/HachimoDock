@@ -61,7 +61,8 @@ test("USB widget OTA checksum-verifies and retries every file chunk", () => {
     usbSerialSource,
     /register_widget_ack_waiter\(&transfer_id, "chunk", Some\(rel\), Some\(chunk_index\)\)/,
   );
-  assert.match(usbSerialSource, /chunk_rx\.recv_timeout\(WIDGET_CHUNK_ACK_TIMEOUT\)/);
+  assert.match(usbSerialSource, /let chunk_timeout = if ble \{ Duration::from_secs\(5\) \} else \{ WIDGET_CHUNK_ACK_TIMEOUT \}/);
+  assert.match(usbSerialSource, /chunk_rx\.recv_timeout\(chunk_timeout\)/);
   assert.match(usbSerialSource, /"decodedSize": decoded_size/);
   assert.match(usbSerialSource, /"checksum": checksum/);
   assert.match(usbSerialSource, /self\.send\("widget\/chunk", &payload\)/);

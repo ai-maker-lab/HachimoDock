@@ -279,7 +279,7 @@ export default function ComponentPreviewModal({
                   <p><b>暂时无法安装。</b>{installBlockedReason}</p>
                 )}
                 {!deviceConnected && (
-                  <p>设备离线，需要 USB 直连或上线后才能同步</p>
+                  <p>设备离线，连接设备后才能同步</p>
                 )}
               </div>
             </div>

@@ -139,6 +139,11 @@ test("USB status normalization keeps P4 capability metadata", () => {
 });
 
 test("USB status equality suppresses unchanged snapshots but preserves meaningful changes", () => {
+  test("normalizeUsbStatusPayload keeps transport only when connected", () => {
+    assert.equal(normalizeUsbStatusPayload({ connected: true, transport: "ble" }).transport, "ble");
+    assert.equal(normalizeUsbStatusPayload({ connected: true }).transport, "usb");
+    assert.equal(normalizeUsbStatusPayload({ connected: false, transport: "ble" }).transport, "");
+  });
   const first = normalizeUsbStatusPayload({
     connected: true,
     portName: "COM15",

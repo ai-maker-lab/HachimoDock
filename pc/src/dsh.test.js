@@ -25,7 +25,7 @@ test("Rust routes DeepSeek voice through the current visible composer, not bound
   const rust = read("../src-tauri/src/lib.rs");
 
   assert.match(rust, /detect_dsh\(\),/);
-  assert.match(rust, /KNOWN_USB_STATE_SOURCES: \[&str; 6\]/);
+  assert.match(rust, /KNOWN_USB_STATE_SOURCES: \[&str; 7\]/);
   assert.match(
     rust,
     /"deepseek-harness" \| "deepseek" \| "dsh" => Some\("deepseek-harness"\.to_string\(\)\)/,

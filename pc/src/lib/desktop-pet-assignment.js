@@ -17,7 +17,7 @@ export const ACTIVE_APPEARANCE_KEY = "pet-manager:active-appearance-id";
 export const APPEARANCE_CHANGE_USB_REQUIRED_MESSAGE =
   "当前渠道配置的形象与设备端当前形象不一致，请先连接 USB 线后再切换渠道和形象。";
 export const CHANNEL_SWITCH_DEVICE_REQUIRED_MESSAGE =
-  "切换跟随需要 USB 连接，请连接设备后重试。";
+  "请先通过 USB 或蓝牙连接设备，再切换跟随。";
 export const APPEARANCE_SYNC_CANCELLED_MESSAGE = "形象素材传输已中断";
 export const APPEARANCE_CONFIRMATION_REQUIRED_MESSAGE =
   "暂时无法确认本次切换结果，请核对设备当前状态；请勿重复提交。";
@@ -156,6 +156,8 @@ export async function applyDesktopPetAssignment({
   } catch {
     usbStatus = null;
   }
+  const bleAppearance = usbStatus?.transport === "ble" && usbStatus.capabilities?.bleAppearanceChunks === true;
+  if (appearanceChanged && usbStatus?.connected && usbStatus.transport === "ble" && !bleAppearance) throw new Error("需要 USB 连接");
   const shouldSyncOverUsb = Boolean(usbStatus?.connected);
   const targetBoardDeviceId = boardDeviceId || usbStatus?.boardDeviceId || "";
 
@@ -175,7 +177,7 @@ export async function applyDesktopPetAssignment({
   // unresolved transfer without resending it; only then begin this click's
   // normal native sync, which creates its own fresh mutation Attempt UUID.
   onProgress?.({ stage: "confirming", text: "正在确认…", indeterminate: true, followOnly: true });
-  await reconcileDesktopPetAppearance({ invoke, boardDeviceId: targetBoardDeviceId, usbScope: usbStatus,
+  if (usbStatus.transport !== "ble" || (appearanceChanged && bleAppearance)) await reconcileDesktopPetAppearance({ invoke, boardDeviceId: targetBoardDeviceId, usbScope: usbStatus,
     onProgress, isCurrent: () => isCurrent(followIntentId) });
   requireCurrent();
   const confirmedUsb = await invoke("usb_get_status");
@@ -205,7 +207,7 @@ export async function applyDesktopPetAssignment({
   // fingerprint/cache selection and metadata ACK; never force an upload or use a
   // local appearance ID as evidence. Any new unknown stops this intent;
   // neither observation nor mutation is automatically repeated from catch.
-  {
+  if (confirmedUsb.transport !== "ble" || (appearanceChanged && bleAppearance)) {
     const unlisten = listen
       ? await listen("usb-sync-progress", (event) => {
         if (!isCurrent(followIntentId)) return;
@@ -226,7 +228,7 @@ export async function applyDesktopPetAssignment({
           : 0;
         onProgress?.({
           type: "info",
-          text: `USB 传输中… ${currentFile}/${totalFiles} 个素材 (${formatBytes(bytesSent)}/${formatBytes(bytesTotal)}) ${percent}%`,
+          text: `${bleAppearance ? "蓝牙" : "USB"} 传输中… ${currentFile}/${totalFiles} 个素材 (${formatBytes(bytesSent)}/${formatBytes(bytesTotal)}) ${percent}%`,
           currentFile,
           totalFiles,
           bytesSent,
@@ -246,7 +248,7 @@ export async function applyDesktopPetAssignment({
       }
       notice = result?.reusedSlot
         ? `已确认「${appearance.name}」从设备缓存切换，并提交跟随 ${channelLabel}，无需重新传输素材。`
-        : `已确认「${appearance.name}」素材并提交跟随 ${channelLabel}，USB 同步 ${result?.fileCount || 0} 个素材 (${formatBytes(result?.byteCount || 0)})`;
+        : `已确认「${appearance.name}」素材并提交跟随 ${channelLabel}，${bleAppearance ? "蓝牙" : "USB"} 同步 ${result?.fileCount || 0} 个素材 (${formatBytes(result?.byteCount || 0)})`;
     } catch (err) {
       const detail = err?.message || String(err);
       const unknown = detail.startsWith("APPEARANCE_RESULT_UNKNOWN:");

@@ -16,8 +16,8 @@ export const dependencyLicenseResources = Object.freeze([
   ['MPL-2.0.txt', '3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04'],
   ['DEPENDENCY-LICENSE-NOTICE.md', '357b4e159c983730eb6fda2b312226f52b511793a223189c8e991f79396c6782'],
   ['Node-26.7.0-LICENSE.txt', 'e991d81497a85bb24fc6bffae0a3637a6accd6c6bc5ce1f2c5698bd555cf9d49'],
-  ['DESKTOP-RUNTIME-LICENSES.txt', 'b9a5b7bddeccc0525c50d44a60d2a3b48bc59195de0daff3c5070d4366f6d559'],
-  ['DESKTOP-RUNTIME-DEPENDENCIES.json', '82095ad81d0499fd40eae9526b16b8b1572721317f39b028de74da43840e6c7b'],
+  ['DESKTOP-RUNTIME-LICENSES.txt', '5374d3387818170f6c1565e3acc67de0da2e2c8a121f809e94acd929d8abffd3'],
+  ['DESKTOP-RUNTIME-DEPENDENCIES.json', '59efd54502bb06cba2f38b587d72583928e55517273eea50e5066a7d88210ae7'],
 ].map(([name, sha256]) => Object.freeze({ name, sha256 })));
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');

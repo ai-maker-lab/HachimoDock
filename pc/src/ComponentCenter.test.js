@@ -1051,3 +1051,11 @@ test("component install keeps its button map package-owned without replacing dev
   );
   assert.doesNotMatch(removeBody, /reset_input_config/);
 });
+
+
+test("component transfers accept BLE and use connection-neutral progress wording", () => {
+  const source = readFileSync(new URL("./ComponentCenter.jsx", import.meta.url), "utf8");
+  assert.ok(!source.includes('transport === "ble"'));
+  assert.ok(source.includes("安装到设备"));
+  assert.ok(source.includes("请保持设备连接"));
+});

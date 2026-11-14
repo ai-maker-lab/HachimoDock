@@ -395,3 +395,42 @@ test("video capacity refusal is explicit and cannot commit a follow switch",asyn
  await assert.rejects(f.run(),e=>e.code==='appearance-capacity-exceeded'&&e.outcome==='not_submitted'&&e.message.includes('可用空间'));
  assert.equal(f.count('usb_sync_appearance'),1);noCommit(f);
 });
+
+test("older BLE firmware rejects appearance changes before profile or asset mutations", async () => {
+
+  const calls = [];
+  await assert.rejects(applyDesktopPetAssignment({
+    invoke: async (command) => {
+      calls.push(command);
+      return { connected: true, transport: "ble" };
+    },
+    agentAppearanceMap: {},
+    agentId: "codex",
+    appearance: { id: "new", name: "新形象" },
+    agentOptions: [],
+    boardDeviceId: "board-1",
+    currentAppearanceId: "old",
+  }), /需要 USB 连接/);
+  assert.deepEqual(calls, ["usb_get_status"]);
+});
+
+
+test("BLE follow switch keeps the current appearance and exact connection without USB asset calls", async t => {
+  const f = fixture(t, {statuses:[{...USB, transport:"ble"}]});
+  await f.run({currentAppearanceId:"new-avatar"});
+  assert.equal(f.count("usb_reconcile_appearance_unknown"),0);
+  assert.equal(f.count("usb_sync_appearance"),0);
+  assert.equal(f.count("dispatch_remote_cli_binding"),1);
+  const input=f.calls.find(x=>x.command==="dispatch_remote_cli_binding").args.input;
+  assert.equal(input.expectedConnectionId,USB.connectionId);
+  assert.equal(input.expectedBootId,USB.bootId);
+  assert.equal(f.count("save_bridge_profile"),1);
+});
+
+test("BLE appearance changes on compatible firmware run the existing sync before committing the follow", async t => {
+  const f = fixture(t, {statuses:[{...USB, transport:"ble", capabilities:{...USB.capabilities, bleAppearanceChunks:true}}]});
+  await f.run();
+  assert.equal(f.count("usb_sync_appearance"),1);
+  const commands = f.calls.map(call => call.command);
+  assert.ok(commands.indexOf("usb_sync_appearance") < commands.indexOf("dispatch_remote_cli_binding"));
+});

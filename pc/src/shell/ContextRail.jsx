@@ -38,7 +38,7 @@ export default function ContextRail({
   }
 
   const connectionIcon = usb.connected ? <Usb size={12} /> : deviceOnline ? <Wifi size={12} /> : <WifiOff size={12} />;
-  const connectionLabel = usb.connected ? "USB" : deviceOnline ? "在线" : "离线";
+  const connectionLabel = usb.connected ? `已连接（${usb.transport === "ble" ? "蓝牙" : "USB"}）` : deviceOnline ? "在线" : "离线";
 
   return (
     <div className="context-rail">

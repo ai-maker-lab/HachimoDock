@@ -107,6 +107,7 @@ async function readFileAsBytes(file) {
 export default function AppearanceGallery({ binding, onEnterWizard, onOpenDetail, onOpenApiSettings }) {
   const {
     currentDisplay,
+    usb,
     deviceConnected,
     applyDesktopPet,
     refreshAppearances,
@@ -335,6 +336,10 @@ export default function AppearanceGallery({ binding, onEnterWizard, onOpenDetail
     const deleteFromPc = mode === "pc-and-device";
     const isActiveOnDevice = deleteTarget.id === activeAppearanceId;
     if (!deleteFromPc && !isActiveOnDevice) return;
+    if (isActiveOnDevice && usb?.connected && usb.transport === "ble" && !usb.capabilities?.bleAppearanceChunks) {
+      setDeleteError("需要 USB 连接");
+      return;
+    }
     if (isActiveOnDevice && !deviceConnected) {
       setDeleteError("请先通过 USB 连接当前设备，再删除设备端正在使用的形象。");
       return;
@@ -394,6 +399,7 @@ export default function AppearanceGallery({ binding, onEnterWizard, onOpenDetail
     deletePending,
     deleteTarget,
     deviceConnected,
+    usb,
     push,
     refreshAppearances,
   ]);

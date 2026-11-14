@@ -95,6 +95,8 @@ export default function FirmwareUpdateModal({
     setError("");
     setProgress({ ...INITIAL_PROGRESS, stage: "begin" });
     try {
+      const status = await invoke("usb_get_status");
+      if (status?.connected && status.transport === "ble") throw new Error("需要 USB 连接");
       const nextResult = await invoke("usb_update_firmware", {
         firmwarePath,
         expectedBoardDeviceId,

@@ -211,7 +211,7 @@ function bindingKey(component, action) {
 
 function componentTargetLabel(target) {
   if (target?.transport === "usb") {
-    return `USB · ${target.boardDeviceId || "未识别设备"}`;
+    return `设备 · ${target.boardDeviceId || "未识别设备"}`;
   }
   if (target?.transport === "ssh") {
     return `SSH · ${target.sshHost || "未设置主机"}`;
@@ -570,7 +570,7 @@ export default function ComponentCenter({ active = true }) {
         push({
           tone: "warning",
           title: "尚未连接目标设备",
-          message: "连接 USB 板端或配置 SSH 主机后再同步组件。",
+          message: "连接设备或配置 SSH 主机后再同步组件。",
         });
       }
       return EMPTY_DEVICE_INVENTORY;
@@ -863,7 +863,7 @@ export default function ComponentCenter({ active = true }) {
       push({
         tone: "warning",
         title: "尚未连接目标设备",
-        message: "连接 USB 板端或配置 SSH 主机后再同步组件。",
+        message: "连接设备或配置 SSH 主机后再同步组件。",
       });
       return;
     }
@@ -1307,7 +1307,7 @@ export default function ComponentCenter({ active = true }) {
           liveStatus?.boardDeviceId || usb.boardDeviceId || "",
         ).trim();
         if (!liveStatus?.connected || !boardDeviceId) {
-          throw new Error("USB 设备尚未完成身份握手，无法安全记录组件目标。");
+          throw new Error("设备尚未完成身份握手，无法安全记录组件目标。");
         }
         installTarget = { transport: "usb", boardDeviceId };
         if(options.target&&activeComponentTargetKey(options.target)!==activeComponentTargetKey(installTarget))throw new Error('目标设备已变化，请重新确认同步目标。');
@@ -1681,25 +1681,25 @@ export default function ComponentCenter({ active = true }) {
         <InstallDialog busy={otaPhase==='installing'} onClose={dismissOtaModal}>
           <section className="ota-modal">
             <span className="ota-modal__eyebrow">
-              {otaPhase === "success" ? "✓ 安装完成" : otaPhase === "error" ? "× 安装失败" : "USB OTA 安装"}
+              {otaPhase === "success" ? "✓ 安装完成" : otaPhase === "error" ? "× 安装失败" : "安装到设备"}
             </span>
             <h2>{otaTargetName}</h2>
-            {otaPhase === "checking-usb" && <p>正在检测 USB 连接…</p>}
+            {otaPhase === "checking-usb" && <p>正在检测设备连接…</p>}
             {otaPhase === "waiting-usb" && (
               <>
                 <p className="ota-modal__hint">
-                  请用 <strong>数据线</strong> 把桌搭子连到电脑(注意要数据线,不能只供电)。
+                  请通过蓝牙或 USB 数据线把桌搭子连接到电脑。
                   连上后会自动开始推送。
                 </p>
                 <div className="ota-modal__usb-status">
                   <span className={`ota-modal__dot ${usb.connected ? "is-on" : "is-off"}`} />
-                  {usb.connected ? "USB 已连接,准备推送…" : "等待 USB 连接…"}
+                  {usb.connected ? "设备已连接,准备推送…" : "等待设备连接…"}
                 </div>
               </>
             )}
             {otaPhase === "installing" && (
               <>
-                <p>{otaProgress ? `设备已接收 ${otaProgress.current}/${otaProgress.total} 个文件，等待完整校验与提交回执…` : "正在校验资源包并连接设备，请保持 USB 连接…"}</p>
+                <p>{otaProgress ? `设备已接收 ${otaProgress.current}/${otaProgress.total} 个文件，等待完整校验与提交回执…` : "正在校验资源包并连接设备，请保持设备连接…"}</p>
                 <progress aria-label="组件同步进度" max={otaProgress?.total || 1} value={otaProgress?.current} />
                 <p>只有设备确认提交成功后才会显示安装完成。</p>
               </>

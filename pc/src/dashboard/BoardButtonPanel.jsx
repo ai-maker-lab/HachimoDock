@@ -144,7 +144,7 @@ export default function BoardButtonPanel({
   runtime = "",
   voiceConfigDirty,
   voiceConfigOtaState,
-  usbConnected,
+  deviceConnected,
   selectedTrigger,
   onVoiceConfigChange,
   onApplyVoiceConfig,
@@ -161,7 +161,7 @@ export default function BoardButtonPanel({
       <div className="board-button-panel__unverified" role="status">
         <Usb size={28} aria-hidden="true" />
         <strong>等待设备协议握手</strong>
-        <span>{usbConnected ? "正在确认设备型号" : "尚未连接受支持的设备"}</span>
+        <span>{deviceConnected ? "正在确认设备型号" : "尚未连接受支持的设备"}</span>
       </div>
     );
   }
@@ -213,8 +213,8 @@ export default function BoardButtonPanel({
             onClick={onApplyVoiceConfig}
             loading={voiceConfigOtaState?.pending}
             loadingLabel="正在同步…"
-            disabled={voiceConfigOtaState?.pending || !usbConnected}
-            title={usbConnected ? "通过 USB 将当前映射同步到设备" : "需要 USB 连接设备后同步"}
+            disabled={voiceConfigOtaState?.pending || !deviceConnected}
+            title={deviceConnected ? "将当前映射同步到设备" : "请先连接设备"}
           >
             <UploadCloud size={14} />
             同步到设备

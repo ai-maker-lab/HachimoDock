@@ -7,10 +7,7 @@ use crate::usb_serial::UsbSerialManager;
 use serde_json::json;
 #[path = "graphics_capture_events.rs"]
 mod events;
-#[path = "graphics_capture_integrity.rs"]
-mod integrity;
-#[path = "graphics_capture_pull.rs"]
-mod pull;
+use super::{integrity, pull};
 #[path = "graphics_capture_identity.rs"]
 mod identity;
 use std::{

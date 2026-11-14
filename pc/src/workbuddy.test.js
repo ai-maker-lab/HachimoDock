@@ -10,7 +10,7 @@ test("WorkBuddy has an independent appearance binding without changing existing 
   const bound = sanitizeAgentAppearanceMap({ ...defaults, workbuddy: "custom" }, records);
   assert.equal(bound.workbuddy, "custom"); assert.equal(bound.codex, defaults.codex);
   const agents = normalizeDetectedAgents([{ id: "workbuddy", detected: true }]);
-  assert.equal(agents.at(-1).label, "WorkBuddy"); assert.equal(agents.at(-1).detected, true);
+  assert.equal(agents.find(agent => agent.id === "workbuddy").label, "WorkBuddy"); assert.equal(agents.find(agent => agent.id === "workbuddy").detected, true);
 });
 test("WorkBuddy stays isolated through native USB routing and Bridge startup", () => {
   const rust = read("../src-tauri/src/lib.rs");

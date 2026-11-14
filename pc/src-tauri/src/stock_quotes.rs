@@ -603,7 +603,7 @@ pub fn start(usb: crate::usb_serial::UsbSerialManager) {
         let mut last_generation = u64::MAX;
         loop {
             let _ = refresh(true).await;
-            let status = usb.status();
+            let status = usb.link_status();
             let generation = service().lock().map(|s| s.generation).unwrap_or(0);
             if status.connected
                 && status

@@ -559,6 +559,8 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", onB
     setStateVideoMessage("正在通过素材 OTA 通道替换到板端…");
     setSingleStateProgress(null);
     try {
+      const status = await invoke("usb_get_status");
+      if (status?.connected && status.transport === "ble" && !status.capabilities?.bleAppearanceChunks) throw new Error("需要 USB 连接");
       const result = await invoke("usb_sync_appearance", {
         appearanceId: record.id,
         boardDeviceId,

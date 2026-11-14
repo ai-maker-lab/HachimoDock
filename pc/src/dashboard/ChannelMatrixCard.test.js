@@ -37,7 +37,7 @@ test("ChannelMatrixCard keeps supported agents visible and marks unavailable cli
   assert.match(source, /className="channel-row__unavailable"/);
   assert.match(source, /不可用/);
   assert.match(source, /disabled=\{syncing \|\| !usb\?\.connected\}/);
-  assert.match(source, /连接 USB 后才能切换跟随/);
+  assert.match(source, /连接设备后才能切换跟随/);
 
   const unavailableRule = extractCssRule(styles, ".channel-row.is-undetected");
   assert.match(unavailableRule, /border-style:\s*dashed/);

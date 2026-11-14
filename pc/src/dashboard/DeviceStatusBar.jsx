@@ -57,7 +57,7 @@ export default function DeviceStatusBar() {
   const usbChip = {
     className: `dashboard-status-bar__chip dashboard-status-bar__chip--${usb.connected ? "ok" : "warn"}`,
     icon: <Usb size={14} />,
-    label: usb.connected ? "USB 直连" : "USB 未连接",
+    label: usb.connected ? `已连接（${usb.transport === "ble" ? "蓝牙" : "USB"}）` : "设备未连接",
   };
   return (
     <div className="dashboard-status-bar">
@@ -67,7 +67,7 @@ export default function DeviceStatusBar() {
       <div className="dashboard-status-bar__copy">
         <strong className="dashboard-status-bar__board-id">{binding.boardDeviceId}</strong>
         <span className="dashboard-status-bar__sub">
-          USB: {usbPortLabel}
+          设备: {usb.transport === "ble" ? "蓝牙" : usbPortLabel}
         </span>
       </div>
       <div className="dashboard-status-bar__chips">

@@ -125,8 +125,8 @@ export default function CurrentDisplayCard() {
   );
 
   // Spec row 4: formosa change requires USB.
-  const formosaCanApply = Boolean(usb.connected);
-  const formosaGateMessage = formosaCanApply ? "" : APPEARANCE_CHANGE_USB_REQUIRED_MESSAGE;
+  const formosaCanApply = Boolean(usb.connected && (usb.transport !== "ble" || usb.capabilities?.bleAppearanceChunks === true));
+  const formosaGateMessage = formosaCanApply ? "" : usb.transport === "ble" ? "需要 USB 连接" : APPEARANCE_CHANGE_USB_REQUIRED_MESSAGE;
 
   return (
     <div className="dashboard-current-display">

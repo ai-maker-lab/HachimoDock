@@ -44,6 +44,7 @@ import {
 import PageShell from "./shell/PageShell.jsx";
 import Card from "./shell/Card.jsx";
 import Button from "./shell/Button.jsx";
+import StatusCueSettings from "./StatusCueSettings.jsx";
 import { useDeviceContext } from "./shell/DeviceContext.jsx";
 import { buildUsageHelp } from "./lib/usage-help.js";
 import PersonaVoiceModal from "./PersonaVoiceModal.jsx";
@@ -54,6 +55,7 @@ import SharedLocationPanel from "./dashboard/SharedLocationPanel.jsx";
 import { createSharedLocationController } from "./dashboard/shared-location-model.js";
 import { useExitProtection } from "./lib/exit-protection.js";
 import ChannelMatrixCard from "./dashboard/ChannelMatrixCard.jsx";
+import BoardScreenshot from "./dashboard/BoardScreenshot.jsx";
 import BoardButtonPanel from "./dashboard/BoardButtonPanel.jsx";
 import VoiceAssistantPanel, { buildVoiceSummary, formatVoiceSessionOption } from "./dashboard/VoiceAssistantPanel.jsx";
 import {voiceRuntimeTarget,createVoiceRuntimePoller} from "./dashboard/voice-runtime-target.js";
@@ -929,6 +931,10 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
       }
 
       setVoiceConfigDirty(true);
+      if (usb.transport === "ble") {
+        setVoiceConfigOtaState({ pending: false, tone: "warning", message: "设备与客户端按键配置不同。点击“同步到设备”可写入当前映射。" });
+        return boardConfig;
+      }
       setVoiceConfigOtaState({
         pending: true,
         tone: "",
@@ -974,6 +980,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
     hasKnownRuntime,
     usb.connected,
     usb.runtime,
+    usb.transport,
     voiceTarget.key,
     usb.connectionId,
     usb.bootId,
@@ -1123,7 +1130,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
     const requestedRuntimeVoiceEnabled = requested.voiceEnabled;
     const requestedVoiceTriggerId = requested.voiceButton;
     if (!usb.connected) {
-      setVoiceConfigOtaState({ pending: false, tone: "warning", message: "请先通过 USB 连接设备，再同步按键配置。" });
+      setVoiceConfigOtaState({ pending: false, tone: "warning", message: "请先连接设备，再同步按键配置。" });
       return;
     }
     const targetBoardDeviceId = onlineBoardDeviceId || usb.boardDeviceId || binding.boardDeviceId;
@@ -1144,7 +1151,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
       if (!isCurrent()) return;
       let voiceSetupWarning = "";
       try {
-        if (isP4Runtime && requestedRuntimeVoiceEnabled) {
+        if (ack.transport !== "ble" && isP4Runtime && requestedRuntimeVoiceEnabled) {
           setVoiceConfigOtaState({ pending: true, tone: "", message: "按钮配置已写入，正在准备设备麦克风识别通道..." });
           const bridgeRuntime = await ensureBridgeRuntime();
           if (!bridgeRuntime?.running) {
@@ -1165,7 +1172,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
           if (!isCurrent()) return;
           if (!audio?.usbSent) throw new Error(audio?.usbError || "设备麦克风信令未通过 USB 送达");
           voiceDispatch({ type: "set_audio_bridge_state", enabled: true, ok: true, message: "设备麦克风已通过 USB 接入" });
-        } else if (voiceState.audioBridgeEnabled) {
+        } else if (ack.transport !== "ble" && voiceState.audioBridgeEnabled) {
           await sendAudioBridgeSignal({
             boardDeviceId: targetBoardDeviceId,
             expectedConnectionId: usb.connectionId,
@@ -1201,7 +1208,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
       if (!isCurrent()) return;
       setVoiceConfigOtaState({ pending: false, tone: "error", message: `按钮配置下发失败: ${err}` });
     }
-  }, [voiceTarget.key, binding.boardDeviceId, isP4Runtime, onlineBoardDeviceId, sendAudioBridgeSignal, usb.boardDeviceId, usb.connected, usb.connectionId, usb.runtime, voiceConfig, voiceState.audioBridgeEnabled]);
+  }, [voiceTarget.key, binding.boardDeviceId, isP4Runtime, onlineBoardDeviceId, sendAudioBridgeSignal, usb.boardDeviceId, usb.connected, usb.connectionId, usb.runtime, usb.transport, voiceConfig, voiceState.audioBridgeEnabled]);
 
   const updateVoiceTrigger = useCallback(async (trigger) => {
     buttonConfigRevisionRef.current += 1;
@@ -1214,7 +1221,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
       tone: usb.connected ? "" : "warning",
       message: usb.connected
         ? "正在切换语音输入的长按按钮并同步到设备..."
-        : "语音输入按键已保存到客户端；连接 USB 后同步到板端才会生效。",
+        : "语音输入按键已保存到客户端；连接设备后同步到板端才会生效。",
     });
     if (usb.connected) {
       await applyVoiceConfigOverUsb(next);
@@ -1234,7 +1241,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
         ? enabled
           ? "正在启用语音输入并同步到设备..."
           : "正在关闭语音输入并同步到设备..."
-        : "已保存到客户端；连接 USB 后同步到板端才会生效。",
+        : "已保存到客户端；连接设备后同步到板端才会生效。",
     });
     if (usb.connected) {
       await applyVoiceConfigOverUsb(next);
@@ -1246,6 +1253,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
       !isP4Runtime
       || !usb.connected
       || !p4TargetBoardDeviceId
+      || usb.transport === "ble"
       || buttonConfigHydratedFor !== p4TargetBoardDeviceId
       || !runtimeVoiceEnabled
     ) return undefined;
@@ -1307,6 +1315,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
     sendAudioBridgeSignal,
     usb.connected,
     usb.connectionId,
+    usb.transport,
   ]);
 
   // ---------- Audio bridge toggle ----------
@@ -1346,7 +1355,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
   }, [voiceTarget.key, activeVoiceTriggerId, binding.boardDeviceId, isP4Runtime, onlineBoardDeviceId, sendAudioBridgeSignal, usb.boardDeviceId, usb.connectionId]);
 
   const resumeDeviceVoiceAfterCredentialAccess = useCallback(() => {
-    if (!isP4Runtime || !runtimeVoiceEnabled || !usb.connected || !p4TargetBoardDeviceId) {
+    if (!isP4Runtime || !runtimeVoiceEnabled || !usb.connected || usb.transport === "ble" || !p4TargetBoardDeviceId) {
       return undefined;
     }
     return toggleAudioBridge("start");
@@ -1356,6 +1365,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
     runtimeVoiceEnabled,
     toggleAudioBridge,
     usb.connected,
+    usb.transport,
   ]);
 
   // This controller stays mounted across tabs; VoiceAssistantPanel does not.
@@ -1437,7 +1447,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
   const onSendTest = useCallback(() => {
     const sendPromise = usb.connected
       ? invoke("usb_send_speech", { text: "hello from pet-manager" }).then(() => ({ ok: true })).catch((err) => ({ ok: false, error: String(err) }))
-      : Promise.resolve({ ok: false, error: "USB 未连接" });
+      : Promise.resolve({ ok: false, error: "设备未连接" });
     sendPromise.then((res) => {
       push(res.ok
         ? { tone: "success", title: "测试消息已发送" }
@@ -1519,6 +1529,10 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
           canReconcileAppearance={usb.connected === true && Boolean(usb.boardDeviceId) && !appearanceSync?.pending && !appearanceObservationBusy}
           onUpdateFirmware={usb.connected && usb.runtime === P4_RUNTIME_ID
             ? () => {
+              if (usb.transport === "ble") {
+                push({ tone: "warning", title: "需要 USB 连接" });
+                return;
+              }
               setFirmwareTargetBoardDeviceId(usb.boardDeviceId || "");
               setFirmwareModalOpen(true);
             }
@@ -1534,6 +1548,10 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
     >
       <Card>
         <DeviceStatusBar />
+        {usb.connected && usb.capabilities?.screenshotTransfer === "pull-fnv1a32-v1" &&
+          (usb.transport !== "ble" || usb.capabilities?.bleScreenshotPull) &&
+          <BoardScreenshot key={usb.connectionId} boardDeviceId={usb.boardDeviceId} />}
+        <StatusCueSettings connected={usb.connected} capabilities={usb.capabilities} />
       </Card>
 
       {realtimeChat?.error && !isRecoveringAsr(realtimeChat) && <div role="alert" className="message-banner message-banner--error">
@@ -1570,14 +1588,14 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
           runtime={usb.runtime}
           voiceConfigDirty={voiceConfigDirty}
           voiceConfigOtaState={voiceConfigOtaState}
-          usbConnected={Boolean(usb.connected)}
+          deviceConnected={usb.connected}
           selectedTrigger={selectedVoiceTrigger}
           onVoiceConfigChange={updateVoiceConfig}
           onApplyVoiceConfig={applyVoiceConfigOverUsb}
         />
       </Card>
 
-      <Card.Collapsible
+      {usb.transport !== "ble" && <Card.Collapsible
         title="语音输入"
         summary={buildVoiceSummary(runtimeVoiceConfig, selectedVoiceTrigger)}
         defaultOpen
@@ -1606,22 +1624,22 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
           onVoiceEnabledChange={updateVoiceEnabled}
           onOpenApiSettings={onOpenApiSettings}
         />
-      </Card.Collapsible>
+      </Card.Collapsible>}
 
       <Card title="设备总音量">
-        <DeviceVolumePanel usb={usb} active={active} />
+        {usb.transport === "ble" ? <p>设备总音量和自定义提示音请通过 USB 设置。</p> : <DeviceVolumePanel usb={usb} active={active} />}
       </Card>
       <Card>
         <SharedLocationPanel active={active} controller={locationController} />
       </Card>
 
-      <Card.Collapsible
+      {usb.transport !== "ble" && <Card.Collapsible
         title="实时对话"
         summary={realtimeChat?.active ? `进行中 · ${realtimeStateLabel(realtimeChat.state)}` : "按设备上的「实时对话」键和当前形象聊天"}
         defaultOpen
       >
         <RealtimeChatPanel keyBound={realtimeChatKeyBound} onOpenApiSettings={onOpenApiSettings} onOpenGallery={onOpenGallery} onOpenPersona={() => setEditingPersona(currentDisplay?.appearance)} />
-      </Card.Collapsible>
+      </Card.Collapsible>}
 
       <DeviceGuideModal
         isOpen={guideOpen}

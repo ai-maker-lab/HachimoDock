@@ -26,6 +26,16 @@ pub(super) const P4_FIRMWARE_IDLE_CLOCK_BUG_SCHEMA: u32 = 5;
 pub(super) const P4_FIRMWARE_CORRUPTION_RETRIES_BEFORE_FALLBACK: usize = 3;
 pub(super) const P4_FIRMWARE_RECOVERY_SUCCESS_STREAK: usize = 32;
 pub(super) const P4_FIRMWARE_MAX_IMAGE_SIZE: usize = 0x300000;
+// Boards on the pre-migration 0x280000-byte OTA layout do not report a
+// capabilities.firmwareUpdate.maxImageBytes above this value; newer
+// firmware reports the actual OTA slot size (0x300000 after migration).
+pub(crate) fn device_max_image_bytes(capabilities: &serde_json::Value) -> usize {
+    capabilities
+        .pointer("/firmwareUpdate/maxImageBytes")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0x280000)
+}
 pub(super) const P4_FIRMWARE_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 // A healthy 4 Mbaud board ACK arrives within a few milliseconds. A longer
 // timeout only lets a lost/corrupted ACK consume the old firmware's bounded
@@ -293,13 +303,29 @@ pub(super) fn parse_esp_idf_app_descriptor(firmware: &[u8]) -> Result<EspIdfAppD
     })
 }
 
-pub fn inspect_firmware_image(path: &std::path::Path) -> Result<FirmwareImageInfo, String> {
+pub(crate) fn check_firmware_image_size(image_bytes: usize, max_image_bytes: usize) -> Result<(), String> {
+    if image_bytes == 0 || image_bytes > max_image_bytes {
+        return Err(if max_image_bytes < P4_FIRMWARE_MAX_IMAGE_SIZE {
+            format!("firmware image {} bytes exceeds the device limit of {} bytes; run the USB maintenance flash (partition migration) before installing larger firmware",
+                image_bytes, max_image_bytes)
+        } else {
+            format!("firmware image must be 1..={} bytes, got {}",
+                max_image_bytes, image_bytes)
+        });
+    }
+    Ok(())
+}
+
+pub fn inspect_firmware_image(
+    path: &std::path::Path,
+    max_image_bytes: usize,
+) -> Result<FirmwareImageInfo, String> {
     let firmware = std::fs::read(path)
         .map_err(|error| format!("read firmware {}: {error}", path.display()))?;
-    if firmware.is_empty() || firmware.len() > P4_FIRMWARE_MAX_IMAGE_SIZE {
+    if firmware.is_empty() || firmware.len() > max_image_bytes {
         return Err(format!(
             "firmware image must be 1..={} bytes, got {}",
-            P4_FIRMWARE_MAX_IMAGE_SIZE,
+            max_image_bytes,
             firmware.len()
         ));
     }

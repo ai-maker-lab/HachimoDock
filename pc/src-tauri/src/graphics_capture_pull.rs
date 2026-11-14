@@ -131,7 +131,7 @@ impl<T: Transport> Pull<'_, T> {
             self.io
                 .send(
                     "debug/screenshot",
-                    &json!({"fullResolution":true,
+                    &json!({"fullResolution":self.width == 640,
                 "mode":"pull-v1","requestId":self.request_id}),
                 )
                 .map_err(|_| json!({"kind":"transport_send","phase":"begin"}))?;

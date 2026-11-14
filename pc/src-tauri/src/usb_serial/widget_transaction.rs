@@ -73,7 +73,7 @@ pub(super) fn build_widget_chunk_payload(
 
 pub(super) fn format_widget_ack_timeout(transfer_id: &str, phase: &str) -> String {
     format!(
-        "未收到板端组件 OTA 确认: transferId={} phase={}",
+        "未收到设备组件确认（连接可能已断开，请重试）: transferId={} phase={}",
         transfer_id, phase
     )
 }

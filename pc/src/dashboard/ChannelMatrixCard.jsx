@@ -38,6 +38,7 @@ const AGENT_ICONS = {
   "claude-code": Code,
   codex: Terminal,
   openclaw: Zap,
+  devin: Code,
   mimocode: Braces,
   workbuddy: Code,
   "deepseek-harness": Braces,
@@ -109,6 +110,24 @@ export default function ChannelMatrixCard() {
 
   const visibleAgents = useMemo(() => agentOptions.filter((agent) => agent?.id), [agentOptions]);
   const activeAgentId = currentDisplay.agentId;
+  const [activity, setActivity] = useState({});
+  useEffect(() => {
+    let stopped = false;
+    let timer;
+    async function refreshActivity() {
+      try {
+        const snapshot = await invoke("local_widget_snapshot", { source: "computer.status" });
+        const rows = snapshot?.status === "ok" ? snapshot.rows : [];
+        const agents = (rows || []).filter(row => row.id.startsWith("agent-"));
+        if (!stopped) setActivity(Object.fromEntries(agents.map(row => [row.id.slice(6), row])));
+      } catch {
+        if (!stopped) setActivity({});
+      }
+      if (!stopped) timer = setTimeout(refreshActivity, 3000);
+    }
+    refreshActivity();
+    return () => { stopped = true; clearTimeout(timer); };
+  }, []);
 
   const appearanceForAgent = useCallback(
     (agentId) => {
@@ -325,7 +344,9 @@ export default function ChannelMatrixCard() {
                   <div className="channel-row__label">
                     <strong>{agent.label}</strong>
                     <span className="channel-row__status" title={agent.detail || undefined}>
-                      {isDetected ? "已检测" : "未检测到客户端或 CLI"}
+                      {activity[agent.id]
+                        ? `${activity[agent.id].value} · ${activity[agent.id].detail}`
+                        : isDetected ? "已检测 · 暂无近期上报" : "未检测到客户端或 CLI"}
                     </span>
                   </div>
                 </div>
@@ -410,7 +431,7 @@ export default function ChannelMatrixCard() {
                       className="btn-primary btn-sm channel-row__follow-button"
                       onClick={() => requestFollow(agent.id)}
                       disabled={syncing || !usb?.connected}
-                      title={!usb?.connected ? "连接 USB 后才能切换跟随" : ""}
+                      title={!usb?.connected ? "连接设备后才能切换跟随" : ""}
                     >
                       跟随
                     </button>

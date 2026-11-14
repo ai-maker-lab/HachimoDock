@@ -70,6 +70,7 @@ export function normalizeUsbStatusPayload(status) {
     portName: status?.portName || "",
     baudRate: Number(status?.baudRate) || 0,
     boardDeviceId: status?.connected ? status?.boardDeviceId || "" : "",
+    transport: status?.connected ? (status?.transport || "usb") : "",
     runtime: resolveUsbRuntime({ ...status, capabilities }),
     deviceModel: status?.deviceModel || "",
     firmware: status?.firmware || "",
@@ -99,6 +100,7 @@ export function usbStatusSnapshotsEqual(left, right) {
     && left.buildDirty === right.buildDirty
     && left.protocolSchema === right.protocolSchema
     && left.wireProtocol === right.wireProtocol
+    && left.transport === right.transport
     && JSON.stringify(left.capabilities ?? null) === JSON.stringify(right.capabilities ?? null);
 }
 

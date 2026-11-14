@@ -33,7 +33,8 @@ test("DeviceStatusBar exposes a manual USB serial rescan button", () => {
 
 test("DeviceStatusBar renders verified USB state without WiFi status", () => {
   assert.match(source, /usbChip/);
-  assert.match(source, /USB 直连/);
+  assert.match(source, /已连接（/);
+  assert.match(source, /usb.transport === "ble"/);
   assert.match(source, /dashboard-status-bar__chips/);
   assert.doesNotMatch(source, /wifiOnline|wifiChip|WiFi 在线|WiFi 离线/);
 });

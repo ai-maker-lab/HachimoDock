@@ -128,9 +128,10 @@ use firmware_transaction::{
     P4_FIRMWARE_CHUNK_ACK_TIMEOUT,
     P4_FIRMWARE_CHUNK_MAX_ATTEMPTS, P4_FIRMWARE_COMMIT_ACK_TIMEOUT,
     P4_FIRMWARE_CORRUPTION_RETRIES_BEFORE_FALLBACK,
-    P4_FIRMWARE_MAX_IMAGE_SIZE, P4_FIRMWARE_RECONNECT_TIMEOUT,
+    check_firmware_image_size, P4_FIRMWARE_MAX_IMAGE_SIZE, P4_FIRMWARE_RECONNECT_TIMEOUT,
 };
 pub use firmware_transaction::{inspect_firmware_image, FirmwareImageInfo, FirmwareUpdateResult};
+pub(crate) use firmware_transaction::device_max_image_bytes;
 #[cfg(test)]
 use firmware_transaction::{
     ESP_APP_DESC_MAGIC, ESP_APP_DESC_SIZE, ESP_IMAGE_HEADER_SIZE, ESP_IMAGE_SEGMENT_HEADER_SIZE,
@@ -1665,6 +1666,23 @@ fn ensure_p4_native_full_pack_supported(assets: &[AppearanceAssetEntry]) -> Resu
     ))
 }
 
+/// Sender used by `send_to_board` when no USB link is up (set by the BLE
+/// transport on macOS).
+pub(crate) type BleSendFn = fn(u64, &str, &serde_json::Value) -> Result<(), String>;
+pub(crate) static BLE_WIDGET_BULK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static BLE_WIDGET_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+struct WidgetBulkGuard(bool);
+impl WidgetBulkGuard {
+    fn new(ble: bool) -> Self { if ble { BLE_WIDGET_BULK.store(true, Ordering::SeqCst); } Self(ble) }
+}
+impl Drop for WidgetBulkGuard {
+    fn drop(&mut self) { if self.0 { BLE_WIDGET_BULK.store(false, Ordering::SeqCst); } }
+}
+
+pub(crate) static BLE_FALLBACK: std::sync::OnceLock<BleSendFn> = std::sync::OnceLock::new();
+/// Status of the BLE link (from the board's hello over BLE), if secure.
+pub(crate) static BLE_STATUS: std::sync::OnceLock<fn() -> Option<UsbConnectionStatus>> = std::sync::OnceLock::new();
+
 #[derive(Clone)]
 pub struct UsbSerialManager {
     bubble_renderer: Arc<Mutex<bubble_pixels::RenderBridge>>,
@@ -2622,6 +2640,19 @@ impl UsbSerialManager {
             }
     }
 
+    pub(crate) fn handle_ble_widget_ack(&self, topic: &str, payload: &serde_json::Value) {
+        resolve_asset_ack(&self.asset_ack_waiters, topic, payload);
+        resolve_widget_ack(&self.widget_ack_waiters, topic, payload);
+        resolve_device_response(&self.device_response_waiters, topic, payload);
+    }
+
+    pub(crate) fn ble_widget_disconnected(&self) {
+        BLE_WIDGET_GENERATION.fetch_add(1, Ordering::SeqCst);
+        if BLE_WIDGET_BULK.load(Ordering::SeqCst) {
+            if let Ok(mut waiters) = self.widget_ack_waiters.lock() { waiters.clear(); }
+        }
+    }
+
     /// Disconnect from USB serial device
     pub fn disconnect(&self) {
         if let Ok(_guard) = self.connect_guard.lock() {
@@ -2638,6 +2669,13 @@ impl UsbSerialManager {
 
     /// Send a message to the device
     pub fn send(&self, topic: &str, payload: &serde_json::Value) -> Result<(), String> {
+        if !self.status().connected {
+            if BLE_FALLBACK.get().is_some() {
+                let status = self.link_status();
+                let generation = status.connection_id.parse::<u64>().map_err(|_| "BLE identity unavailable")?;
+                return self.send_link_bound(&status.board_device_id, generation, topic, payload);
+            }
+        }
         self.send_inner(topic, payload, true, None, None, None)
     }
 
@@ -2887,6 +2925,15 @@ impl UsbSerialManager {
     pub(crate) fn check_session_follow_target(
         &self, board: &str, agent: &str, expected_connection: &str, expected_boot: &str,
     ) -> Result<u64, String> {
+        if !self.status().connected {
+            let (status, generation) = self.connected_link_snapshot(board)?;
+            if (!expected_connection.is_empty() && expected_connection != status.connection_id)
+                || (!expected_boot.is_empty() && expected_boot != status.boot_id)
+                || !self.session_follow_target_is_current(board, &status.connection_id, agent) {
+                return Err("BLE session scope changed; binding not committed".into());
+            }
+            return Ok(generation);
+        }
         let mut connection = self.connection.lock().map_err(|_| "session connection unavailable")?;
         let conn = connection.as_mut().ok_or("Not connected")?;
         self.refresh_pending_hello(conn);
@@ -2903,20 +2950,82 @@ impl UsbSerialManager {
         Ok(conn.connection_id)
     }
 
+    pub(crate) fn connected_link_snapshot(&self, board: &str) -> Result<(UsbConnectionStatus, u64), String> {
+        if self.status().connected { return self.connected_board_snapshot(board); }
+        let status = self.link_status();
+        if !status.connected || status.board_device_id != board {
+            return Err("设备连接已断开或目标已变化".into());
+        }
+        let generation = status.connection_id.parse::<u64>().ok().filter(|n| *n != 0)
+            .ok_or("设备连接身份尚未确认")?;
+        Ok((status, generation))
+    }
+
+    fn with_current_ble_board<T>(&self, board: &str, generation: u64, work: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        let (link, current) = self.connected_link_snapshot(board)?;
+        if current != generation || link.transport != "ble" { return Err("蓝牙设备连接已变化".into()); }
+        #[cfg(target_os = "macos")]
+        {
+            crate::BLE_TRANSPORT.get().ok_or("蓝牙连接不可用")?
+                .with_current_board(board, generation, work)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = work;
+            Err("此平台不支持蓝牙连接".into())
+        }
+    }
+
+    pub(crate) fn send_link_bound(&self, board: &str, generation: u64, topic: &str, payload: &serde_json::Value) -> Result<(), String> {
+        let (status, current) = self.connected_link_snapshot(board)?;
+        if current != generation { return Err("设备连接已变化，未发送旧连接请求".into()); }
+        if status.transport != "ble" {
+            return self.send_inner(topic, payload, true, Some(board), Some(generation), None);
+        }
+        if topic.starts_with("asset/") {
+            let id = appearance_safety::command_id(topic, payload)?;
+            if let Some(attempt) = self.active_appearance_attempt()? {
+                attempt.check(board, generation)?;
+                if appearance_safety::mutation(topic) { attempt.before_mutation(topic, id)?; }
+            } else if appearance_safety::mutation(topic) {
+                return Err("appearance transaction owner required".into());
+            }
+        }
+        let next = if topic == "control/remote-cli-binding" && payload["enabled"] == true {
+            Some(crate::normalize_agent_id(payload["targetSource"].as_str().unwrap_or_default()).ok_or("follow source is not recognized")?)
+        } else { None };
+        // BLE enqueue is nonblocking. Keep scope admission ordered with enqueue.
+        let mut scope = self.follow_scope.lock().map_err(|_| "follow scope unavailable")?;
+        if scope.as_ref().is_some_and(|s| s.generation != generation || s.board != board) { *scope = None; }
+        if let Some(agent) = &next {
+            *scope = Some(UsbFollowScope { generation, board:board.into(), agent:agent.clone(), session:None, submitted:false });
+        } else if scope.as_ref().is_some_and(|s| !s.allows(topic,payload)) {
+            return Err("stale follow agent/session; state not submitted".into());
+        }
+        BLE_FALLBACK.get().ok_or("蓝牙连接不可用")?(generation, topic, payload)?;
+        if let Some(scope) = scope.as_mut() {
+            if next.is_some() { scope.submitted = true; }
+            if topic == "session/current" {
+                scope.session = payload["sessionId"].as_str().filter(|id| !id.is_empty() && *id != "auto").map(str::to_owned);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn send_follow_change_for_connection(
         &self, board: &str, generation: u64, topic: &str, payload: &serde_json::Value,
     ) -> Result<(), String> {
         if generation == 0 || !(topic == "control/remote-cli-binding" || topic.starts_with("state/")) {
             return Err("invalid follow change scope".into());
         }
-        self.send_inner(topic, payload, true, Some(board), Some(generation), None)
+        self.send_link_bound(board, generation, topic, payload)
     }
 
     pub(crate) fn send_session_current_for_connection(
         &self, board: &str, generation: u64, payload: &serde_json::Value,
     ) -> Result<(), String> {
         if generation == 0 { return Err("invalid session connection".into()); }
-        self.send_inner("session/current", payload, true, Some(board), Some(generation), None)
+        self.send_link_bound(board, generation, "session/current", payload)
     }
 
     pub(crate) fn send_to_board(
@@ -2925,6 +3034,15 @@ impl UsbSerialManager {
         topic: &str,
         payload: &serde_json::Value,
     ) -> Result<(), String> {
+        // USB has priority; without a USB link the P4 is reached over BLE.
+        if !self.status().connected {
+            if BLE_FALLBACK.get().is_some() {
+                let status = self.link_status();
+                if !status.connected || status.board_device_id != validate_expected_board_device_id(expected_board_device_id)? { return Err("蓝牙设备连接已断开或目标已变化".into()); }
+                let generation = status.connection_id.parse::<u64>().map_err(|_| "BLE identity unavailable")?;
+                return self.send_link_bound(expected_board_device_id, generation, topic, payload);
+            }
+        }
         self.send_inner(
             topic,
             payload,
@@ -3244,8 +3362,9 @@ impl UsbSerialManager {
 
     /// Read-only preflight: never stops capture/playback or retries an install.
     pub(crate) fn component_sync_audio_status(&self, board: &str) -> Result<serde_json::Value, String> {
-        let (status, connection_id) = self.connected_board_snapshot(board)?;
-        let capture_active = self.connection.lock().map_err(|e| e.to_string())?
+        let (status, connection_id) = self.connected_link_snapshot(board)?;
+        let ble = status.transport == "ble";
+        let capture_active = !ble && self.connection.lock().map_err(|e| e.to_string())?
             .as_ref().ok_or("USB 未连接")?.capture_active.load(Ordering::Acquire);
         if capture_active {
             return Ok(serde_json::json!({"blocked":true,"reason":"voice","message":"设备正在录音或实时语音中。请先结束语音，再重新检查同步；不会自动中断语音。"}));
@@ -3255,15 +3374,16 @@ impl UsbSerialManager {
         let playback = diagnostic["runtime"]["audioPlaybackActive"].as_bool()
             .ok_or("设备未返回可确认的播放状态；尚未开始同步，请更新固件或稍后重新检查。")?;
         let media = if status.capabilities["widgetMedia"] == "p4-media-v1" {
-            self.media_request(board,"media/query",serde_json::json!({}))
+            (if ble { self.send_device_request_and_wait(board,"media/query","media/status") }
+             else { self.media_request(board,"media/query",serde_json::json!({})) })
                 .map_err(|_| "无法确认后台播放状态，尚未开始同步；请停止播放后重新检查。".to_string())?
         } else { serde_json::json!({"state":"idle"}) };
         let state = media["state"].as_str().ok_or("设备播放状态不完整；尚未开始同步。")?;
         let blocked = playback || component_sync_media_blocks(state);
-        let capture_now = self.connection.lock().map_err(|e|e.to_string())?
+        let capture_now = !ble && self.connection.lock().map_err(|e|e.to_string())?
             .as_ref().ok_or("USB 未连接")?.capture_active.load(Ordering::Acquire);
         if capture_now { return Ok(serde_json::json!({"blocked":true,"reason":"voice","message":"设备正在录音或实时语音中。请先结束语音，再重新检查同步；不会自动中断语音。"})); }
-        let (_, current_id) = self.connected_board_snapshot(board)?;
+        let (_, current_id) = self.connected_link_snapshot(board)?;
         if current_id != connection_id { return Err("设备连接已变化，请重新检查同步目标；尚未开始同步。".into()); }
         Ok(serde_json::json!({"blocked":blocked,"reason":if blocked {"playback"} else {"ready"},
             "message":if blocked {"设备仍在播放或准备音频。请先停止播放，再重新检查并同步；返回主屏不等于停止播放。"} else {"音频空闲"}}))
@@ -3327,7 +3447,7 @@ impl UsbSerialManager {
             .asset_transfer_guard
             .lock()
             .map_err(|error| error.to_string())?;
-        let status = self.connected_board_status(expected_board_device_id)?;
+        let status = { let status = self.link_status(); if !status.connected || status.board_device_id != expected_board_device_id { return Err("设备连接已变化".into()); } status };
         ensure_widget_inventory_supported(&status)?;
         self.send_device_request_and_wait(
             expected_board_device_id,
@@ -3398,9 +3518,17 @@ impl UsbSerialManager {
     pub fn activate_installed_widget(&self,board:&str,widget_id:&str,show:bool)->Result<serde_json::Value,String>{
         if !crate::component_extension::valid_id(widget_id){return Err("组件 ID 无效，未打开".into());}
         let _guard=self.asset_transfer_guard.try_lock().map_err(|_|"设备传输忙，未切换组件")?;
-        let status=self.connected_board_status(board)?;
+        let status=self.connected_link_snapshot(board)?.0;
         if status.capabilities["widgetActivation"]!="p4-widget-activation-v1"{return Err("设备不支持直接打开已安装组件，请先升级固件；未覆盖安装".into());}
         self.send_device_payload_and_wait(board,"widget/activate","protocol/ack",serde_json::json!({"widgetId":widget_id,"show":show}))
+    }
+
+    pub(crate) fn send_mac_notice(&self, board: &str, payload: serde_json::Value) -> Result<(), String> {
+        let ack = self.send_device_payload_and_wait(board, "ui/mac-notice", "protocol/ack", payload)?;
+        if ack["ok"] != true || ack["requestTopic"] != "ui/mac-notice" {
+            return Err("板端未确认提醒".into());
+        }
+        Ok(())
     }
 
     fn send_device_payload_and_wait(&self,expected_board_device_id:&str,request_topic:&str,response_topic:&str,mut payload:serde_json::Value)->Result<serde_json::Value,String>{
@@ -3610,6 +3738,7 @@ impl UsbSerialManager {
             return Err(format!("firmware image must be 1..={} bytes, got {}",
                 P4_FIRMWARE_MAX_IMAGE_SIZE, firmware.len()));
         }
+        check_firmware_image_size(firmware.len(), device_max_image_bytes(&status.capabilities))?;
         ota_diagnostic.snapshot.total_bytes = firmware.len() as u64;
         let descriptor = parse_esp_idf_app_descriptor(&firmware)?;
         let chip_range = firmware_chip_range(&firmware)?;
@@ -4863,7 +4992,11 @@ impl UsbSerialManager {
         let result=(|| {
         let receiver = self.register_asset_ack_waiter(transfer_id, phase, path, index)?;
         let command_started = Instant::now();
-        if let Err(error) = self.send(topic, payload) {
+        let send = match self.active_appearance_attempt()? {
+            Some(attempt) => self.send_link_bound(&attempt.board, attempt.generation, topic, payload),
+            None => self.send(topic, payload),
+        };
+        if let Err(error) = send {
             self.remove_asset_ack_waiter(transfer_id, phase, path, index);
             return Err(error);
         }
@@ -5044,6 +5177,14 @@ impl UsbSerialManager {
         self.send("widget/commit", &payload)
     }
 
+    fn map_component_commit_error(msg: String) -> String {
+        if msg.contains("errno=28") || msg.contains("storage full") {
+            format!("设备存储空间不足，请删除不用的组件后重试（{}）", msg)
+        } else {
+            msg
+        }
+    }
+
     /// Remove an installed widget and wait until the board confirms both
     /// package cleanup and the return to its main screen.
     pub fn remove_widget(
@@ -5060,7 +5201,8 @@ impl UsbSerialManager {
             .asset_transfer_guard
             .lock()
             .map_err(|error| error.to_string())?;
-        let (status,connection_id) = self.connected_board_snapshot(expected_board_device_id)?;
+        let (status,connection_id) = self.connected_link_snapshot(expected_board_device_id)?;
+        let _bulk = WidgetBulkGuard::new(status.transport == "ble");
         ensure_widget_delete_supported(&status)?;
         if preserve_save&&status.capabilities["widgetDeletePreserveSave"]!=true{return Err("设备不支持保留存档卸载；未删除组件".into());}
         let transfer_id = format!("widget-delete-{}", uuid::Uuid::new_v4());
@@ -5070,8 +5212,7 @@ impl UsbSerialManager {
             "widgetId": widget_id,
             "preserveSave": preserve_save,
         });
-        if let Err(error) = self.send_inner("widget/delete", &payload, true, Some(expected_board_device_id), Some(connection_id), None)
-        {
+        if let Err(error) = self.send_link_bound(expected_board_device_id, connection_id, "widget/delete", &payload) {
             self.remove_widget_ack_waiter(&transfer_id, "delete", None, None);
             return Err(error);
         }
@@ -5090,7 +5231,7 @@ impl UsbSerialManager {
         }
     }
 
-    /// Push a local .clawpkg directory to the device via USB widget OTA.
+    /// Push a local .clawpkg directory over the active device link.
     /// Walks all regular files under `widget_dir`, sends each as a base64
     /// chunk, commits. Optional binding_overrides applied to buttons.json
     /// before sending (action -> new_control mapping).
@@ -5105,7 +5246,7 @@ impl UsbSerialManager {
     where
         F: Fn(u32, u32, u64),
     {
-        let target=self.status().board_device_id;
+        let target=self.link_status().board_device_id;
         self.install_widget_clawpkg_on_board(&target,widget_id,widget_dir,binding_overrides,on_progress)
     }
 
@@ -5123,7 +5264,7 @@ impl UsbSerialManager {
     }
 
     pub(crate) fn repair_widget_resources(&self,board:&str,id:&str,dir:&std::path::Path)->Result<(u32,u64),String>{
-        if self.status().capabilities["widgetResourceIntegrity"]!="p4-resource-integrity-v1"{
+        if self.link_status().capabilities["widgetResourceIntegrity"]!="p4-resource-integrity-v1"{
             return Err("设备尚不支持保留配置的资源恢复".into());
         }
         self.install_widget_clawpkg_mode(board,id,dir,&std::collections::HashMap::new(),|_,_,_|{},true)
@@ -5139,14 +5280,30 @@ impl UsbSerialManager {
             .asset_transfer_guard
             .lock()
             .map_err(|error| error.to_string())?;
-        let (install_status,connection_id)=self.connected_board_snapshot(expected_board_device_id)?;
+        let (install_status,connection_id)=self.connected_link_snapshot(expected_board_device_id)?;
+        let status = &install_status;
+        let ble = status.transport == "ble";
+        let begin_timeout = if ble { Duration::from_secs(5) } else { WIDGET_BEGIN_ACK_TIMEOUT };
+        let chunk_timeout = if ble { Duration::from_secs(5) } else { WIDGET_CHUNK_ACK_TIMEOUT };
+        let all_chunks = status.capabilities["widgetChunkAllPaths"] == true;
+        if ble && !all_chunks { return Err("请先通过 USB 升级设备固件，再通过蓝牙安装组件".into()); }
+        let _bulk = WidgetBulkGuard::new(ble);
+        let generation = BLE_WIDGET_GENERATION.load(Ordering::SeqCst);
         let extension_path=widget_dir.join("pc/extension.json");
         if extension_path.is_file() {
             if extension_path.metadata().map_err(|_|"无法读取媒体扩展")?.len()>16384 {return Err("媒体扩展超过安全上限".into());}
             // Validate the declaration, not the peer's optional feature adverts.
             crate::component_extension::parse(&std::fs::read(extension_path).map_err(|_|"无法读取媒体扩展")?)?;
         }
-        let send_bound=|topic:&str,payload:&serde_json::Value|self.send_inner(topic,payload,true,Some(expected_board_device_id),Some(connection_id),None);
+        let send_bound=|topic:&str,payload:&serde_json::Value| {
+            if ble {
+                let current = self.link_status();
+                if !current.connected || current.transport != "ble" || current.board_device_id != expected_board_device_id || BLE_WIDGET_GENERATION.load(Ordering::SeqCst) != generation {
+                    return Err("蓝牙组件传输已断开，请重新连接后重试".into());
+                }
+                BLE_FALLBACK.get().ok_or("蓝牙连接不可用")?(connection_id, topic, payload)
+            } else { self.send_inner(topic,payload,true,Some(expected_board_device_id),Some(connection_id),None) }
+        };
         // Stay below the P4 runtime's 64-byte transaction buffer even when
         // the manifest uses the maximum 47-byte component id.
         let transfer_id = format!("widget-install-{}", uuid::Uuid::new_v4());
@@ -5284,12 +5441,12 @@ impl UsbSerialManager {
         let begin_rx = self.register_widget_ack_waiter(&transfer_id, "begin", None, None)?;
         let begin_started = std::time::Instant::now();
         record_phase("phase_started", "begin", begin_started,
-            serde_json::json!({"timeoutMs": WIDGET_BEGIN_ACK_TIMEOUT.as_millis()}));
+            serde_json::json!({"timeoutMs": begin_timeout.as_millis()}));
         if let Err(error)=send_bound("widget/begin",&begin_payload){
             record_phase("phase_send_failed", "begin", begin_started, serde_json::json!({}));
             self.remove_widget_ack_waiter(&transfer_id,"begin",None,None);return Err(error);
         }
-        match begin_rx.recv_timeout(WIDGET_BEGIN_ACK_TIMEOUT) {
+        match begin_rx.recv_timeout(begin_timeout) {
             Ok(ack) => {
                 record_phase("phase_ack", "begin", begin_started,
                     serde_json::json!({"ok": ack.get("ok").and_then(|v| v.as_bool())}));
@@ -5303,7 +5460,7 @@ impl UsbSerialManager {
                         .get("msg")
                         .and_then(|v| v.as_str())
                         .unwrap_or("板端拒绝组件传输开始");
-                    return Err(format!("widget begin rejected: {}", msg));
+                    return Err(Self::map_component_commit_error(format!("widget begin rejected: {}", msg)));
                 }
             }
             Err(error) => {
@@ -5325,7 +5482,7 @@ impl UsbSerialManager {
             if bytes.is_empty() {
                 continue;
             }
-            for (chunk_index,bytes) in bytes.chunks(if rel.starts_with("runtime/images/"){4096}else{bytes.len()}).enumerate(){
+            for (chunk_index,bytes) in bytes.chunks(if all_chunks || rel.starts_with("runtime/images/"){4096}else{bytes.len()}).enumerate(){
             let chunk_index=chunk_index as u32;
             let encoded = b64.encode(bytes);
             let checksum = asset_checksum_hex(bytes);
@@ -5338,7 +5495,7 @@ impl UsbSerialManager {
                 let chunk_metadata = |ok: Option<bool>| serde_json::json!({
                     "fileIndex": i, "chunkIndex": chunk_index, "attempt": attempt,
                     "decodedSize": bytes.len(), "ok": ok,
-                    "timeoutMs": WIDGET_CHUNK_ACK_TIMEOUT.as_millis(),
+                    "timeoutMs": chunk_timeout.as_millis(),
                 });
                 record_phase("phase_started", "chunk", chunk_started, chunk_metadata(None));
                 if let Err(error) = send_bound("widget/chunk",&build_widget_chunk_payload(&transfer_id,rel,&encoded,chunk_index,bytes.len(),&checksum)) {
@@ -5347,7 +5504,7 @@ impl UsbSerialManager {
                     self.remove_widget_ack_waiter(&transfer_id, "chunk", Some(rel), Some(chunk_index));
                     return Err(error);
                 }
-                match chunk_rx.recv_timeout(WIDGET_CHUNK_ACK_TIMEOUT) {
+                match chunk_rx.recv_timeout(chunk_timeout) {
                     Ok(ack) if ack.get("ok").and_then(|value| value.as_bool()) == Some(true) => {
                         record_phase("phase_ack", "chunk", chunk_started, chunk_metadata(Some(true)));
                         #[cfg(test)] installer_acceptance::outcome(&transfer_id,rel,chunk_index,"acknowledged");
@@ -5407,7 +5564,7 @@ impl UsbSerialManager {
                         .and_then(|v| v.as_str())
                         .unwrap_or("板端组件提交失败")
                         .to_string();
-                    return Err(msg);
+                    return Err(Self::map_component_commit_error(msg));
                 }
             }
             Err(error) => {
@@ -5668,9 +5825,13 @@ impl UsbSerialManager {
             .lock()
             .map_err(|error| error.to_string())?;
         self.with_appearance_user_intent(expected_board_device_id, &_asset_transfer_guard, || {
-        self.connected_board_status(expected_board_device_id)?;
+        let (link, _) = self.connected_link_snapshot(expected_board_device_id)?;
+        let ble = link.transport == "ble";
+        if ble && link.capabilities["bleAppearanceChunks"] != true {
+            return Err("此固件不支持蓝牙形象传输".into());
+        }
         self.ensure_appearance_sync_not_cancelled(None)?;
-        if p4_native_usb_available() {
+        if !ble && p4_native_usb_available() {
             if let Some(result)=self.native_appearance_or_fallback(||sync_appearance_p4_native(
                 self,appearance_dir,app_data_dir,expected_board_device_id,use_device_builtin,
                 &self.appearance_sync_cancel_requested,&on_progress,
@@ -5714,7 +5875,7 @@ impl UsbSerialManager {
         if force_full_sync {
             eprintln!("[usb-p4-ota] forcing full transfer for hardware validation");
         }
-        if !force_full_sync && self.supports_p4_appearance_slot_reuse() {
+        if !force_full_sync && (ble || self.supports_p4_appearance_slot_reuse()) {
             stage("checking_cache");
             let cache_transfer_id = format!(
                 "p4-slot-{}",
@@ -5741,7 +5902,7 @@ impl UsbSerialManager {
                     return Ok((0, 0, false));
                 }
                 Ok(P4CachedPackActivation::NotFound) => {}
-                Err(error) if self.appearance_submitted()=>return Err(error),
+                Err(error) if ble || self.appearance_submitted()=>return Err(error),
                 Err(error) => {
                     eprintln!(
                         "[usb-p4-ota] cached slot query failed; falling back to current sync planner: {}",
@@ -5750,7 +5911,7 @@ impl UsbSerialManager {
                 }
             }
         }
-        if !force_full_sync {
+        if !force_full_sync && !ble {
             stage("comparing_assets");
             let digests = digest_appearance_assets(&assets)?;
             match self.plan_incremental_appearance_sync(&digests, &[]) {
@@ -5770,10 +5931,11 @@ impl UsbSerialManager {
             }
         }
 
-        let use_raw_chunks = self.supports_p4_raw_asset_chunks();
-        let use_raw_slot = use_raw_chunks && self.supports_p4_raw_appearance_slot();
+        let use_raw_chunks = !ble && self.supports_p4_raw_asset_chunks();
+        let use_raw_slot = (use_raw_chunks && self.supports_p4_raw_appearance_slot())
+            || (ble && link.capabilities["rawAppearanceSlot1"] == true);
         if use_raw_slot {
-            let capabilities = self.status().capabilities;
+            let capabilities = &link.capabilities;
             let raw_capacity = capabilities
                 .get("rawAppearanceCapacityBytes")
                 .and_then(|value| value.as_u64())
@@ -5791,7 +5953,9 @@ impl UsbSerialManager {
             }
         }
         let negotiated_baud = self.status().baud_rate;
-        let preferred_chunk_size = if use_raw_chunks {
+        let preferred_chunk_size = if ble {
+            3072
+        } else if use_raw_chunks {
             self.p4_raw_asset_chunk_size()
         } else {
             P4_APPEARANCE_ASSET_CHUNK_SIZE
@@ -6164,6 +6328,16 @@ impl UsbSerialManager {
             transfer_id, file_count, byte_count
         );
         Ok((file_count, byte_count))
+    }
+
+    /// The board link used for normal traffic: USB when connected, otherwise
+    /// the secure BLE link (transport "ble"). USB-only flows keep `status()`.
+    pub fn link_status(&self) -> UsbConnectionStatus {
+        let usb = self.status();
+        if usb.connected {
+            return usb;
+        }
+        BLE_STATUS.get().and_then(|ble| ble()).unwrap_or(usb)
     }
 
     /// Get current connection status
@@ -10266,6 +10440,23 @@ manager.activate_memory_test_connection();
     }
 
     #[test]
+    fn device_reported_max_image_bytes_overrides_the_legacy_fallback() {
+        assert_eq!(
+            device_max_image_bytes(&serde_json::json!({})),
+            0x280000
+        );
+        assert_eq!(
+            device_max_image_bytes(&serde_json::json!({
+                "firmwareUpdate": {"maxImageBytes": 0x300000}
+            })),
+            0x300000
+        );
+        let error = check_firmware_image_size(0x280000 + 1, 0x280000).unwrap_err();
+        assert!(error.contains("partition migration"));
+        assert!(check_firmware_image_size(0x280000 + 1, 0x300000).is_ok());
+    }
+
+    #[test]
     fn legacy_firmware_chunk_json_stays_below_four_kibibytes() {
         let encoded_len = P4_FIRMWARE_CHUNK_SIZE.div_ceil(3) * 4;
         let payload = serde_json::json!({
@@ -11221,6 +11412,10 @@ manager.activate_memory_test_connection();
         let mut expected=ids(&inventory);expected.insert("hachimi-learn".into());assert_eq!(ids(&next),expected);
         assert_eq!(before["bootCount"],after["bootCount"]);assert_eq!(before["faultResetCount"],after["faultResetCount"]);
         assert_eq!(before["storage"]["activeAppearanceSlot"],after["storage"]["activeAppearanceSlot"]);assert_eq!(buttons["config"],usb.query_button_config(&board).unwrap()["config"]);
+        let mapped=UsbSerialManager::map_component_commit_error("component commit failed: write/close /spiffs/p4w12.t1 errno=28 bytes=8190".to_string());
+        assert!(mapped.starts_with("设备存储空间不足，请删除不用的组件后重试"),"{mapped}");
+        assert!(mapped.contains("errno=28"),"{mapped}");
+        assert_eq!(UsbSerialManager::map_component_commit_error("other error".to_string()),"other error");
         assert!(!crate::component_audio::playing("hachimi-learn"));
         eprintln!("PASS knowledge-only sync, ten category loop, random/confirm/cancel, complete article pages, exit/reentry; no resets, firmware, speech or user-save changes. Physical touch/visual quality still require user verification.");
     }
@@ -12199,6 +12394,49 @@ manager.activate_memory_test_connection();
     }
 
     #[test]
+    fn ble_widget_ack_reaches_the_transaction_waiter() {
+        let manager = UsbSerialManager::new();
+        let receiver = manager.register_widget_ack_waiter("ble-transfer", "chunk", Some("runtime/sprites/test.p4s"), Some(2)).unwrap();
+        manager.handle_ble_widget_ack("widget-install-ack", &serde_json::json!({
+            "transferId":"ble-transfer", "phase":"chunk", "path":"runtime/sprites/test.p4s", "index":"2", "ok":true
+        }));
+        assert_eq!(receiver.try_recv().unwrap()["ok"], true);
+    }
+
+    #[test]
+    fn widget_builtin_chunk_lines_stay_below_8k() {
+        use base64::Engine;
+        fn walk(root: &Path, path: &Path, files: &mut Vec<(String,Vec<u8>)>) {
+            for entry in std::fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() { walk(root, &path, files); }
+                else { files.push((widget_ota_relative_path(root,&path).unwrap(),std::fs::read(path).unwrap())); }
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../builtin-clawpkgs");
+        let mut packages = Vec::new();
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if !path.is_dir() { continue; }
+            let mut files = Vec::new(); walk(&path,&path,&mut files);
+            packages.push((path,files));
+        }
+        assert!(!packages.is_empty());
+        let (_,mut files) = packages.into_iter().max_by_key(|(_,files)| files.iter().map(|(_,bytes)|bytes.len()).sum::<usize>()).unwrap();
+        // Also bound compiled binary files independently of image encoding time.
+        files.push(("runtime/images/largest.p4i".into(),vec![255;100_000]));
+        files.push(("runtime/sprites/largest.p4s".into(),vec![255;128*1024]));
+        for (path,bytes) in files {
+            for (index,chunk) in bytes.chunks(4096).enumerate() {
+                let payload = build_widget_chunk_payload("widget-install-ffffffff-ffff-ffff-ffff-ffffffffffff",&path,
+                    &base64::engine::general_purpose::STANDARD.encode(chunk), index as u32,chunk.len(),&asset_checksum_hex(chunk));
+                let line = serde_json::json!({"topic":"widget/chunk","payload":payload}).to_string();
+                assert!(line.len()+1 < 8192,"{}: {}",path,line.len());
+            }
+        }
+    }
+
+    #[test]
     fn widget_chunk_payload_carries_integrity_fields() {
         let payload = build_widget_chunk_payload(
             "widget-1",
@@ -12725,3 +12963,6 @@ fn large_wav(data:usize)->Vec<u8>{let mut b=wav();b.truncate(44);b[4..8].copy_fr
 }
 #[test]fn unknown_prepared_asset_is_not_silently_transferred(){let a=AppearanceAssetEntry{kind:"video",device_path:"foo.mp4".into(),family_name:"x".into(),source_path:PathBuf::new()};assert!(p4_audio_patch_transfer_assets(&[a]).is_err());}
 }
+
+#[cfg(test)]
+mod ble_link_tests;

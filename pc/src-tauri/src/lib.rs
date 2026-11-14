@@ -139,8 +139,7 @@ mod voice_draft;
 mod realtime_chat;
 #[cfg(test)]
 mod acoustic_acceptance;
-#[cfg(test)]
-mod graphics_acceptance;
+mod graphics_capture;
 #[cfg(test)]
 mod background_acceptance;
 mod desktop_agent;
@@ -151,8 +150,11 @@ mod realtime_chat_log;
 mod usb_audio;
 mod device_voice_lifecycle;
 mod usb_serial;
+mod ble_transport;
 mod appearance_recovery_ipc;
 mod voice_chat_settings;
+mod status_cues;
+static STATUS_CUES_DELIVERY: std::sync::Mutex<()> = std::sync::Mutex::new(());
 mod volcengine_asr;
 
 use serde::{Deserialize, Serialize};
@@ -690,6 +692,7 @@ fn agent_streams_voice_draft(agent_id: &str) -> bool {
 }
 
 fn device_voice_platform_block_reason(agent_id: &str, is_macos: bool) -> Option<&'static str> {
+    if agent_id == "devin" { return Some("Devin 当前支持任务状态与会话跟随。"); }
     (agent_id == "mimocode" && !is_macos).then_some(
         "MiMoCode 的按键语音输入目前仅支持 macOS 终端；当前系统可使用状态跟随与设备实时对话。",
     )
@@ -3249,6 +3252,20 @@ fn handle_incoming_usb_message(
     topic: String,
     payload: serde_json::Value,
 ) {
+    if topic.starts_with("debug/screenshot_") && graphics_capture::receive(&topic, &payload) { return; }
+    if topic == "hello" && payload["capabilities"]["statusCueConfig"] == true {
+        // Never block the reader: send() may wait for the same connection lock.
+        let app = emitter.clone();
+        std::thread::spawn(move || {
+            let Ok(_guard) = STATUS_CUES_DELIVERY.lock() else { return };
+            if let Ok(config) = status_cues::load() {
+                if let Err(error) = app.state::<usb_serial::UsbSerialManager>()
+                    .send("config/status-cues", &status_cues::payload(config)) {
+                    eprintln!("[status-cues] restore failed: {error}");
+                }
+            }
+        });
+    }
     resolve_button_config_ack(&topic, &payload);
     if topic == "approval/decision" {
         dsh_approval::handle_device_decision(&payload);
@@ -3680,13 +3697,14 @@ const BRIDGE_LAUNCH_AGENT_LABEL: &str = "com.petmanager.status-bridge";
 const BRIDGE_WINDOWS_STARTUP_SCRIPT_NAME: &str = "Pet Manager Status Bridge.cmd";
 const USB_STATE_MAX_AGE_MS: u64 = 10 * 60 * 1000;
 const USB_BRIDGE_SCAN_MAX_FILES: usize = 64;
-const KNOWN_USB_STATE_SOURCES: [&str; 6] = [
+const KNOWN_USB_STATE_SOURCES: [&str; 7] = [
     "claude-code",
     "codex",
     "openclaw",
     "mimocode",
     "deepseek-harness",
     "workbuddy",
+    "devin",
 ];
 #[cfg(windows)]
 const CREATE_NO_WINDOW_FLAG: u32 = 0x08000000;
@@ -4264,19 +4282,19 @@ async fn dispatch_remote_cli_binding(
             return Err("缺少目标桌面设备或渠道。".to_string());
         }
 
-        let usb_status = usb_manager.status();
+        let usb_status = usb_manager.link_status();
         if !usb_status.connected {
-            return Err("切换跟随需要 USB 连接，请连接设备后重试。".to_string());
+            return Err("请先通过 USB 或蓝牙连接设备，再切换跟随。".to_string());
         }
         let board_device_id = normalize_topic_segment(usb_status.board_device_id.clone(), "");
         if board_device_id.is_empty() {
-            return Err("当前 USB 设备身份尚未确认，请稍后重试。".to_string());
+            return Err("当前设备身份尚未确认，请稍后重试。".to_string());
         }
         if !requested_board_device_id.is_empty()
             && requested_board_device_id != board_device_id
         {
             return Err(format!(
-                "USB 设备已变化：当前连接的是 {board_device_id}，不是目标设备 {requested_board_device_id}。"
+                "设备已变化：当前连接的是 {board_device_id}，不是目标设备 {requested_board_device_id}。"
             ));
         }
 
@@ -4300,7 +4318,7 @@ async fn dispatch_remote_cli_binding(
             if let Err(error) =
                 usb_manager.send_follow_change_for_connection(&board_device_id, connection_generation, &disabled_topic, &disabled_payload)
             {
-                warning = Some(format!("USB 清理旧渠道失败: {error}"));
+                warning = Some(format!("清理旧渠道失败: {error}"));
             }
         }
         usb_manager
@@ -4310,7 +4328,7 @@ async fn dispatch_remote_cli_binding(
                 "control/remote-cli-binding",
                 &payload,
             )
-            .map_err(|error| format!("USB 下发渠道切换失败: {error}"))?;
+            .map_err(|error| format!("下发渠道切换失败: {error}"))?;
 
         // Establish the new lifecycle before clearing its session queue. Old
         // DSH lifecycle/event labels must not survive an otherwise idle follow.
@@ -4388,6 +4406,124 @@ fn get_or_create_desktop_device_id_inner() -> Result<String, String> {
     let id = format!("desktop-{}", uuid::Uuid::new_v4());
     write_private_file(&id_path, id.as_bytes())?;
     Ok(id)
+}
+
+#[cfg(target_os = "macos")]
+static BLE_TRANSPORT: std::sync::OnceLock<ble_transport::imp::BleTransport> = std::sync::OnceLock::new();
+
+/// Start the CoreBluetooth control link. Send bind once the link is secure.
+#[cfg(target_os = "macos")]
+fn start_ble_transport(app_handle: tauri::AppHandle) {
+    use ble_transport::imp::{BleEvent, BleTransport};
+    let line_handle = app_handle.clone();
+    let event_handle = app_handle.clone();
+    let transport = BleTransport::start(
+        move |line| {
+            // USB has priority: while USB is up the board also mirrors events
+            // over BLE, so ignore the BLE copy to avoid handling them twice.
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else { return };
+            let Some(topic) = value.get("topic").and_then(serde_json::Value::as_str) else { return };
+            if topic.starts_with("audio/") { return; }  // voice is USB-only
+            let payload = value.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+            if topic == "hello" {
+                eprintln!("[ble] hello from {}", payload.get("boardDeviceId").and_then(serde_json::Value::as_str).unwrap_or("?"));
+                if let Ok(mut hello) = BLE_HELLO.lock() { *hello = Some(payload.clone()); }
+            }
+            // Cache the BLE hello even while USB owns dispatch. Unplugging the
+            // cable can then use the already authenticated link immediately.
+            if line_handle.state::<usb_serial::UsbSerialManager>().status().connected { return; }
+            line_handle.state::<usb_serial::UsbSerialManager>().handle_ble_widget_ack(topic, &payload);
+            handle_incoming_usb_message(&line_handle, topic.to_string(), payload);
+        },
+        move |event| match event {
+            BleEvent::Disconnected => {
+                event_handle.state::<usb_serial::UsbSerialManager>().ble_widget_disconnected();
+                if let Ok(mut hello) = BLE_HELLO.lock() { *hello = None; }
+            }
+            BleEvent::Secure => {
+                eprintln!("[ble] link secure; sending bind");
+                let Ok(desktop_id) = get_or_create_desktop_device_id_inner() else { return };
+                if let Some(ble) = BLE_TRANSPORT.get() {
+                    ble.send_line(&serde_json::json!({
+                        "topic": "bind",
+                        "payload": { "desktopDeviceId": desktop_id },
+                    }).to_string());
+                }
+            }
+            BleEvent::PairingRemoved => {
+                eprintln!("[ble] board removed pairing; forget HachimoDock in System Settings > Bluetooth, then pair again");
+            }
+            other => eprintln!("[ble] {other:?}"),
+        },
+    );
+    let _ = BLE_TRANSPORT.set(transport);
+    let _ = usb_serial::BLE_FALLBACK.set(send_over_ble);
+    let _ = usb_serial::BLE_STATUS.set(ble_link_status);
+}
+
+/// Last hello received over the current secure BLE link.
+#[cfg(target_os = "macos")]
+static BLE_HELLO: std::sync::Mutex<Option<serde_json::Value>> = std::sync::Mutex::new(None);
+
+#[cfg(target_os = "macos")]
+fn ble_link_status() -> Option<usb_serial::UsbConnectionStatus> {
+    let ble = BLE_TRANSPORT.get()?;
+    let status = ble.status();
+    if !status.secure_bonded {
+        return None;
+    }
+    let hello = BLE_HELLO.lock().ok()?.clone()?;
+    if hello["boardDeviceId"].as_str()? != status.board_device_id.as_deref()? { return None; }
+    let text = |key: &str| hello.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+    Some(usb_serial::UsbConnectionStatus {
+        connected: true,
+        connection_id: status.generation.to_string(),
+        boot_id: hello.pointer("/capabilities/debugBootId").and_then(serde_json::Value::as_str).unwrap_or_default().into(),
+        port_name: "bluetooth".into(),
+        baud_rate: 0,
+        board_device_id: text("boardDeviceId"),
+        transport: "ble".into(),
+        runtime: text("runtime"),
+        device_model: text("deviceModel"),
+        firmware: text("fw"),
+        build_id: text("buildId"),
+        git_sha: text("gitSha"),
+        build_dirty: false,
+        protocol_schema: hello.get("protocolSchema").and_then(serde_json::Value::as_u64).unwrap_or(0) as u32,
+        wire_protocol: "ble-jsonl-v1".into(),
+        capabilities: hello.get("capabilities").cloned().unwrap_or(serde_json::Value::Null),
+    })
+}
+
+/// Topics that stay USB-only in the first BLE release (bulk transfers).
+#[cfg(target_os = "macos")]
+fn ble_topic_allowed(topic: &str) -> bool {
+    if topic == "config/status-cues" { return true; }
+    if topic.starts_with("asset/") {
+        return matches!(topic, "asset/slot-query" | "asset/stat" | "asset/activate" | "asset/begin"
+            | "asset/chunk" | "asset/file" | "asset/commit");
+    }
+    if topic.starts_with("debug/screenshot") {
+        return matches!(topic, "debug/screenshot" | "debug/screenshot_read" | "debug/screenshot_close");
+    }
+    const USB_ONLY: [&str; 2] = ["firmware/", "appearance/"];
+    // Voice is USB-only: no audio/* topics over BLE at all.
+    if topic.starts_with("audio/") { return false; }
+    !USB_ONLY.iter().any(|prefix| topic.starts_with(prefix))
+        && !topic.starts_with("music/")
+}
+
+#[cfg(target_os = "macos")]
+fn send_over_ble(generation: u64, topic: &str, payload: &serde_json::Value) -> Result<(), String> {
+    let ble = BLE_TRANSPORT.get().ok_or("P4 not connected (USB or Bluetooth)")?;
+    if !ble.status().secure_bonded {
+        return Err("P4 not connected (USB or Bluetooth)".into());
+    }
+    if !ble_topic_allowed(topic) {
+        return Err(format!("{topic} requires a USB connection"));
+    }
+    if topic == "widget/data" && usb_serial::BLE_WIDGET_BULK.load(std::sync::atomic::Ordering::SeqCst) { return Err("组件传输中，稍后更新数据".into()); }
+    ble.send_line_bound(generation, &serde_json::json!({ "topic": topic, "payload": payload }).to_string())
 }
 
 fn sync_usb_desktop_device_id(
@@ -5016,7 +5152,7 @@ fn set_p4_session_binding_blocking(
     }
     let result = binding;
 
-    let status = usb_manager.status();
+    let status = usb_manager.link_status();
     if !status.connected || status.board_device_id != board_device_id || status.connection_id != connection_id.to_string() {
         return Err("USB session scope changed; binding not committed".into());
     }
@@ -5070,6 +5206,7 @@ fn set_p4_session_binding_blocking(
 fn send_button_config_and_wait_for_ack(
     usb_manager: &usb_serial::UsbSerialManager,
     expected_board_device_id: &str,
+    generation: u64,
     topic: &str,
     request_id: &str,
     command_payload: &serde_json::Value,
@@ -5080,10 +5217,10 @@ fn send_button_config_and_wait_for_ack(
         topic, request_id
     );
     let ack_receiver = register_button_config_ack_waiter(request_id)?;
-    if let Err(error) = usb_manager.send_to_board(expected_board_device_id, topic, command_payload)
+    if let Err(error) = usb_manager.send_link_bound(expected_board_device_id, generation, topic, command_payload)
     {
         remove_button_config_ack_waiter(request_id);
-        return Err(format!("USB OTA 下发按钮配置失败: {error}"));
+        return Err(format!("下发按钮配置失败: {error}"));
     }
 
     let ack_payload =
@@ -5121,15 +5258,12 @@ async fn button_config_signal(
     voiceEnabled: Option<bool>,
     usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
 ) -> Result<serde_json::Value, String> {
-    let usb_status = usb_manager.status();
-    if !usb_status.connected {
-        return Err("USB 未连接,无法通过 USB OTA 下发按钮配置".to_string());
-    }
+    let (link, generation) = usb_manager.connected_link_snapshot(&boardDeviceId)?;
     if bindings.is_empty() {
         return Err("按钮配置为空,无法下发".to_string());
     }
     let voice_button = normalize_voice_button(voiceButton)?;
-    let command_topic = if usb_status.runtime.eq_ignore_ascii_case("esp-p4") {
+    let command_topic = if link.runtime.eq_ignore_ascii_case("esp-p4") {
         "input/config"
     } else {
         "control/command"
@@ -5181,6 +5315,7 @@ async fn button_config_signal(
             match send_button_config_and_wait_for_ack(
                 &manager,
                 &wait_board_device_id,
+                generation,
                 command_topic,
                 &wait_request_id,
                 &wait_command_payload,
@@ -5202,7 +5337,8 @@ async fn button_config_signal(
         "boardDeviceId": boardDeviceId,
         "requestId": request_id,
         "sent": command_payload,
-        "usbSent": true,
+        "usbSent": link.transport != "ble",
+        "transport": link.transport,
         "bindingCount": binding_count,
         "message": ack_payload.get("message").cloned().unwrap_or_else(|| serde_json::json!("button config written")),
         "ack": ack_payload,
@@ -6974,6 +7110,36 @@ fn detect_openclaw() -> DetectedAgent {
     }
 }
 
+fn detect_devin() -> DetectedAgent {
+    let home = get_home_dir().ok();
+    let cli = find_agent_executable(
+        "devin", home.as_deref(), &[".local/bin/devin", ".local/bin/devin.exe"], "devin.exe",
+    );
+    let config_dir = if cfg!(windows) {
+        env::var_os("APPDATA").map(PathBuf::from)
+            .or_else(|| home.map(|dir| dir.join("AppData/Roaming")))
+    } else {
+        env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)
+            .or_else(|| home.map(|dir| dir.join(".config")))
+    }.map(|dir| dir.join("devin"));
+    let detected = cli.is_some();
+    let ready = detected && config_dir.as_ref().is_some_and(|dir| dir.is_dir());
+    let (status, detail) = if ready {
+        ("ready", "支持 Devin CLI 本地会话与任务状态跟随")
+    } else if detected {
+        ("manual_setup", "请先打开一次 Devin CLI，再启用状态跟随")
+    } else {
+        ("not_found", "未检测到 Devin CLI")
+    };
+    DetectedAgent {
+        id: "devin".into(), label: "Devin".into(), detected, ready,
+        status: status.into(), detail: detail.into(),
+        command_path: cli.unwrap_or_default(),
+        config_path: config_dir.map(|dir| dir.join("config.json").to_string_lossy().into_owned()).unwrap_or_default(),
+        activity_path: String::new(), can_sync_hook: ready,
+    }
+}
+
 fn detect_mimocode() -> DetectedAgent {
     let home = get_home_dir().ok();
     let cli_path = find_agent_executable(
@@ -7281,6 +7447,7 @@ fn detect_local_agents_inner() -> Result<AgentDiscoveryResponse, String> {
         detect_mimocode(),
         detect_dsh(),
         detect_workbuddy(),
+        detect_devin(),
     ];
 
     Ok(AgentDiscoveryResponse {
@@ -7558,6 +7725,20 @@ async fn usb_send_speech(
 }
 
 #[tauri::command]
+fn load_status_cues() -> Result<status_cues::Config, String> { status_cues::load() }
+
+#[tauri::command]
+async fn set_status_cues(
+    manager: tauri::State<'_, usb_serial::UsbSerialManager>,
+    config: status_cues::Config,
+) -> Result<status_cues::Config, String> {
+    let _guard = STATUS_CUES_DELIVERY.lock().map_err(|e| e.to_string())?;
+    let config = status_cues::save(config)?;
+    manager.send("config/status-cues", &status_cues::payload(config))?;
+    Ok(config)
+}
+
+#[tauri::command]
 fn usb_bubble_pixels_ready(
     window: tauri::WebviewWindow,
     usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
@@ -7626,10 +7807,18 @@ async fn usb_audio_capture_control(
 }
 
 #[tauri::command]
+fn ble_adapter_state() -> &'static str {
+    #[cfg(target_os = "macos")]
+    { BLE_TRANSPORT.get().and_then(|ble| ble.status().adapter_state).unwrap_or("initializing") }
+    #[cfg(not(target_os = "macos"))]
+    { "unsupported" }
+}
+
+#[tauri::command]
 async fn usb_get_status(
     usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
 ) -> Result<usb_serial::UsbConnectionStatus, String> {
-    Ok(usb_manager.status())
+    Ok(usb_manager.link_status())
 }
 
 /// Query or set the board's master volume. Any uncertain result requires a
@@ -7714,6 +7903,16 @@ async fn usb_get_diagnostics(
         object.insert("desktopBuild".to_string(), desktop_build_info());
     }
     Ok(report)
+}
+
+#[tauri::command]
+async fn capture_board_screen(
+    usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
+    expected_board_device_id: String,
+) -> Result<serde_json::Value, String> {
+    let manager = usb_manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || graphics_capture::capture(&manager, &expected_board_device_id))
+        .await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -7831,7 +8030,7 @@ fn usb_get_bundled_firmware_info(
         usb_serial::P4ChipTarget::LegacyV1
     };
     let path = bundled_p4_firmware_path(&app_handle, usb_serial::bundled_resource_for_chip(target))?;
-    usb_serial::inspect_firmware_image(&path)
+    usb_serial::inspect_firmware_image(&path, usb_serial::device_max_image_bytes(&status.capabilities))
 }
 
 async fn run_usb_firmware_update(
@@ -7918,8 +8117,8 @@ async fn usb_update_bundled_firmware(
         chip_manager.firmware_chip_target(&chip_board_id)
     }).await.map_err(|error| error.to_string())??;
     let firmware_path = bundled_p4_firmware_path(&app_handle, usb_serial::bundled_resource_for_chip(target))?;
-    let firmware_info = usb_serial::inspect_firmware_image(&firmware_path)?;
     let status = manager.status();
+    let firmware_info = usb_serial::inspect_firmware_image(&firmware_path, usb_serial::device_max_image_bytes(&status.capabilities))?;
     if !status.connected || status.board_device_id != expected_board_device_id {
         return Err("connected USB board changed before bundled firmware update".to_string());
     }
@@ -8228,7 +8427,11 @@ async fn usb_sync_appearance(
     board_device_id: Option<String>,
     audio_only: Option<bool>,
 ) -> Result<UsbSyncAppearanceResult, String> {
-    let status = usb_manager.status();
+    let status = usb_manager.link_status();
+    if status.transport == "ble" {
+        if audio_only.unwrap_or(false) { return Err("单独更新音效需要 USB 连接".into()); }
+        if status.capabilities["bleAppearanceChunks"] != true { return Err("此固件不支持蓝牙形象传输".into()); }
+    }
     let native_usb_available = usb_serial::p4_native_usb_available();
     if !status.connected && !native_usb_available {
         return Err("USB 未连接，请先通过 USB 连接设备".to_string());
@@ -9230,9 +9433,9 @@ async fn install_clawpkg_over_usb(
     input: InstallClawpkgInput,
 ) -> Result<InstallClawpkgResult, String> {
     /* connection precondition */
-    let status = usb_manager.status();
+    let status = usb_manager.link_status();
     if !status.connected {
-        return Err("USB 未连接,请先通过 USB 连接设备".to_string());
+        return Err("设备未连接，请先连接设备".to_string());
     }
     if input.expected_board_device_id.as_deref().is_some_and(|id|id!=status.board_device_id){return Err("设备已切换，请重新确认安装目标".into());}
 
@@ -9626,7 +9829,7 @@ async fn list_device_widgets(
     if expected_board_device_id.is_empty() {
         return Err("USB 组件清单必须指定当前 boardDeviceId。".to_string());
     }
-    let status = usb_manager.status();
+    let status = usb_manager.link_status();
     if !status.connected {
         return Err("USB 未连接，请先连接设备后再查询组件清单。".to_string());
     }
@@ -9735,7 +9938,7 @@ async fn remove_widget_from_device(
     if expected_board_device_id.is_empty() {
         return Err("USB 删除必须指定安装时的 boardDeviceId。".to_string());
     }
-    let status = usb_manager.status();
+    let status = usb_manager.link_status();
     if !status.connected {
         return Err("USB 未连接，请先连接设备后再移除组件。".to_string());
     }
@@ -10567,7 +10770,7 @@ fn score_usb_source(source: &str) -> i32 {
         "codex" => 30,
         "deepseek-harness" => 25,
         "claude-code" => 20,
-        "mimocode" => 15,
+        "devin" | "mimocode" => 15,
         "workbuddy" => 15,
         "openclaw" => 10,
         _ => 0,
@@ -10619,6 +10822,7 @@ fn usb_source_display_name(source: &str) -> String {
         "codex" => "ChatGPT（Codex）".to_string(),
         "claude" | "claude-code" => "Claude".to_string(),
         "openclaw" => "OpenClaw".to_string(),
+        "devin" => "Devin".to_string(),
         "mimo" | "mimo-code" | "mimocode" => "MiMoCode".to_string(),
         "deepseek-harness" | "deepseek" | "dsh" => "DeepSeek Harness".to_string(),
         "workbuddy" | "work-buddy" => "WorkBuddy".to_string(),
@@ -10974,7 +11178,12 @@ fn start_usb_host_heartbeat(usb_manager: usb_serial::UsbSerialManager) {
     thread::spawn(move || loop {
         thread::sleep(Duration::from_secs(2));
         retire_changed_device_voice_transport(&usb_manager);
-        if !usb_manager.status().connected {
+        let link = usb_manager.link_status();
+        if link.connected && link.transport == "ble" {
+            let _ = usb_manager.send_to_board(&link.board_device_id, "system/heartbeat",
+                &serde_json::json!({"tsMs":current_timestamp_ms()}));
+        }
+        if !link.connected {
             continue;
         }
         if let Err(error) = usb_manager.send(
@@ -10986,6 +11195,31 @@ fn start_usb_host_heartbeat(usb_manager: usb_serial::UsbSerialManager) {
     });
 }
 
+// Notices from both agents are independent of the currently followed chat.
+// A short, expiring queue keeps concurrent requests visible in arrival order.
+fn forward_mac_notice(dir: &Path, now: u64, ready: bool, send: impl Fn(&serde_json::Value) -> Result<(), String>) -> bool {
+    let mut paths = recent_bridge_json_paths(dir, now);
+    paths.sort();
+    for path in paths {
+        let Ok(bytes) = fs::read(&path) else { continue };
+        let notice = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+        let Some(notice) = notice.filter(|n| n["expiresAtMs"].as_u64().unwrap_or(0) > now
+            && n["title"].as_str().is_some_and(|s| !s.is_empty() && s.len() < 48)
+            && n["text"].as_str().is_some_and(|s| s.len() < 192)) else {
+            let _ = fs::remove_file(path);
+            continue;
+        };
+        // Keep the same display identity when the board saw a notice but its ACK was lost.
+        let id = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("");
+        if !ready || send(&serde_json::json!({"noticeId": id, "title": notice["title"], "text": notice["text"]})).is_err() {
+            return false;
+        }
+        let _ = fs::remove_file(path);
+        return true;
+    }
+    false
+}
+
 /// Background thread: poll bridge state files and forward to device via USB serial.
 fn start_usb_state_forwarder(usb_manager: usb_serial::UsbSerialManager) {
     thread::spawn(move || {
@@ -10995,6 +11229,16 @@ fn start_usb_state_forwarder(usb_manager: usb_serial::UsbSerialManager) {
             .unwrap_or_else(|_| env::temp_dir());
         let state_dir = tmp.join("pet-manager-bridge-state");
         let speech_dir = tmp.join("pet-manager-bridge-speech");
+        let notice_dir = tmp.join("pet-manager-mac-notices");
+        let notices = usb_manager.clone();
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_millis(800));
+            let status = notices.link_status();
+            if forward_mac_notice(&notice_dir, current_timestamp_ms(), status.connected,
+                |payload| notices.send_mac_notice(&status.board_device_id, payload.clone())) {
+                thread::sleep(Duration::from_secs(8));
+            }
+        });
         let mut last_enabled_refresh_ms: u64 = 0;
         let mut enabled_agents: std::collections::HashSet<String> =
             std::collections::HashSet::new();
@@ -11015,7 +11259,7 @@ fn start_usb_state_forwarder(usb_manager: usb_serial::UsbSerialManager) {
             thread::sleep(Duration::from_millis(800));
 
             let now_ms = current_timestamp_ms();
-            let status = usb_manager.status();
+            let status = usb_manager.link_status();
             if !status.connected {
                 if was_usb_connected {
                     last_source_signatures.clear();
@@ -11514,6 +11758,8 @@ pub fn run() {
                 eprintln!("[desktop-tray] unavailable; keeping foreground close/exit behavior: {}",error);
             }
             desktop_window::fit(app.handle(),true);
+            #[cfg(target_os = "macos")]
+            start_ble_transport(app.handle().clone());
             let bundled=app.path().resource_dir()?.join("builtin-clawpkgs");
             #[cfg(debug_assertions)]
             let bundled=if bundled.is_dir(){bundled}else{PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../builtin-clawpkgs")};
@@ -11535,6 +11781,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             volcengine_asr::configure_storage_dir(app.path().app_data_dir()?)
                 .map_err(std::io::Error::other)?;
+            status_cues::configure(app.path().app_data_dir()?);
             voice_chat_settings::configure_storage_dir(app.path().app_data_dir()?)
                 .map_err(std::io::Error::other)?;
             llm_network::configure_storage_dir(app.path().app_data_dir()?)
@@ -11689,8 +11936,11 @@ pub fn run() {
             usb_bubble_pixels_ready,
             usb_send_bubble_pixels,
             usb_send_command,
+            load_status_cues,
+            set_status_cues,
             usb_audio_capture_control,
             usb_get_status,
+            ble_adapter_state,
             usb_device_volume,
             usb_set_screen_page,
             usb_activate_installed_widget,
@@ -11711,6 +11961,7 @@ pub fn run() {
             usb_get_diagnostics,
             frontend_startup_generation,
             frontend_startup_ready,
+            capture_board_screen,
             usb_get_button_config,
             usb_reset_input_config,
             usb_reboot_device,
@@ -12019,6 +12270,7 @@ fn selected_agent_to_channel_id(value: &str) -> String {
         "claude-code" => "claude".to_string(),
         "codex" => "codex".to_string(),
         "openclaw" => "openclaw".to_string(),
+        "devin" => "devin".to_string(),
         "mimocode" => "mimocode".to_string(),
         "deepseek-harness" => "deepseek-harness".to_string(),
         "workbuddy" => "workbuddy".to_string(),
@@ -12031,6 +12283,7 @@ fn normalize_pet_channel_id(value: String) -> String {
         "codex" => "codex".to_string(),
         "claude" => "claude".to_string(),
         "openclaw" => "openclaw".to_string(),
+        "devin" => "devin".to_string(),
         "mimocode" => "mimocode".to_string(),
         "deepseek-harness" | "deepseek" | "dsh" => "deepseek-harness".to_string(),
         "workbuddy" => "workbuddy".to_string(),
@@ -14812,6 +15065,28 @@ mod tests {
     }
 
     #[test]
+    fn mac_notices_expire_and_retry_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = current_timestamp_ms();
+        for (name, expiry) in [("0", now - 1), ("1", now + 30000), ("2", now + 30000)] {
+            fs::write(dir.path().join(format!("{name}.json")), serde_json::json!({
+                "title":"Devin 等你审批", "text":name, "expiresAtMs":expiry
+            }).to_string()).unwrap();
+        }
+        assert!(!forward_mac_notice(dir.path(), now, false, |_| panic!("offline")));
+        assert!(!dir.path().join("0.json").exists());
+        assert!(!forward_mac_notice(dir.path(), now, true, |_| Err("disconnected".into())));
+        for expected in ["1","2"] {
+            assert!(forward_mac_notice(dir.path(), now, true, |payload| {
+                assert_eq!(payload["text"], expected);
+                assert_eq!(payload["noticeId"], expected);
+                Ok(())
+            }));
+        }
+        assert!(!forward_mac_notice(dir.path(), now, true, |_| panic!("duplicate")));
+    }
+
+    #[test]
     fn usb_source_allowed_by_follow_prefers_selected_agent() {
         let enabled = HashSet::from(["codex".to_string(), "claude-code".to_string()]);
         let selected = Some("claude-code".to_string());
@@ -15145,6 +15420,7 @@ mod tests {
             vec![
                 "codex".to_string(),
                 "deepseek-harness".to_string(),
+                "devin".to_string(),
                 "mimocode".to_string(),
                 "openclaw".to_string(),
                 "workbuddy".to_string()
@@ -15570,6 +15846,17 @@ mod tests {
 
         assert_eq!(read_live_managed_pid(&pid_path), None);
         assert!(!pid_path.exists());
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod status_cue_transport_tests {
+    #[test]
+    fn status_cues_are_ble_control_not_voice() {
+        assert!(super::ble_topic_allowed("config/status-cues"));
+        assert!(!super::ble_topic_allowed("audio/play_begin"));
+        assert!(!super::ble_topic_allowed("music/control"));
+        assert!(!super::ble_topic_allowed("firmware/begin"));
     }
 }
 

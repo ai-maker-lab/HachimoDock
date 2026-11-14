@@ -1,6 +1,6 @@
 /**
- * [Input] Tauri USB scan/connect/status commands and persisted device bindings.
- * [Output] USB setup within normal navigation; discovers verified devices and only locks completion after successful dashboard handoff, retaining retry on readback failure.
+ * [Input] Tauri link status, USB discovery and persisted device bindings.
+ * [Output] USB and macOS BLE setup within normal navigation; discovers verified devices and only locks completion after successful dashboard handoff, retaining retry on readback failure.
  * [Pos] component node in pc/src
  * [Sync] If this file changes, update this header and `pc/src/.folder.md`.
  */
@@ -9,6 +9,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ensureBridgeRuntime } from "./lib/bridge-runtime.js";
 import {
+  Bluetooth,
   Cable,
   CheckCircle2,
   Loader2,
@@ -28,9 +29,10 @@ function stableBindings(bindings) {
     : [];
 }
 
-function normalizedUsbStatus(status) {
+function normalizedLinkStatus(status) {
   return {
     connected: Boolean(status?.connected),
+    transport: status?.transport === "ble" ? "ble" : "usb",
     portName: String(status?.portName || "").trim(),
     boardDeviceId: String(status?.boardDeviceId || "").trim(),
     runtime: String(status?.runtime || "").trim(),
@@ -38,6 +40,7 @@ function normalizedUsbStatus(status) {
 }
 
 export default function DeviceSetup({ onComplete } = {}) {
+  const supportsBle = /Mac/i.test(globalThis.navigator?.platform || "");
   const [phase, setPhase] = useState("scanning");
   const [message, setMessage] = useState("正在自动查找已连接的桌宠…");
   const [device, setDevice] = useState(null);
@@ -52,9 +55,9 @@ export default function DeviceSetup({ onComplete } = {}) {
   }, [onComplete]);
 
   const persistConnectedDevice = useCallback(async (rawStatus) => {
-    const status = normalizedUsbStatus(rawStatus);
+    const status = normalizedLinkStatus(rawStatus);
     if (!status.connected || !status.boardDeviceId) {
-      throw new Error("USB 已连接，但设备没有返回有效身份");
+      throw new Error("设备已连接，但设备没有返回有效身份");
     }
 
     const desktopDeviceId = await invoke("get_or_create_desktop_device_id");
@@ -62,7 +65,7 @@ export default function DeviceSetup({ onComplete } = {}) {
       binding: {
         boardDeviceId: status.boardDeviceId,
         desktopDeviceId,
-        wifiSsid: `USB(${status.portName || "direct"})`,
+        wifiSsid: status.transport === "ble" ? "BLE" : `USB(${status.portName || "direct"})`,
         boundAt: Date.now(),
       },
     });
@@ -71,7 +74,7 @@ export default function DeviceSetup({ onComplete } = {}) {
     if (!mountedRef.current) return;
     setDevice(status);
     setPhase("connected");
-    setMessage("设备已连接，正在进入管理页面…");
+    setMessage(`已连接（${status.transport === "ble" ? "蓝牙" : "USB"}），正在进入管理页面…`);
     await finish();
   }, [finish]);
 
@@ -82,7 +85,7 @@ export default function DeviceSetup({ onComplete } = {}) {
     const request = (async () => {
       if (!quiet && mountedRef.current) {
         setPhase("scanning");
-        setMessage("正在扫描 USB 设备…");
+        setMessage("正在查找设备…");
       }
 
       try {
@@ -92,14 +95,14 @@ export default function DeviceSetup({ onComplete } = {}) {
           return;
         }
 
-        let status = normalizedUsbStatus(await invoke("usb_get_status"));
+        let status = normalizedLinkStatus(await invoke("usb_get_status"));
         if (!status.connected || !status.boardDeviceId) {
           const candidates = await invoke("usb_scan_devices");
           for (const candidate of Array.isArray(candidates) ? candidates : []) {
             const portName = String(candidate?.portName || "").trim();
             if (!portName) continue;
             try {
-              status = normalizedUsbStatus(await invoke("usb_connect", { portName }));
+              status = normalizedLinkStatus(await invoke("usb_connect", { portName }));
               if (status.connected && status.boardDeviceId) break;
             } catch {
               // A serial port is not necessarily a Pet Manager device. Keep probing.
@@ -112,10 +115,17 @@ export default function DeviceSetup({ onComplete } = {}) {
           return;
         }
 
+        const adapter = supportsBle ? await invoke("ble_adapter_state") : null;
+        const hints = {
+          powered_off: "Mac 蓝牙已关闭，请在控制中心打开蓝牙。",
+          unauthorized: "请在 Mac 系统设置 → 隐私与安全性 → 蓝牙中允许本客户端访问。",
+          unsupported: "此 Mac 无法使用蓝牙，请用 USB 数据线连接。",
+          initializing: "正在启动 Mac 蓝牙…",
+        };
         if (mountedRef.current) {
           setDevice(null);
           setPhase("waiting");
-          setMessage("暂未检测到桌宠，请确认设备已开机并连接数据线。");
+          setMessage(hints[adapter] || (supportsBle ? "正在寻找桌宠，首次连接请打开板子的配对窗口。" : "暂未检测到桌宠，请确认设备已开机并连接数据线。"));
         }
       } catch (error) {
         if (mountedRef.current) {
@@ -134,7 +144,7 @@ export default function DeviceSetup({ onComplete } = {}) {
         scanInFlightRef.current = null;
       }
     }
-  }, [finish, persistConnectedDevice]);
+  }, [finish, persistConnectedDevice, supportsBle]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -177,7 +187,7 @@ export default function DeviceSetup({ onComplete } = {}) {
         </div>
 
         <div className="usb-setup-card__copy">
-          <span className="usb-setup-card__eyebrow">USB 自动连接</span>
+          <span className="usb-setup-card__eyebrow">设备自动连接</span>
           <h2>{phase === "connected" ? "已发现桌宠" : "连接你的桌宠"}</h2>
           <p>{message}</p>
         </div>
@@ -190,12 +200,13 @@ export default function DeviceSetup({ onComplete } = {}) {
             </div>
             <div>
               <dt>接口</dt>
-              <dd>{device.portName || "USB"}</dd>
+              <dd>{device.transport === "ble" ? "蓝牙" : device.portName || "USB"}</dd>
             </div>
           </dl>
         ) : (
           <div className="usb-setup-checklist">
             <span><Cable size={18} /> 使用可传输数据的 USB 线连接设备</span>
+            {supportsBle && <span><Bluetooth size={18} /> 蓝牙固件可按住 SW1 + SW3 五秒配对，核对两端数字后在板上按 SW1，并在 Mac 确认</span>}
             <span><CheckCircle2 size={18} /> 保持设备开机，Pet Manager 会自动识别</span>
           </div>
         )}

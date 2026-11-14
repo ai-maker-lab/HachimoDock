@@ -565,6 +565,13 @@ fn realtime_entry_context(context: &str) -> bool {
 }
 
 pub fn handle_input_event(app: &AppHandle, payload: &Value) -> bool {
+    // Device-button voice PTT / realtime entry is USB-only (BLE is control-only).
+    if app.state::<UsbSerialManager>().inner().link_status().transport == "ble" {
+        let action = payload.get("action").and_then(Value::as_str).unwrap_or("");
+        if action == ACTION_ID || action.contains("voice") || action.contains("ptt") || action.contains("realtime") {
+            return true;
+        }
+    }
     if let Some(session) = active_session() {
         if payload.get("boardDeviceId").and_then(Value::as_str) == Some(session.board_device_id.as_str()) {
             if payload.get("action").and_then(Value::as_str) == Some(ACTION_ID) { request_stop(&session, "key"); }
@@ -643,9 +650,13 @@ pub fn start(app: &AppHandle, mut input: RealtimeChatStartInput) -> Result<Realt
         return Err("语音识别未配置，请先在 API 配置填写 ASR Key".into());
     }
     let usb = app.state::<UsbSerialManager>().inner().clone();
-    let usb_status = usb.status();
+    let usb_status = usb.link_status();
     if !usb_status.connected || usb_status.board_device_id != board {
-        return Err("设备未通过 USB 连接，实时对话需要设备在线".to_string());
+        return Err("设备未连接（USB 或蓝牙），实时对话需要设备在线".to_string());
+    }
+    let over_ble = usb_status.transport == "ble";
+    if over_ble {
+        return Err("蓝牙连接下不支持语音功能，请用 USB 连接".to_string());
     }
     if usb_status.connection_id.parse::<u64>().ok().filter(|id| *id != 0).is_none()
         || usb_status.boot_id.len() != 16 {
@@ -668,8 +679,9 @@ pub fn start(app: &AppHandle, mut input: RealtimeChatStartInput) -> Result<Realt
         audio_egress: Mutex::new(()),
         audio_requests: Arc::new(Mutex::new(Default::default())),
         cancelled: AtomicBool::new(false),
-        duplex: AtomicBool::new(usb_status.capabilities["features"]["audioAecRecovery"] == true
-            || ["audioAec","audioVad","audioFullDuplex"].iter().all(|key| usb_status.capabilities["features"][*key] == true)),
+        // BLE carries half-duplex voice only.
+        duplex: AtomicBool::new(!over_ble && (usb_status.capabilities["features"]["audioAecRecovery"] == true
+            || ["audioAec","audioVad","audioFullDuplex"].iter().all(|key| usb_status.capabilities["features"][*key] == true))),
         capture_armed: AtomicBool::new(false),
         capture_ready: AtomicBool::new(false),
         stop_notify: tokio::sync::Notify::new(),
@@ -941,7 +953,7 @@ impl Player {
 /// Dedicated thread: packs PCM into 100 ms `audio/play_chunk` frames and paces them so the board
 /// never holds more than ~1.2 s of audio ahead of real time.
 fn spawn_player(usb: UsbSerialManager, board: String, session: Arc<Session>) -> Player {
-    let subtitles = usb.status().capabilities.pointer("/features/conversationSubtitles").and_then(Value::as_bool) == Some(true);
+    let subtitles = usb.link_status().capabilities.pointer("/features/conversationSubtitles").and_then(Value::as_bool) == Some(true);
     let await_device = subtitles && active_session().map(|s| s.id == session.id).unwrap_or(false);
     let (tx, rx) = std_mpsc::channel::<(u64, PlayerCmd)>();
     let epoch = Arc::new(AtomicU64::new(0));
