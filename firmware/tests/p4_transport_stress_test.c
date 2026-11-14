@@ -135,6 +135,9 @@ static TickType_t xTaskGetTickCount(void) { return atomic_load(&fake_tick); }
 static bool pet_resources_device_debug_current(const int *resources, bool busy) { (void)resources; return !busy; }
 static int forbidden_console(const char *format, va_list args) { (void)format; (void)args; assert(false); return 0; }
 #define vprintf forbidden_console
+/* Wired-only harness: BLE mirror disabled. */
+#define pet_p4_ble_link_ready() false
+#define ble_send_line_shim(line,ctx) ((void)0)
 #include "production_transport.inc"
 
 static char diagnostic[2200], hello[5300], screenshot_body[4097], screenshot_frame[4300];

@@ -44,7 +44,8 @@ def _run_screenshot_writer(tmp_path,close_ack,integrity=False,negotiated=False,f
 #define ESP_OK 0
 typedef uint32_t TickType_t;
 typedef int SemaphoreHandle_t;
-typedef enum {PET_P4_TRANSPORT_BROADCAST,PET_P4_TRANSPORT_UART,PET_P4_TRANSPORT_USB_SERIAL_JTAG} pet_p4_transport_route_t;
+typedef enum {PET_P4_TRANSPORT_BROADCAST,PET_P4_TRANSPORT_UART,PET_P4_TRANSPORT_USB_SERIAL_JTAG,PET_P4_TRANSPORT_BLE} pet_p4_transport_route_t;
+static bool pet_p4_ble_queue_parts(const char *h,const char *b,size_t n,const char *s){(void)h;(void)b;(void)n;(void)s;return true;}
 static SemaphoreHandle_t g_transport_mutex=1,g_render_mutex=2;
 static char wire[2000000];static size_t used,fail_after=SIZE_MAX;
 static unsigned ticks,drains,fail_drain=UINT32_MAX;

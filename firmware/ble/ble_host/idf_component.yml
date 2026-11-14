@@ -1,0 +1,5 @@
+dependencies:
+  espressif/esp_hosted:
+    version: "1.4.7"
+    public: true
+  espressif/esp_wifi_remote: "0.14.5"

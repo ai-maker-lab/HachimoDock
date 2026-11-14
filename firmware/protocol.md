@@ -749,7 +749,7 @@ Board to PC:
       "firmwareUpdate": {
         "transport": "usb-jsonl-ota-v1",
         "slots": 2,
-        "maxImageBytes": 2621440,
+        "maxImageBytes": 3145728,
         "chunkBytes": 4096,
         "checksum": "sha256",
         "rollback": true,
@@ -804,13 +804,19 @@ Board to PC:
 }
 ```
 
+The example above is a wired build. The WiFi6 v3 BLE build sets
+`capabilities.usbOnly` to false and adds `capabilities.ble` with
+`controlTransport: "ble-jsonl-v1"`, `controlLineMaxBytes: 32768`, and
+`voice: false`. The nested `transport` object describes the USB endpoints.
+Board voice uses USB in the desktop client.
+
 `p4-bounded-runtime-v4` / `p4-grid-scene-v2` add modern semantic shapes and
 bounded animated sprites while the advertised arrays preserve v3/v1 package
 compatibility. A package may declare at most four horizontal PNG sprite sheets,
 eight frames per sheet, and 4096 decoded pixels across all frames. Pet Manager
 compiles each source PNG to `runtime/sprites/<id>.p4s` (RGB565 little-endian plus
 alpha) before USB downlink. Sprite files are checksum-verified, committed in the
-same dual-generation component transaction as `runtime/widget.json` and
+same alternate-generation component transaction as `runtime/widget.json` and
 `buttons.json`, and restored after reboot; raw PNG files are never interpreted
 by firmware.
 
@@ -1043,6 +1049,18 @@ PC to board:
   exceed the advertised limits. Every chunk carries `decodedSize` and an FNV-1a
   `checksum`; the chunk ACK echoes `path` and `index`, so the PC can reject stale
   acknowledgements and retry transient corruption without advancing another file.
+  `capabilities.widgetChunkAllPaths=true` advertises sequential multi-chunk
+  sprite files as well as the existing widget/buttons JSON and image receivers.
+  Indices start at zero per path. The immediately previous chunk can be retried
+  after ACK loss; skipped/older indices are rejected while assembling a file.
+  Sprite completion is determined by the bounded P4S1 header; incomplete assets
+  cannot pass the existing commit validation. Staging remains in PSRAM.
+  The desktop uses 4096 decoded bytes per chunk (JSON Line including Base64 <8 KiB).
+  Without this capability it retains legacy single-file chunks on USB and refuses
+  BLE installation with an instruction to upgrade firmware over USB first.
+  Declarative component/negative-screen/share metadata remains ignored by P4.
+  The same transactions and `widget-install-ack` work over USB and secure BLE;
+  snapshot pushes pause during BLE component transfers. USB remains preferred.
   Pet Manager serializes bulk installs, and a stale transfer cannot invalidate the
   currently active staging transaction.
   Successful installs are retained in a 32-slot physical SPIFFS catalog; the
@@ -1052,8 +1070,9 @@ PC to board:
   written to the package generation not referenced by the current catalog; a
   new id uses the first free slot. Firmware reopens and validates both files
   from Flash before one new catalog snapshot makes the package visible. The
-  previous snapshot and package generation remain a boot-time rollback point,
-  and startup selects the newest snapshot whose complete package set validates.
+  previous package generation is deleted after persistence and runtime swap.
+  Startup selects the newest parsed snapshot and reports damaged packages; only
+  independently validated older entries can be recovery candidates.
   Firmware advertises this behavior as
   `capabilities.componentCatalogGeneration=true`. The active component id is
   part of the same snapshot, so install, delete, and selection never expose a
@@ -1296,6 +1315,8 @@ The firmware keeps this full set for stored-config and component compatibility.
 Pet Manager's P4 button menu exposes only custom prompt, voice input,
 previous/next item, clear sessions, pet/component page toggle, confirm, back/cancel,
 and unbound.
+
+On-board BLE pairing reserves SW1+SW3 held together for 5 seconds. Its overlay consumes SW1/SW3 through release: SW1 short confirms numeric comparison, SW3 short rejects, and SW3 held 3 seconds in the idle pairing window clears bonds. Pairing numbers remain local to the screen/serial log and never appear in `input/event` or other protocol messages. SW2 and the encoder retain their normal routing.
 
 SW1 short press and joystick center short press both default to `page_enter`:
 they activate the selection and open `app` only from `components`; they do not
@@ -1883,6 +1904,16 @@ begin/commit 遇到录音、对话或播放则拒绝；客户端每次连接仅�
 修复其他组件不切换当前页面。已存在完整图片资源时拒绝已知无图启动包覆盖。
 无有效备用包时设备明确提示需要恢复，完整美术仍来自 PC/出厂资源区，不占应用 OTA 两份空间。
 
+
+## Status cue preference (USB and BLE)
+
+`hello.payload.capabilities.statusCueConfig = true` advertises support;
+`hello.payload.statusCues = {"enabled":false,"volume":30}` reports the current value.
+Send `config/status-cues` with object payload `{ "enabled": true, "volume": 30, "requestId": "unique-id" }`.
+`enabled` must be a JSON boolean; `volume` must be an integer in 0–100. A successful NVS commit uses the existing correlated `protocol/ack` success reply when a requestId is present. Invalid settings return `invalid_status_cues`; persistence failures return `status_cues_persist_failed`, without changing the running setting.
+This is control traffic and is allowed over BLE despite voice/audio remaining USB-only. The outbound BLE allowlist already carries hello and protocol ACKs; no new outbound topic is needed.
+NVS uses namespace `pet_cues`, key `config`, four-byte version-1 blob `{version,enabled,volume,reserved}`. Missing, wrong-size, unknown-version, or invalid blobs use disabled/30 defaults. Identical settings avoid redundant flash writes.
+Disabled suppresses `done`, `error`, and `waiting_user` before opening either appearance or embedded WAV sources. Enabled applies integer PCM gain only to those families, without changing codec output gain or media/voice/instrument/game audio. The desktop preference is authoritative on each supported hello.
 ## 开发候选宿主输入观察边界
 
 固定与滚动宿主 UI 的指针输入原生捕获同一份组件 ID、资源版本、宿主实例、
@@ -2343,3 +2374,9 @@ The original before/after epoch/revision/lease checks still gate the response.
 
 `globalAudioCues: "p4-global-audio-cues-v1"` 表示支持跨形象共用的提示音设置。
 音频专用 `asset/audio-*` 请求增加 `scope: "global"`。请求仍绑定当前设备、启动身份、当前物理形象槽及其 packId，以验证传输权限；持久化身份独立于视频包和形象槽。每阶段必须保持 scope 一致。仅 WAV 数据进入独立音频双银行，提交后对所有形象生效，空集合提交恢复默认提示音。上传、删除和下发均不准备、重传、清空或激活视频。旧 `p4-audio-patch-v1` 保留兼容，新的客户端要求全局能力后才下发全局音效，不回退到完整形象同步。
+
+`ui/mac-notice` displays a silent eight-second banner across pages. The PC supplies
+`title` (1–47 UTF-8 bytes) and `text` (0–191 bytes) over USB or BLE. It takes no
+input and sends no user decision. Pairing and interactive approvals retain priority.
+A retry with the same optional `noticeId` as the last banner is acknowledged
+without restarting its display timer. Supply `requestId` to receive `protocol/ack`.

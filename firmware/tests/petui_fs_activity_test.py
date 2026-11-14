@@ -182,7 +182,10 @@ static int esp_codec_dev_write(void*s,void*p,int n){(void)s;(void)p;(void)n;code
 #define fread observed_read
 #define fclose observed_close
 #define rewind observed_rewind
-static void iteration(request_t request){for(unsigned once=0;once<1;once++){
+typedef struct {bool enabled;unsigned volume;} pet_p4_status_cues_t;
+static pet_p4_status_cues_t pet_p4_status_cues_get(void){return (pet_p4_status_cues_t){true,100};}
+static void pet_p4_status_cues_scale(void*p,size_t n,unsigned v){(void)p;(void)n;assert(v==100);}
+static void iteration(request_t request){bool status_cue=true;for(unsigned once=0;once<1;once++){
 ''' + body + r'''
 }}
 #undef fopen

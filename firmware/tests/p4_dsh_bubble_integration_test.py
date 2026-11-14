@@ -184,9 +184,10 @@ def test_approval_invalidates_actual_private_final_frame_retention(tmp_path):
 #define PET_P4_UI_WIDTH 640
 #define PET_P4_UI_HEIGHT 480
 #define ESP_OK 0
-typedef struct {bool active;} state_t;
+typedef struct {bool active;unsigned long long mac_notice_until_ms;} state_t;
 static bool pet_p4_state_approval_pending(const state_t *s,unsigned long long now) {(void)now;return s->active;}
 static unsigned clears;
+static unsigned long long notice_until;
 static uint16_t rgb565(int r,int g,int b) {return (uint16_t)(r+g+b);}
 static void fill_rect(int x,int y,int w,int h,uint16_t c) {(void)x;(void)y;(void)w;(void)h;(void)c;clears++;}
 static bool g_last_approval_visible,g_app_may_retain,g_main_appearance_ready=true;
@@ -195,7 +196,7 @@ static pet_logical_retention_t g_app_final_retention;
 static pet_compact_underlay_t g_main_compact_underlay={.valid=true,.painted=true};
 static pet_logical_common_plan_t g_app_common_plan;
 static void frame(bool active,bool expected_reuse,bool expected_publish) {
-  state_t actual={active};const state_t *state=&actual;
+  state_t actual={.active=active,.mac_notice_until_ms=notice_until};const state_t *state=&actual;
   const unsigned long long now_ms=1000;
   const char *page="app";int lcd_err=ESP_OK;
   g_app_may_retain=pet_logical_retention_begin(&g_app_final_retention,g_app_common_plan,true,true,true);
@@ -214,6 +215,8 @@ int main(void) {
   frame(false,false,true);assert(clears==2);
   assert(!g_main_compact_underlay.valid && !g_main_compact_underlay.painted);
   frame(false,true,true);
+  notice_until=9000;frame(false,false,false);
+  notice_until=0;frame(false,false,true);
 }
 '''
     compile_run(tmp_path, harness + gate + main)

@@ -32,6 +32,10 @@ def test_real_transport_queues_logs_behind_complete_frames(tmp_path):
 #define PET_P4_UART_NUM 0
 #define portMAX_DELAY 0
 #define pdMS_TO_TICKS(ms) (ms)
+/* Stubs for the BLE mirror path referenced by the extracted TX code. */
+static bool ble_ready;static unsigned ble_calls;
+static bool pet_p4_ble_link_ready(void) { return ble_ready; }
+static void ble_send_line_shim(const char *line, void *ctx) { (void)line; (void)ctx;ble_calls++; }
 #define ESP_OK 0
 typedef pthread_mutex_t *SemaphoreHandle_t;
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -85,6 +89,11 @@ int main(void) {
   transport_send_line(frame,NULL);assert(!strcmp(usb_queue+1023,"{\"topic\":\"media/status\",\"payload\":{\"ok\":true}}\n"));
   usb_seen=false;size_t prior=usb_used;log_line("uart only");assert(usb_used==prior);
   assert(drains==0&&console_writes==1);
+  ble_ready=true;
+  transport_send_line(frame,NULL);assert(ble_calls==1);
+  pet_p4_transport_route_t direct=PET_P4_TRANSPORT_UART;
+  transport_send_line(frame,&direct);assert(ble_calls==1);
+  transport_send_line("{\"topic\":\"audio/chunk\",\"payload\":{}}",NULL);assert(ble_calls==1);
   puts("PASS actual TX: partial writes, 500 concurrent frames/logs, bounded diagnostics, no console bypass/drain");
 }
 ''')

@@ -5,6 +5,7 @@
 #include "pet_p4_instrument_core.h"
 #include "pet_p4_audio_frontend.h"
 #include "pet_p4_system_cues.h"
+#include "pet_p4_status_cues.h"
 #include "pet_p4_completion_cue_guard.h"
 #include "pet_p4_component_features.h"
 
@@ -318,7 +319,8 @@ static bool playback_gates_capture(uint64_t now_ms) {
     return false;
   }
   if (atomic_load_explicit(&g_stream_playing, memory_order_acquire)
-      || atomic_load_explicit(&g_playback_active, memory_order_acquire)) {
+      || atomic_load_explicit(&g_playback_active, memory_order_acquire)
+      || atomic_load_explicit(&g_stream_active, memory_order_acquire)) {
     return true;
   }
   uint64_t last = atomic_load_explicit(&g_stream_last_play_ms, memory_order_acquire);
@@ -899,6 +901,11 @@ static void playback_task(void *arg) {
       TickType_t wait=pdMS_TO_TICKS(10);vTaskDelay(wait?wait:1);
       continue;
     }
+    bool status_cue = pet_p4_system_cue_family(request.family) || pet_audio_patch_global_enabled(request.family);
+    if (status_cue && !pet_p4_status_cues_get().enabled) {
+      completion_cue_cancel_pending(&request, true);
+      continue;
+    }
     char fs_path[80];
     FILE *file = NULL;
     pet_fs_activity_t file_activity __attribute__((cleanup(pet_fs_activity_end)))={0};
@@ -948,6 +955,11 @@ static void playback_task(void *arg) {
       size_t count = wanted;
       if (file) count = fread(pcm, 1, wanted, file);
       else { memcpy(pcm, shared_pcm, wanted); shared_pcm += wanted; }
+      if (status_cue) {
+        pet_p4_status_cues_t config = pet_p4_status_cues_get();
+        if (!config.enabled) break;
+        pet_p4_status_cues_scale(pcm, count, config.volume);
+      }
       if (count != wanted || esp_codec_dev_write(g_speaker, pcm, (int) count) != ESP_OK) {
         ok = false;
         break;
@@ -1081,6 +1093,7 @@ esp_err_t pet_p4_audio_init(
   pet_p4_send_line_fn send_line,
   void *ctx
 ) {
+  pet_p4_status_cues_init();
   if (pet_p4_audio_ready() || pet_p4_audio_playback_ready()) return ESP_OK;
   pet_p4_audio_set_transport(send_line, ctx);
   snprintf(g_board_device_id, sizeof(g_board_device_id), "%s",
@@ -1261,6 +1274,8 @@ void pet_p4_audio_process(
   if (pet_p4_audio_playback_active()) return;
   const char *lifecycle = pet_p4_canonical_lifecycle(pet_p4_state_effective_lifecycle(state, now_ms));
   if (strcmp(lifecycle, "reply_complete") == 0) return;
+  if (!strcmp(lifecycle, "waiting_user")
+      && (!strcmp(completion_agent(state), "codex") || !strcmp(completion_agent(state), "devin"))) return;
   const pet_p4_session_queue_item_t *current_session = NULL;
   for (unsigned i = 0; i < state->session_queue_count && i < PET_P4_SESSION_QUEUE_MAX; i += 1) {
     if (state->current_session_id[0]

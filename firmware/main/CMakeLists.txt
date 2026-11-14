@@ -3,6 +3,12 @@
 # [Pos] ESP32-P4 main firmware component build definition.
 # [Sync] If this file changes, update `firmware/.folder.md` and `protocol.md`.
 
+set(ble_source "pet_p4_ble_disabled.c")
+if("$ENV{PET_P4_BLE}" STREQUAL "1")
+  set(ble_source "pet_p4_ble.c")
+  set(ble_requires bt ble_host)
+endif()
+
 idf_component_register(
   SRCS
     "pet_p4_main.c"
@@ -16,6 +22,7 @@ idf_component_register(
     "pet_p4_component_ext.c"
     "pet_p4_component_media.c"
     "pet_p4_system_cues.c"
+    "pet_p4_status_cues.c"
     "pet_p4_cue_packed.c"
     "pet_p4_audio_frontend.c"
     "pet_p4_behavior.c"
@@ -106,6 +113,7 @@ idf_component_register(
     "pet_p4_usb_descriptors.c"
     "pet_p4_renderer.c"
     "pet_p4_view.c"
+    ${ble_source}
   INCLUDE_DIRS
     "."
   PRIV_INCLUDE_DIRS
@@ -126,6 +134,7 @@ idf_component_register(
     espressif__esp_lcd_touch
     espressif__esp_lcd_touch_gt911
     app_update
+    ${ble_requires}
     json
     lvgl
     mbedtls
@@ -133,6 +142,10 @@ idf_component_register(
     spiffs
     tinyusb
 )
+
+if("$ENV{PET_P4_BLE}" STREQUAL "1")
+  target_compile_definitions(${COMPONENT_LIB} PRIVATE PET_P4_HAS_BLE=1)
+endif()
 
 # Shared, OTA-updatable status cues live in the application, not appearance slots.
 # Retain compiler stack reports for the nested component/media render path.
@@ -344,3 +357,7 @@ if(NOT pet_restart_count EQUAL 1)
   message(FATAL_ERROR "P4 restart target must contain exactly one pinned source")
 endif()
 set_property(TARGET ${pet_restart_lib} PROPERTY SOURCES "${pet_restart_replaced}")
+
+if("$ENV{PET_P4_BLE}" STREQUAL "1")
+  include("${CMAKE_CURRENT_LIST_DIR}/../ble/ble_host/hosted-startup.cmake")
+endif()

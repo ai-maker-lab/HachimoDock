@@ -23,7 +23,11 @@ def test_main_samples_clock_after_owner_lock_not_before_new_timer_admission(tmp_
 #define portMAX_DELAY 1
 typedef struct {unsigned unused;} pet_p4_view_model_t;
 static uint64_t clock_ms=100,observed;static bool held;static unsigned processes;
-static int g_state_mutex=1,g_state;
+#include "pet_p4_voice_policy.h"
+#define PET_P4_HOST_HEARTBEAT_TIMEOUT_MS 5000
+static bool pet_p4_ble_link_ready(void){return false;}
+typedef struct {bool ble_only_desktop;uint64_t usb_host_last_seen_ms;} state_t;
+static int g_state_mutex=1;static state_t g_state;
 static pet_program_timers_t timer;
 static int64_t esp_timer_get_time(void){return (int64_t)(clock_ms*1000);}
 static void xSemaphoreTake(int mutex,int timeout){
@@ -33,9 +37,9 @@ static void xSemaphoreTake(int mutex,int timeout){
  assert(pet_program_timers_start(&timer,1,clock_ms,&spec,1)==PET_TIMERS_OK);
 }
 static void observe(uint64_t now){assert(held&&now==200);processes++;}
-static void pet_p4_diagnostics_process(uint64_t now,int *s){assert(s==&g_state);observe(now);}
+static void pet_p4_diagnostics_process(uint64_t now,state_t *s){assert(s==&g_state);observe(now);}
 static void pet_p4_ota_process(uint64_t now){observe(now);}
-static void pet_p4_asset_transfer_process(int *s,uint64_t now){assert(s==&g_state);observe(now);}
+static void pet_p4_asset_transfer_process(state_t *s,uint64_t now){assert(s==&g_state);observe(now);}
 static void pet_p4_native_usb_process(uint64_t now){observe(now);}
 static pet_program_runtime_result_t enqueue(void *ctx,uint64_t generation,uint64_t sequence,const pet_program_event_t *event){
  (void)ctx;(void)generation;(void)sequence;(void)event;assert(!"not due yet");return PET_RUNTIME_OK;

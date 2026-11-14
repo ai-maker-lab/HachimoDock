@@ -21,6 +21,8 @@ def test_real_selection_parser_preserves_active_and_restores_visible_id(tmp_path
 #include "cJSON.h"
 #include "pet_p4_json_source.h"
 #include "pet_p4_storage_lane.h"
+#define pet_p4_ble_is_transport(send) false
+#define wired_audio_bound true
 #define PET_P4_MINIAPP_WIDGET_ID_MAX 48
 #define PET_P4_MINIAPP_CATALOG_MAX 30
 #define PET_WIDGET_TRACE_SCOPE(name,kind) ((void)0)
@@ -33,7 +35,7 @@ def test_real_selection_parser_preserves_active_and_restores_visible_id(tmp_path
 typedef int pet_widget_trace_kind_t;
 static void pet_widget_trace_end(int*p,bool ok){(void)p;(void)ok;}
 typedef void (*pet_p4_send_line_fn)(const char*,void*);
-typedef struct {char board_device_id[48],screen_page[24];unsigned stats,last_update_ms;}pet_p4_runtime_state_t;
+typedef struct {char board_device_id[48],screen_page[24];unsigned stats,last_update_ms;unsigned long long usb_host_last_seen_ms;}pet_p4_runtime_state_t;
 typedef struct {char *line;}pet_p4_query_reply_t;
 typedef struct {char widget_id[48],title[64];bool active;unsigned resource_state,image_count;}pet_p4_miniapp_catalog_entry_t;
 typedef struct {char widget_id[48],title[64];unsigned resource_state,image_count;}miniapp_catalog_item_t;

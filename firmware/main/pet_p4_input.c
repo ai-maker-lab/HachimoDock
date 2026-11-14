@@ -42,6 +42,8 @@
 
 #include "pet_p4_audio.h"
 #include "pet_p4_input_core.h"
+#include "pet_p4_ble.h"
+#include "pet_p4_renderer.h"
 #include "pet_p4_observation.h"
 #include "pet_p4_miniapp.h"
 #include "pet_p4_media.h"
@@ -842,13 +844,72 @@ static void input_task(void *arg) {
   );
   last_wake = xTaskGetTickCount();
 
+#if CONFIG_BT_NIMBLE_ENABLED
+  pet_p4_pair_chord_t pair_chord = {0};
+  bool pair_drain = false;
+  uint32_t clear_held = 0;
+  bool clear_sent = false;
+  uint32_t sw1_down_wait = 0;
+  bool pair_single_owned = false;
+#endif
   while (true) {
+#if CONFIG_BT_NIMBLE_ENABLED
+    bool sw1 = gpio_get_level(PET_P4_INPUT_SW1_GPIO) == 0;
+    bool sw3 = gpio_get_level(PET_P4_INPUT_SW3_GPIO) == 0;
+    bool was_chord = pair_chord.latched;
+    pet_p4_pair_snapshot_t pair;
+    pet_p4_ble_pair_snapshot(&pair);
+    bool overlay = pair.mode != PET_P4_PAIR_OFF;
+    if (!overlay && !pair_single_owned && pet_p4_pair_chord_update(&pair_chord, sw1, sw3, PET_P4_INPUT_SAMPLE_MS))
+      pet_p4_ble_open_pairing_window();
+    bool chord = was_chord || pair_chord.latched;
+    if (overlay || chord) pair_drain = true;
+    bool consume = overlay || chord || pair_drain;
+    if (pair.mode == PET_P4_PAIR_WINDOW && !sw1 && sw3 && !chord && !clear_sent) {
+      clear_held += PET_P4_INPUT_SAMPLE_MS;
+      if (clear_held >= 3000) { pet_p4_ble_pair_clear_bonds(); clear_sent = true; }
+    } else clear_held = 0;
+    if (!sw1 && !sw3) {
+      pair_chord = (pet_p4_pair_chord_t){0};
+      clear_sent = false;
+      if (!buttons[0].decoder.stable_pressed && !buttons[2].decoder.stable_pressed) {
+        pair_single_owned = false;
+        if (!overlay) pair_drain = false;
+      }
+    }
+#endif
     for (size_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); i += 1) {
       uint8_t flags = pet_p4_button_decoder_update(
         &buttons[i].decoder,
         gpio_get_level(buttons[i].gpio) == 0,
         PET_P4_INPUT_SAMPLE_MS
       );
+#if CONFIG_BT_NIMBLE_ENABLED
+      /* Reserve the initial SW1 down briefly for a two-finger chord. */
+      if (i == 0) {
+        if (flags & PET_P4_BUTTON_EVENT_DOWN) {
+          sw1_down_wait = 1;
+          flags &= ~PET_P4_BUTTON_EVENT_DOWN;
+        }
+        if (consume) sw1_down_wait = 0;
+        else if (sw1_down_wait) {
+          sw1_down_wait += PET_P4_INPUT_SAMPLE_MS;
+          if (sw1_down_wait >= 150 || (flags & PET_P4_BUTTON_EVENT_UP)) {
+            flags |= PET_P4_BUTTON_EVENT_DOWN;
+            sw1_down_wait = 0;
+          }
+        }
+      }
+      if (i == 0 || i == 2) {
+        if (consume) {
+          if (!chord && pair.mode == PET_P4_PAIR_COMPARE && (flags & PET_P4_BUTTON_EVENT_SHORT_PRESS))
+            pet_p4_ble_numcmp_reply(i == 0);
+          continue;
+        }
+      }
+      if ((i == 0 && flags) || (i == 2 && (flags & (PET_P4_BUTTON_EVENT_SHORT_PRESS | PET_P4_BUTTON_EVENT_LONG_PRESS))))
+        pair_single_owned = true;
+#endif
       queue_button_flags(buttons[i].control, flags);
     }
 
@@ -1377,6 +1438,12 @@ static void dispatch_binding_event(
   const char *gesture
 ) {
   const pet_p4_input_binding_t *binding = active_binding(event_name);
+  if (state && state->ble_only_desktop && binding
+      && (!strcmp(binding->action, "voice_ptt") || !strcmp(binding->action, "realtime_chat"))) {
+    if (strcmp(gesture, "hold_end")) pet_p4_renderer_voice_usb_notice(event->ts_ms);
+    send_ignored_component_event(state, send_line, ctx, event, event_name, gesture);
+    return;
+  }
   if (pet_p4_conversation_active(state)) {
     // The realtime mode owns input: never move/confirm/send into an Agent session.
     if (binding && (!strcmp(binding->action, "realtime_chat") || !strcmp(binding->action, "page_back"))) {

@@ -50,6 +50,9 @@ def actual_serial_tx_source():
 #include "pet_p4_control_integrity.h"
 #include "pet_p4_uart_pacing.h"
 #include "pet_p4_uart_control_staging.h"
+/* Wired-only harness: BLE mirror disabled. */
+#define pet_p4_ble_link_ready() false
+#define ble_send_line_shim(line,ctx) ((void)0)
 #define DRAM_ATTR
 #define pdTRUE 1
 #define pdMS_TO_TICKS(x) (x)

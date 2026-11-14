@@ -74,7 +74,7 @@ def test_flag_gating_and_single_reply_sites(tmp_path):
     assert text.count('#if PET_P4_LARGE_REPLY_DEFERRED\n  if(!strcmp(topic,"widget/inventory")||!strcmp(topic,"hello")\n      ||!strcmp(topic,"widget/catalog_snapshot")||!strcmp(topic,"widget/catalog_reconcile_result"))return true;\n#endif')==1
     # Exactly one inventory sender and one hello sender exist; the request handlers emit nothing after them.
     assert text.count('send_topic_payload(send_line, ctx, "widget/inventory", payload);')==1 and text.count('send_topic_payload(send_line, ctx, "hello", payload);')==1
-    bind=text[text.index('if (strcmp(topic, "ack") == 0 || strcmp(topic, "bind") == 0) {'):text.index('} else if (strcmp(topic,"debug/identity")==0){')]
+    bind=text[text.index('if (strcmp(topic, "ack") == 0 || strcmp(topic, "bind") == 0) {'):text.index('} else if (strcmp(topic, "config/status-cues") == 0) {')]
     assert bind.count('pet_p4_send_hello(state, send_line, ctx);')==1 and 'send_protocol_ack_if_requested' not in bind
     # Unsolicited hello lines are sent by the main task without a reply slot (unchanged path).
     assert main.count('pet_p4_send_hello_for_board(g_hello_board_id,transport_send_line,')>=1 and 'pet_p4_protocol_set_deferred_reply' not in main[:main.index('static void protocol_worker_task')]

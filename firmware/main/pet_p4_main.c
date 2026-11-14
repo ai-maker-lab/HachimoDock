@@ -47,6 +47,8 @@
 
 #include "pet_p4_lcd.h"
 #include "pet_p4_audio.h"
+#include "pet_p4_ble.h"
+#include "pet_p4_voice_policy.h"
 #include "pet_p4_system_cues.h"
 #include "pet_p4_audio_frontend.h"
 #include "pet_p4_diagnostics.h"
@@ -131,12 +133,14 @@ typedef enum {
   PET_P4_TRANSPORT_BROADCAST = 0,
   PET_P4_TRANSPORT_UART,
   PET_P4_TRANSPORT_USB_SERIAL_JTAG,
+  PET_P4_TRANSPORT_BLE,
 } pet_p4_transport_route_t;
 
 typedef struct {
   char *line;
   pet_p4_send_line_fn send_line;
   void *reply_ctx;
+  SemaphoreHandle_t ble_completed;
   /* Trusted internal work only. Wire requests cannot supply this token. */
   uint64_t activation_token;
   uint64_t cursor_token;
@@ -145,6 +149,7 @@ typedef struct {
 #endif
 } pet_p4_protocol_request_t;
 
+static const pet_p4_transport_route_t g_ble_route = PET_P4_TRANSPORT_BLE;
 static const pet_p4_transport_route_t g_uart_route = PET_P4_TRANSPORT_UART;
 static const pet_p4_transport_route_t g_usb_serial_jtag_route = PET_P4_TRANSPORT_USB_SERIAL_JTAG;
 #if PET_P4_SERIAL_CONTROL_NEGOTIATED
@@ -723,6 +728,13 @@ static void transport_send_line_impl(const char *line, void *ctx, bool drain) {
     pet_transport_audit_disarm(&g_transport_reply_audit);
   }
   if (g_transport_mutex) xSemaphoreGive(g_transport_mutex);
+  /* Unsolicited events (buttons, state) also reach a BLE desktop; the BLE
+     whitelist filters topics. Voice stays on the wired link. */
+  static const char audio_prefix[] = "{\"topic\":\"audio/";
+  if (route == PET_P4_TRANSPORT_BROADCAST && pet_p4_ble_link_ready()
+      && strncmp(line, audio_prefix, sizeof(audio_prefix) - 1) != 0) {
+    ble_send_line_shim(line, NULL);
+  }
 #if PET_P4_NATIVE_WORK_WINDOW
   if(work_window){bool released=pet_native_work_window_end();configASSERT(released);(void)released;}
 #endif
@@ -848,6 +860,8 @@ static bool screenshot_send_parts(const char *header,const char *body,size_t bod
   g_screenshot_tx=(pet_screenshot_tx_observation_t){0};
   pet_p4_transport_route_t route=reply_ctx?*((const pet_p4_transport_route_t*)reply_ctx):PET_P4_TRANSPORT_BROADCAST;
   if(screenshot_audio_busy())return pet_screenshot_tx_fail(&g_screenshot_tx,PET_SCREENSHOT_TX_AUDIO,0);
+  if (route == PET_P4_TRANSPORT_BLE)
+    return pet_p4_ble_queue_parts(header, body, body_len, suffix);
 #if PET_P4_NATIVE_WORK_WINDOW
   if(!pet_native_work_window_control_begin())return pet_screenshot_tx_fail(&g_screenshot_tx,PET_SCREENSHOT_TX_MUTEX,0);
 #endif
@@ -1016,7 +1030,7 @@ static bool maybe_handle_debug_line(const char *line, void *reply_ctx) {
         /* A control receipt, not raw image data: retain this connection's
          * existing required prefix instead of widening reader exemptions. */
         char prefix[PET_CONTROL_PREFIX_BYTES+1];size_t bytes=0;
-        bool sent=screenshot_control_framed(reply_ctx)
+        bool sent=route != PET_P4_TRANSPORT_BLE && screenshot_control_framed(reply_ctx)
           ?pet_control_prefix(prefix,closed,&bytes)&&screenshot_send_parts(prefix,closed,bytes,"\n",reply_ctx)
           :screenshot_send_line(closed,reply_ctx);
 #else
@@ -1066,7 +1080,7 @@ static bool maybe_handle_debug_line(const char *line, void *reply_ctx) {
     if(valid)for(const char *s=rid->valuestring;*s;s++)if(!((*s>='a'&&*s<='z')||(*s>='A'&&*s<='Z')||(*s>='0'&&*s<='9')||*s=='-'||*s=='_'))valid=false;
     if(!valid||route==PET_P4_TRANSPORT_BROADCAST){cJSON_Delete(request);screenshot_error("","invalid snapshot request",-1,0,reply_ctx);return true;}
     memcpy(request_id,rid->valuestring,strlen(rid->valuestring)+1);
-  }else if(mode){cJSON_Delete(request);screenshot_error("","unsupported snapshot mode",-1,0,reply_ctx);return true;}
+  }else if(mode || route == PET_P4_TRANSPORT_BLE){cJSON_Delete(request);screenshot_error("","unsupported snapshot mode",-1,0,reply_ctx);return true;}
   cJSON_Delete(request);
   if(g_screenshot.raw){
     /* A lost begin response can be repeated without recapturing another frame.
@@ -1267,7 +1281,6 @@ static bool enqueue_protocol_line(
   void *reply_ctx,
   void *enqueue_ctx
 ) {
-  (void) enqueue_ctx;
   if (!line || !line[0] || !send_line || !g_protocol_queue) return false;
   /* Storage still owns the mutation lane. Keep only the explicit RAM query
    * whitelist responsive on the existing RX task; no extra task or replay. */
@@ -1279,6 +1292,7 @@ static bool enqueue_protocol_line(
     xSemaphoreGive(g_state_mutex);
     if (handled) {
       if (reply.line) { send_line(reply.line,reply_ctx); cJSON_free(reply.line); }
+      if (send_line == ble_send_line_shim && enqueue_ctx) xSemaphoreGive(enqueue_ctx);
       return true;
     }
     cJSON_free(reply.line);
@@ -1301,6 +1315,7 @@ static bool enqueue_protocol_line(
     .line = line_copy,
     .send_line = send_line,
     .reply_ctx = reply_ctx,
+    .ble_completed = send_line == ble_send_line_shim ? enqueue_ctx : NULL,
   };
 #if PET_P4_RESET_PHASE_TRACE
   pet_reset_phase_set(PET_PHASE_ENQUEUE_QUEUE);
@@ -1492,6 +1507,15 @@ static void volume_worker_idle_commit(void) {
   pet_audio_volume_idle_commit((uint64_t)esp_timer_get_time()/1000ULL,idle,volume_worker_idle);
 }
 
+/* Preserve BLE RX ordering while using the upstream protocol/storage worker. */
+void pet_p4_ble_dispatch_line(const char *line) {
+  StaticSemaphore_t storage;
+  SemaphoreHandle_t completed = xSemaphoreCreateBinaryStatic(&storage);
+  if (enqueue_protocol_line(line, ble_send_line_shim, NULL, completed))
+    xSemaphoreTake(completed, portMAX_DELAY);
+  vSemaphoreDelete(completed);
+}
+
 static void protocol_worker_task(void *arg) {
   (void) arg;
 #if PET_P4_RESET_PHASE_TRACE
@@ -1569,7 +1593,9 @@ static void protocol_worker_task(void *arg) {
       || maybe_handle_program_session_probe_line(request.line,request.send_line,request.reply_ctx)
       || maybe_handle_program_main_probe_line(request.line,request.send_line,request.reply_ctx)
       || (request.send_line == transport_send_line
-          && maybe_handle_debug_line(request.line, request.reply_ctx)));
+          && maybe_handle_debug_line(request.line, request.reply_ctx))
+      || (pet_p4_ble_is_transport(request.send_line)
+          && maybe_handle_debug_line(request.line, (void *)&g_ble_route)));
 #if PET_P4_QUERY_OBSERVATION
     if(handled_debug)query_native_end();
     else{portENTER_CRITICAL(&g_query_observation_mux);g_query_observation.native_kind=PET_QUERY_ORDINARY;portEXIT_CRITICAL(&g_query_observation_mux);}
@@ -1650,6 +1676,7 @@ static void protocol_worker_task(void *arg) {
 #endif
     }
     free(request.line);
+    if (request.ble_completed) xSemaphoreGive(request.ble_completed);
   }
 }
 
@@ -2002,6 +2029,12 @@ void app_main(void) {
     ESP_LOGW(TAG, "P4 touchscreen unavailable, keeping buttons and display alive: %s",
              esp_err_to_name(touch_err));
   }
+  /* B1: BLE transport starts only after the pet UI is up; failures degrade to
+     "bluetooth unavailable" without touching USB/UART behavior. */
+  esp_err_t ble_err = pet_p4_ble_start();
+  if (ble_err != ESP_OK) {
+    ESP_LOGW(TAG, "BLE task start failed; bluetooth unavailable: %s", esp_err_to_name(ble_err));
+  }
   esp_err_t audio_err = pet_p4_audio_init(board_device_id, transport_send_audio_line, NULL);
   if (audio_err != ESP_OK) {
     ESP_LOGW(TAG, "P4 microphone unavailable, keeping non-voice controls alive: %s",
@@ -2136,6 +2169,8 @@ void app_main(void) {
      * like a regressing clock. Sample once AFTER acquiring the same boundary;
      * real monotonic-clock regressions must still fail closed. */
     unsigned long long now_ms = (unsigned long long) (esp_timer_get_time() / 1000ULL);
+    g_state.ble_only_desktop = pet_p4_voice_ble_only(pet_p4_ble_link_ready(),
+      g_state.usb_host_last_seen_ms, now_ms, PET_P4_HOST_HEARTBEAT_TIMEOUT_MS);
     pet_p4_diagnostics_process(now_ms, &g_state);
     pet_p4_ota_process(now_ms);
     pet_p4_asset_transfer_process(&g_state, now_ms);

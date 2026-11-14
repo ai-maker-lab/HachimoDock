@@ -124,3 +124,7 @@ pet_p4_joystick_direction_t pet_p4_joystick_decoder_update(
 #ifdef __cplusplus
 }
 #endif
+
+/* Chord owns both depressions until both keys are released. */
+typedef struct { uint32_t held_ms; bool latched, fired; } pet_p4_pair_chord_t;
+bool pet_p4_pair_chord_update(pet_p4_pair_chord_t *state, bool sw1, bool sw3, uint32_t ms);

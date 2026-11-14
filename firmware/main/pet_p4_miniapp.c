@@ -8328,9 +8328,7 @@ bool pet_p4_miniapp_install_chunk(const cJSON *payload, char *error, size_t erro
     const char *file_name = path + 16;
     const size_t file_name_length = strlen(file_name);
     char sprite_id[PET_P4_MINIAPP_SPRITE_ID_MAX] = {0};
-    uint8_t *decoded = NULL;
-    size_t decoded_size = 0;
-    if (index != 0 || file_name_length <= 4
+    if (file_name_length <= 4
         || strcmp(file_name + file_name_length - 4, ".p4s") != 0
         || file_name_length - 4 >= sizeof(sprite_id)) {
       set_error(error, error_size, "sprite chunk path or index is invalid");
@@ -8342,32 +8340,29 @@ bool pet_p4_miniapp_install_chunk(const cJSON *payload, char *error, size_t erro
       return false;
     }
     if (sprite_pack_find(&g_staging.sprites, sprite_id) >= 0) return true;
-    decoded = (uint8_t *) malloc(MINIAPP_SPRITE_FILE_MAX);
-    if (!decoded
-        || mbedtls_base64_decode(
-          decoded,
-          MINIAPP_SPRITE_FILE_MAX,
-          &decoded_size,
-          (const unsigned char *) data,
-          strlen(data)
-        ) != 0) {
-      free(decoded);
-      set_error(error, error_size, "sprite file exceeds its decoded size bound");
-      return false;
+    if (index == 0 && (strcmp(g_image_id, sprite_id) || !g_image_next)) {
+      g_image_used = 0; g_image_next = 0; strcpy(g_image_id, sprite_id);
     }
-    if (!verify_chunk_integrity(payload, decoded, decoded_size, error, error_size)
-        || !append_sprite_file(
-          &g_staging.sprites,
-          sprite_id,
-          decoded,
-          decoded_size,
-          error,
-          error_size
-        )) {
-      free(decoded);
-      return false;
+    if (strcmp(g_image_id, sprite_id) || (uint32_t)index > g_image_next) {
+      set_error(error, error_size, "sprite chunk sequence"); return false;
     }
-    free(decoded);
+    if ((uint32_t)index + 1 == g_image_next) return true;
+    if ((uint32_t)index != g_image_next) {
+      set_error(error, error_size, "sprite chunk sequence"); return false;
+    }
+    size_t before = g_image_used;
+    if (!decode_chunk(data, (char *)g_image_staging, sizeof(g_image_staging),
+                      &g_image_used, &decoded_len, false, error, error_size)) return false;
+    if (!verify_chunk_integrity(payload, g_image_staging + before, decoded_len, error, error_size)) {
+      g_image_used = before; return false;
+    }
+    size_t expected = g_image_used < 8 ? 0 : 8 + (size_t)g_image_staging[4] * g_image_staging[5] * g_image_staging[6] * 3;
+    if (!expected || memcmp(g_image_staging, "P4S1", 4) || expected > MINIAPP_SPRITE_FILE_MAX || g_image_used > expected) {
+      g_image_used = before; set_error(error, error_size, "sprite overflow or header"); return false;
+    }
+    if (g_image_used == expected && !append_sprite_file(&g_staging.sprites, sprite_id,
+          g_image_staging, g_image_used, error, error_size)) { g_image_used = before; return false; }
+    g_image_next++;
   }
 #if PET_P4_CAPABILITY_EXT
   else if (pet_cext_media_path_kind(path, NULL) != PET_CEXT_MEDIA_NONE) {

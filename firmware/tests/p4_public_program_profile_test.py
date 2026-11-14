@@ -112,7 +112,14 @@ def test_public_candidate_rides_the_verified_chain_and_undefines_only_the_unadmi
     # The v3 chip-family twin only changes platform / chip family / clock (as esp32_p4_evboard_v3 does); same source, flags, label.
     v3=config[PUBLIC_V3];assert v3['extends']==PUBLIC and v3['custom_p4_chip_family']=='v3' and '55.03.38-1' in v3['platform'] and v3['board_build.f_cpu']=='400000000L'
     assert set(v3.keys())-set(config['DEFAULT'].keys())<={'extends','platform','custom_p4_chip_family','board_build.f_cpu'}
-    assert (ROOT/'sdkconfig.esp32_p4_program_public_candidate_v3').read_bytes()==(ROOT/'sdkconfig.esp32_p4_evboard_v3').read_bytes()
+    # The supported BLE evboard target adds Hosted/NimBLE settings. Candidate
+    # profiles retain upstream configuration; compare the shared hardware bounds.
+    candidate=(ROOT/'sdkconfig.esp32_p4_program_public_candidate_v3').read_text()
+    board=(ROOT/'sdkconfig.esp32_p4_evboard_v3').read_text()
+    for key in ('ESP_REV_MIN_FULL','ESP_REV_MAX_FULL','ESPTOOLPY_FLASHSIZE','ESP_DEFAULT_CPU_FREQ_MHZ','PARTITION_TABLE_CUSTOM_FILENAME'):
+        pattern=r'^CONFIG_'+key+r'=(.*)$'
+        assert re.search(pattern,candidate,re.M)[1]==re.search(pattern,board,re.M)[1]
+    assert 'CONFIG_BT_NIMBLE_ENABLED=y' in board and 'CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y' in board
     # The bundled desktop firmware must carry this label: CMake PROJECT_VER and the evboard label equal the candidate's.
     cmake=(ROOT/'CMakeLists.txt').read_text();assert 'set(PROJECT_VER "'+release+'")' in cmake
     assert config['env:esp32_p4_evboard']['custom_p4_project_version']==release

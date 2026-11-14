@@ -9,6 +9,15 @@
 #pragma once
 
 #include <stdbool.h>
+#if defined(__has_include)
+#if __has_include("esp_err.h")
+#include "esp_err.h"
+#else
+typedef int esp_err_t;
+#endif
+#else
+#include "esp_err.h"
+#endif
 #include <stddef.h>
 
 #include "pet_p4_stats.h"
@@ -83,6 +92,10 @@ typedef struct {
   char active_agent[PET_P4_AGENT_MAX];
   char current_state[PET_P4_STATE_MAX];
   char current_event[PET_P4_STATE_MAX];
+  char mac_notice_id[64];
+  char mac_notice_title[48];
+  char mac_notice_text[192];
+  unsigned long long mac_notice_until_ms;
   char current_title[PET_P4_TITLE_MAX];
   char current_speech[PET_P4_SPEECH_MAX];
   char current_status[PET_P4_STATE_MAX];
@@ -98,6 +111,8 @@ typedef struct {
   pet_p4_session_queue_item_t session_queue_staging[PET_P4_SESSION_QUEUE_MAX];
   unsigned int session_queue_count;
   bool session_voice_active;
+  bool ble_only_desktop;
+  unsigned long long usb_host_last_seen_ms;
   unsigned long long session_snapshot_last_seen_ms;
   char screen_page[PET_P4_PAGE_MAX];
   /* DSH 审批上屏（R5）：PC bridge 下发的单条 pending approval。active 时渲染

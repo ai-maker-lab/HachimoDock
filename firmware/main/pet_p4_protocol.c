@@ -52,8 +52,17 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "pet_p4_audio.h"
+#include "pet_p4_status_cues.h"
 #include "pet_p4_audio_volume.h"
 #include "pet_p4_audio_frontend.h"
+#include "pet_p4_ble.h"
+static bool wired_audio_bound;
+static void set_audio_transport(pet_p4_send_line_fn send_line, void *ctx) {
+  /* Voice is USB-only: BLE links never own the audio/reply channel. */
+  if (pet_p4_ble_is_transport(send_line)) return;
+  wired_audio_bound = true;
+  pet_p4_audio_set_transport(send_line, ctx);
+}
 #include "pet_p4_build_info.h"
 #include "pet_p4_diagnostics.h"
 #include "pet_p4_input.h"
@@ -63,6 +72,7 @@
 #include "pet_p4_widget_trace.h"
 #include "pet_p4_media.h"
 #include "pet_p4_app_host.h"
+#include "esp_ota_ops.h"
 #include "pet_p4_ota.h"
 #include "pet_p4_raw_assets.h"
 #include "pet_p4_renderer.h"
@@ -2932,7 +2942,15 @@ void pet_p4_send_hello_for_board(const char *board_id, pet_p4_send_line_fn send_
   cJSON_AddItemToObject(payload, "hardware", hardware);
 
   cJSON_AddNumberToObject(capabilities, "version", 1);
+#if PET_P4_HAS_BLE
+  cJSON_AddBoolToObject(capabilities, "usbOnly", false);
+  cJSON *ble = cJSON_AddObjectToObject(capabilities, "ble");
+  cJSON_AddStringToObject(ble, "controlTransport", "ble-jsonl-v1");
+  cJSON_AddNumberToObject(ble, "controlLineMaxBytes", 32768);
+  cJSON_AddBoolToObject(ble, "voice", false);
+#else
   cJSON_AddBoolToObject(capabilities, "usbOnly", true);
+#endif
   cJSON_AddBoolToObject(capabilities, "nativeUsb", true);
   cJSON_AddBoolToObject(capabilities, "bulk", true);
   cJSON_AddNumberToObject(capabilities, "maxAppearanceSlots", 2);
@@ -2952,6 +2970,7 @@ void pet_p4_send_hello_for_board(const char *board_id, pet_p4_send_line_fn send_
   cJSON_AddStringToObject(capabilities, "nativeProtocol", "pet-usb-native-v1");
   cJSON_AddBoolToObject(capabilities, "mp4", false);
   cJSON_AddBoolToObject(capabilities, "widgets", true);
+  cJSON_AddBoolToObject(capabilities, "widgetChunkAllPaths", true);
   cJSON_AddBoolToObject(capabilities, "widgetDelete", true);
   cJSON_AddBoolToObject(capabilities, "widgetDeletePreserveSave", true);
   cJSON_AddBoolToObject(capabilities, "widgetInventory", true);
@@ -3279,6 +3298,12 @@ void pet_p4_send_hello_for_board(const char *board_id, pet_p4_send_line_fn send_
   cJSON_AddBoolToObject(capabilities, "stats", true);
   cJSON_AddBoolToObject(capabilities, "inputs", true);
   cJSON_AddBoolToObject(capabilities, "inputConfig", true);
+  cJSON_AddBoolToObject(capabilities, "statusCueConfig", true);
+  pet_p4_status_cues_init();
+  pet_p4_status_cues_t cue_config = pet_p4_status_cues_get();
+  cJSON *status_cues = cJSON_AddObjectToObject(payload, "statusCues");
+  cJSON_AddBoolToObject(status_cues, "enabled", cue_config.enabled);
+  cJSON_AddNumberToObject(status_cues, "volume", cue_config.volume);
   cJSON_AddBoolToObject(capabilities, "diagnostics", true);
   cJSON_AddBoolToObject(capabilities, "resetReporting", true);
   cJSON_AddBoolToObject(capabilities, "audio", audio_ready || audio_playback_ready);
@@ -3305,7 +3330,9 @@ void pet_p4_send_hello_for_board(const char *board_id, pet_p4_send_line_fn send_
   cJSON_AddBoolToObject(capabilities, "firmwareOta", true);
   cJSON_AddStringToObject(firmware_update, "transport", "usb-jsonl-ota-v1");
   cJSON_AddNumberToObject(firmware_update, "slots", 2);
-  cJSON_AddNumberToObject(firmware_update, "maxImageBytes", 0x280000);
+  const esp_partition_t *next_update = esp_ota_get_next_update_partition(NULL);
+  cJSON_AddNumberToObject(firmware_update, "maxImageBytes",
+                          next_update ? (double)next_update->size : 0x280000);
   cJSON_AddNumberToObject(firmware_update, "chunkBytes", 4 * 1024);
   cJSON_AddStringToObject(firmware_update, "checksum", "sha256");
   cJSON_AddStringToObject(firmware_update, "projectName", "pet_manager_p4_runtime");
@@ -3318,6 +3345,10 @@ void pet_p4_send_hello_for_board(const char *board_id, pet_p4_send_line_fn send_
   cJSON_AddBoolToObject(capabilities, "protocolAck", true);
   cJSON_AddStringToObject(capabilities, "bubblePixels", "p4-text-alpha-v2");
   cJSON_AddStringToObject(capabilities, "bubblePixelsBoot", pet_bubble_pixels_boot());
+#if PET_P4_HAS_BLE
+  cJSON_AddBoolToObject(capabilities, "bleScreenshotPull", true);
+  cJSON_AddBoolToObject(capabilities, "bleAppearanceChunks", true);
+#endif
   cJSON_AddBoolToObject(capabilities, "screenshot", true);
   cJSON_AddStringToObject(capabilities, "screenshotTransfer", "pull-fnv1a32-v1");
 #if PET_P4_SCREENSHOT_CLOSE_ACK
@@ -4000,6 +4031,17 @@ bool pet_p4_handle_line_with_reply(
     cJSON_Delete(root);
     return false;
   }
+  bool ble_request = pet_p4_ble_is_transport(send_line);
+  if (ble_request && ((!strncmp(topic, "audio/", 6) && strcmp(topic, "audio/volume") != 0)
+      || (!strcmp(topic, "control/command") && !strcmp(json_string(payload, "type"), "audio_bridge")))) {
+    send_protocol_ack(send_line, ctx, topic, payload, false, "unsupported_over_ble", "voice is USB-only");
+    cJSON_Delete(root);
+    return false;
+  }
+  if (!ble_request
+      && (wired_audio_bound || !strcmp(topic, "ack") || !strcmp(topic, "bind"))) {
+    state->usb_host_last_seen_ms = (unsigned long long)(esp_timer_get_time() / 1000ULL);
+  }
   if (!strncmp(topic, "state/", 6) || !strcmp(topic, "speech/text")
       || !strcmp(topic, "session/current") || !strcmp(topic, "ui/conversation")
       || !strcmp(topic, "audio/play_subtitle")) {
@@ -4018,7 +4060,18 @@ bool pet_p4_handle_line_with_reply(
     }
 #endif
     copy_text(state->desktop_device_id, sizeof(state->desktop_device_id), json_string(payload, "desktopDeviceId"));
+    set_audio_transport(send_line, ctx);
     pet_p4_send_hello(state, send_line, ctx);
+  } else if (strcmp(topic, "config/status-cues") == 0) {
+    const cJSON *enabled = cJSON_GetObjectItemCaseSensitive(payload, "enabled");
+    const cJSON *volume = cJSON_GetObjectItemCaseSensitive(payload, "volume");
+    if (!cJSON_IsBool(enabled) || !cJSON_IsNumber(volume)
+        || !(volume->valuedouble >= 0 && volume->valuedouble <= 100)
+        || volume->valuedouble != (double)volume->valueint) {
+      send_protocol_ack(send_line, ctx, topic, payload, false, "invalid_status_cues", "expected enabled boolean and integer volume 0..100");
+    } else if (pet_p4_status_cues_set(cJSON_IsTrue(enabled), (unsigned)volume->valueint) != ESP_OK) {
+      send_protocol_ack(send_line, ctx, topic, payload, false, "status_cues_persist_failed", "could not persist status cues");
+    } else send_protocol_ack_if_requested(send_line, ctx, topic, payload);
   } else if (strcmp(topic,"debug/identity")==0){
     const char *request=pet_evidence_source_valid(line)?pet_evidence_request(payload):NULL;const esp_app_desc_t *app=esp_app_get_description();
     char elf[65]={0};if(app)for(unsigned i=0;i<32;i++)snprintf(elf+2*i,3,"%02x",app->app_elf_sha256[i]);
@@ -4058,6 +4111,24 @@ bool pet_p4_handle_line_with_reply(
       (void)pet_bubble_pixels_handle_owned(payload,ctx,(uint64_t)(esp_timer_get_time()/1000),reply);
       send_topic_payload(send_line,ctx,"ui/text-pixels/status",reply);
     }
+  } else if (strcmp(topic, "ui/mac-notice") == 0) {
+    const char *title = json_string(payload, "title");
+    const char *text = json_string(payload, "text");
+    if (!title[0] || strlen(title) >= sizeof(state->mac_notice_title)
+        || strlen(text) >= sizeof(state->mac_notice_text)) {
+      send_protocol_ack(send_line, ctx, topic, payload, false, "invalid_notice", NULL);
+      cJSON_Delete(root);
+      return false;
+    }
+    const char *id = json_string(payload, "noticeId");
+    if (!id[0] || strcmp(id, state->mac_notice_id) != 0) {
+      copy_text(state->mac_notice_id, sizeof(state->mac_notice_id), id);
+      copy_text(state->mac_notice_title, sizeof(state->mac_notice_title), title);
+      copy_text(state->mac_notice_text, sizeof(state->mac_notice_text), text);
+      state->mac_notice_until_ms = (unsigned long long)(esp_timer_get_time() / 1000) + 8000;
+      state->last_update_ms += 1;
+    }
+    send_protocol_ack_if_requested(send_line, ctx, topic, payload);
   } else if (strcmp(topic, "speech/text") == 0) {
     handle_speech(state, payload);
     send_protocol_ack_if_requested(send_line, ctx, topic, payload);
@@ -4141,7 +4212,7 @@ bool pet_p4_handle_line_with_reply(
     }
   } else if (strcmp(topic, "control/command") == 0
              && strcmp(json_string(payload, "type"), "audio_bridge") == 0) {
-    pet_p4_audio_set_transport(send_line, ctx);
+    set_audio_transport(send_line, ctx);
     const char *action = json_string(payload, "action");
     esp_err_t audio_err = ESP_ERR_INVALID_ARG;
     if (strcmp(action, "start") == 0) {
@@ -4158,7 +4229,7 @@ bool pet_p4_handle_line_with_reply(
     }
     send_protocol_ack_if_requested(send_line, ctx, topic, payload);
   } else if (strcmp(topic, "audio/control") == 0) {
-    pet_p4_audio_set_transport(send_line, ctx);
+    set_audio_transport(send_line, ctx);
     const char *action = json_string(payload, "action");
     esp_err_t audio_err = ESP_ERR_INVALID_ARG;
     if (strcmp(action, "start") == 0) {

@@ -12,6 +12,8 @@ def test_headroom_and_internal_budget():
     sections = fixture()
     result = budget.evaluate(2350000, 0x280000, sections)
     assert result['otaHeadroomBytes'] == 271440
+    new_slot = budget.evaluate(2600000, 0x300000, sections)
+    assert new_slot['otaHeadroomBytes'] == 0x300000 - 2600000
     assert result['internalStaticBytes'] == 345000
     assert result['internalSections']['.dram1.bss'] == 208000
     assert result['memoryAccounting'] == 'p4-allocated-ram-v2'

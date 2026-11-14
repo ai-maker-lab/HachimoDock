@@ -20,6 +20,8 @@ def test_real_debug_dispatch_preflight_before_every_early_parser(tmp_path):
 #include <stdio.h>
 typedef void (*send_fn)(const char *,void *);
 static unsigned calls;
+static int g_ble_route;
+static bool pet_p4_ble_is_transport(send_fn s){(void)s;return false;}
 static void transport_send_line(const char *s,void *ctx){(void)s;(void)ctx;}
 static bool maybe_handle_transport_audit(const char *s,send_fn send,void *ctx){(void)s;(void)send;(void)ctx;calls++;return false;}
 static bool pet_p4_sched_trace_rpc_handle(const char *s,send_fn send,void *ctx){(void)s;(void)send;(void)ctx;calls++;return false;}

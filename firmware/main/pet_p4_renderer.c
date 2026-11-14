@@ -72,6 +72,7 @@
 #include "esp_attr.h"
 #include "pet_p4_media.h"
 #include "pet_p4_audio.h"
+#include "pet_p4_ble.h"
 #include "pet_p4_instrument_core.h"
 #include "pet_p4_behavior.h"
 #include "pet_p4_raw_assets.h"
@@ -80,6 +81,15 @@
 #define PET_P4_ASSET_WIDTH 640
 static bool g_last_native_valid;
 static uint32_t g_lcd_submitted, g_lcd_skipped;
+static portMUX_TYPE g_notice_lock = portMUX_INITIALIZER_UNLOCKED;
+static unsigned long long g_voice_usb_notice_until_ms;
+
+void pet_p4_renderer_voice_usb_notice(unsigned long long now_ms) {
+  portENTER_CRITICAL(&g_notice_lock);
+  g_voice_usb_notice_until_ms = now_ms + 2000;
+  portEXIT_CRITICAL(&g_notice_lock);
+}
+
 static portMUX_TYPE g_metrics_lock = portMUX_INITIALIZER_UNLOCKED;
 static pet_p4_render_metrics_t g_metrics;
 #if PET_P4_APP_CLEAR_OPAQUE_CENTER
@@ -2111,26 +2121,35 @@ static void draw_home_white_panel(int x, int y, int w, int h, int radius, uint16
   fill_round_rect(x + 2, y + 2, w - 4, h - 4, radius - 2, rgb565(255, 255, 255));
 }
 
-static void draw_session_card_panel(
-  int x,
-  int y,
-  int w,
-  int h,
-  int radius,
-  bool selected,
-  uint16_t outline
-) {
-  if (!selected) {
-    draw_home_white_panel(x, y, w, h, radius, outline);
-    return;
-  }
+static uint16_t session_surface(pet_p4_view_status_t status) {
+  if (status == PET_P4_VIEW_STATUS_WORKING) return rgb565(226, 242, 255);
+  if (status == PET_P4_VIEW_STATUS_DONE) return rgb565(230, 246, 233);
+  return rgb565(255, 255, 255);
+}
 
-  uint16_t selection = rgb565(25, 151, 99);
-  uint16_t selected_surface = rgb565(237, 249, 242);
-  fill_round_rect(x - 2, y - 2, w + 4, h + 4, radius + 2, rgb565(173, 220, 193));
-  fill_round_rect(x + 2, y + 5, w, h, radius, rgb565(46, 50, 48));
-  fill_round_rect(x, y, w, h, radius, selection);
-  fill_round_rect(x + 4, y + 4, w - 8, h - 8, radius - 4, selected_surface);
+static void draw_session_card_panel(int x, int y, int w, int h, int radius,
+                                    bool selected, uint16_t outline, pet_p4_view_status_t status) {
+  int border = selected ? 4 : 2;
+  fill_round_rect(x + 2, y + (selected ? 5 : 3), w, h, radius, rgb565(55, 65, 73));
+  fill_round_rect(x, y, w, h, radius, selected ? rgb565(43, 60, 72) : outline);
+  fill_round_rect(x + border, y + border, w - border * 2, h - border * 2,
+                  radius - border, session_surface(status));
+}
+
+// A stationary high-contrast check reads even when the pet animation is paused.
+static void draw_session_leading_mark(int x, int y, int h, pet_p4_view_status_t status,
+                                      uint16_t accent) {
+  if (status == PET_P4_VIEW_STATUS_DONE) {
+    int cy = y + 29;
+    fill_ellipse(x + 22, cy, 11, 11, accent);
+    for (int dy = -1; dy <= 1; ++dy) {
+      draw_line(x + 16, cy + dy, x + 20, cy + 4 + dy, rgb565(255, 255, 255));
+      draw_line(x + 20, cy + 4 + dy, x + 28, cy - 5 + dy, rgb565(255, 255, 255));
+    }
+  } else {
+    fill_round_rect(x + 10, y + 14, status == PET_P4_VIEW_STATUS_WORKING ? 8 : 4,
+                    h - 28, 2, accent);
+  }
 }
 
 /* Renderer-only timing; includes underlying mutex waits and all timer overhead.
@@ -2234,11 +2253,11 @@ static void draw_status_marker(pet_p4_view_status_t status, unsigned long long n
 }
 
 static uint16_t view_status_color(pet_p4_view_status_t status) {
-  if (status == PET_P4_VIEW_STATUS_DONE) return rgb565(85, 193, 133);
+  if (status == PET_P4_VIEW_STATUS_DONE) return rgb565(24, 112, 68);
   if (status == PET_P4_VIEW_STATUS_ERROR) return rgb565(235, 89, 82);
   if (status == PET_P4_VIEW_STATUS_STOPPED) return rgb565(120, 126, 132);
   if (status == PET_P4_VIEW_STATUS_WAITING) return rgb565(255, 163, 31);
-  if (status == PET_P4_VIEW_STATUS_WORKING) return rgb565(96, 196, 255);
+  if (status == PET_P4_VIEW_STATUS_WORKING) return rgb565(22, 93, 151);
   return rgb565(170, 176, 173);
 }
 
@@ -3349,6 +3368,37 @@ static bool render_asset_pet_frame(const pet_p4_runtime_state_t *state, const pe
   return true;
 }
 
+static const char *session_status_label(pet_p4_view_status_t status) {
+  if (status == PET_P4_VIEW_STATUS_WORKING) return "进行中";
+  if (status == PET_P4_VIEW_STATUS_DONE) return "已完成";
+  if (status == PET_P4_VIEW_STATUS_WAITING) return "等你回复";
+  if (status == PET_P4_VIEW_STATUS_ERROR) return "出错";
+  return "";
+}
+
+static int session_status_pill_width(pet_p4_view_status_t status) {
+  const char *label = session_status_label(status);
+  if (!label[0]) return 0;
+  return utf8_text_width(label, -1, 1) + 20
+    + (status == PET_P4_VIEW_STATUS_WORKING ? 22 : 0);
+}
+
+static void draw_session_status_pill(pet_p4_view_status_t status, int right, int top) {
+  int width = session_status_pill_width(status);
+  if (!width) return;
+  fill_round_rect(right - width, top, width, 30, 15, view_status_color(status));
+  draw_text_line_vcenter(session_status_label(status), right - width + 10, top, 30,
+                        width - 20, rgb565(255, 255, 255), 1, false);
+}
+
+/* Only this small region animates, after the cached session overlay is copied. */
+static void draw_session_progress_dot(unsigned long long now_ms, int right, int top) {
+  static const int dx[] = {0, 4, 6, 4, 0, -4, -6, -4};
+  static const int dy[] = {-6, -4, 0, 4, 6, 4, 0, -4};
+  int phase = (int)((now_ms / 150ULL) % 8ULL);
+  fill_ellipse(right - 16 + dx[phase], top + 15 + dy[phase], 2, 2, rgb565(255,255,255));
+}
+
 /* Called after the appearance attempt and before any main-page overlays. */
 static void main_compact_underlay_prepare(bool drew_asset, bool compact_requested) {
   g_main_compact_frame_clean = drew_asset;
@@ -3386,7 +3436,7 @@ static void draw_bubble(const pet_p4_runtime_state_t *state,
     bool realtime = view && view->realtime_conversation;
     uint16_t selection = realtime ? rgb565(42, 119, 225) : rgb565(25, 151, 99);
     pet_p4_view_status_t status = view ? view->status : PET_P4_VIEW_STATUS_IDLE;
-    if (!realtime) draw_session_card_panel(x, y, w, h, PET_P4_SESSION_CARD_RADIUS, true, selection);
+    if (!realtime) draw_session_card_panel(x, y, w, h, PET_P4_SESSION_CARD_RADIUS, true, selection, status);
     if (realtime) {
       // Same card geometry, surface and shadow; replace only the selected outline.
       fill_round_rect(x - 2, y - 2, w + 4, h + 4, PET_P4_SESSION_CARD_RADIUS + 2, rgb565(170, 205, 250));
@@ -3395,13 +3445,14 @@ static void draw_bubble(const pet_p4_runtime_state_t *state,
       fill_round_rect(x + 4, y + 4, w - 8, h - 8, PET_P4_SESSION_CARD_RADIUS - 4, rgb565(237, 249, 242));
     }
     fill_round_rect(x + 10, y + 14, 7, h - 28, 2, selection);
+    int title_width = w - 54 - session_status_pill_width(status) - 8;
     unsigned host_pages = realtime ? pet_bubble_pixels_pages(PET_BUBBLE_BODY, body) : 0;
     uint64_t caption_since = text.since_ms > view->caption_since_ms ? text.since_ms : view->caption_since_ms;
     unsigned host_page = host_pages ? (unsigned)(((now_ms >= caption_since ? now_ms-caption_since : 0)/2800ULL)%host_pages) : 0;
     if (realtime && host_pages) pet_bubble_pixels_pin_page(&text,host_page);
     if (!(text.pixels && renderer_bubble_draw_pinned(&text, PET_BUBBLE_TITLE, 0, g_framebuffer,
-        x + 30, y + 10, w - 82, ink)))
-      draw_text_line_vcenter(title, x + 30, y + 10, 38, w - 82, ink, 2, true);
+        x + 30, y + 10, title_width, ink)))
+      draw_text_line_vcenter(title, x + 30, y + 10, 38, title_width, ink, 2, true);
     if (body[0]) {
       if (realtime) {
         bool host_drawn = host_pages && text.pixels && renderer_bubble_draw_pinned(&text,
@@ -3435,7 +3486,10 @@ static void draw_bubble(const pet_p4_runtime_state_t *state,
       } else draw_card_body_lines(body, x + 30, y + 50, w - 60, muted, &text);
     }
     if (realtime) draw_text_line_vcenter(view->conversation_history ? "回看" : "对话", x + w - 78, y + 14, 30, 64, selection, 1, true);
-    else draw_status_marker(status, now_ms, x + w - 26, y + 26);
+    else {
+      draw_session_status_pill(status, x + w - 12, y + 14);
+      if (status == PET_P4_VIEW_STATUS_WORKING) draw_session_progress_dot(now_ms, x + w - 12, y + 14);
+    }
     pet_bubble_pixels_release(&text);
     pet_p4_render_trace_add(&g_render_trace.bubble_draw_us,
       elapsed_us_clamped(content_started, esp_timer_get_time()));
@@ -3829,7 +3883,7 @@ static int fitted_text_scale(const char *text, int max_px, int preferred, int mi
 static uint16_t miniapp_state_color(const char *state) {
   if (state && (strstr(state, "error") || strstr(state, "failed"))) return rgb565(235, 89, 82);
   if (state && (strstr(state, "pause") || strstr(state, "wait"))) return rgb565(255, 163, 31);
-  return rgb565(85, 193, 133);
+  return rgb565(24, 112, 68);
 }
 
 static uint16_t session_status_color(const char *status) {
@@ -3888,7 +3942,7 @@ static void draw_standalone_voice_overlay(void) {
   const int x = PET_P4_SESSION_CARD_X;
   const int y = PET_P4_SESSION_CARD_BOTTOM - height;
   draw_session_card_panel(x, y, PET_P4_SESSION_CARD_WIDTH, height,
-    PET_P4_SESSION_CARD_RADIUS, true, rgb565(216, 221, 218));
+    PET_P4_SESSION_CARD_RADIUS, true, rgb565(216, 221, 218), PET_P4_VIEW_STATUS_IDLE);
   fill_round_rect(x + 10, y + 14, 7, height - 28, 2, rgb565(25, 151, 99));
   draw_voice_input_row(x, y + 18);
 }
@@ -3955,21 +4009,35 @@ static void draw_session_queue_uncached(
       h,
       PET_P4_SESSION_CARD_RADIUS,
       is_selected,
-      card_outline
+      card_outline, session_view_status(item->state)
     );
-    fill_round_rect(x + 10, y + 14, is_selected ? 7 : 4, h - 28, 2, is_selected ? selection : status);
     pet_p4_view_status_t marker_status = session_view_status(item->state);
-    if (draw_working_markers || marker_status != PET_P4_VIEW_STATUS_WORKING) {
-      draw_status_marker(marker_status, now_ms, x + w - 26, y + 26);
+    draw_session_leading_mark(x, y, h, marker_status, status);
+    int pill_width = session_status_pill_width(marker_status);
+    draw_session_status_pill(marker_status, x + w - 12, y + 14);
+    if (draw_working_markers && marker_status == PET_P4_VIEW_STATUS_WORKING)
+      draw_session_progress_dot(now_ms, x + w - 12, y + 14);
+    bool done = marker_status == PET_P4_VIEW_STATUS_DONE;
+    uint16_t title_ink = done ? rgb565(41,69,53) : ink;
+    uint16_t body_ink = done ? rgb565(67,91,76) : muted;
+    int inset = done ? 12 : 0;
+    // All cards in session/current belong to the same followed agent.
+    const char *agent = state->current_session_agent;
+    const int agent_width = agent[0] ? 108 : 0;
+    if (agent_width) {
+      const char *label = !strcmp(agent, "codex") ? "Codex" : !strcmp(agent, "devin") ? "Devin"
+        : !strcmp(agent, "claude-code") ? "Claude" : !strcmp(agent, "deepseek-harness") ? "DeepSeek" : agent;
+      draw_text_line_vcenter(label, x + 30 + inset, y + 10, 38, agent_width - 8, muted, 1, true);
     }
+    int title_width = w - 54 - (pill_width ? pill_width + 8 : 0) - inset - agent_width;
     if (!(text.pixels && renderer_bubble_draw_pinned(&text, PET_BUBBLE_TITLE, 0, g_framebuffer,
-        x + 30, y + 10, w - 82, ink)))
-      draw_text_line_vcenter(text.title, x + 30, y + 10, 38, w - 82, ink, 2, true);
+        x + 30 + inset + agent_width, y + 10, title_width, title_ink)))
+      draw_text_line_vcenter(text.title, x + 30 + inset + agent_width, y + 10, 38, title_width, title_ink, 2, true);
 
     if (is_selected && state->session_voice_active) {
       draw_voice_input_row(x, y + 62);
     } else {
-      draw_card_body_lines(text.body, x + 30, y + 50, w - 60, muted, &text);
+      draw_card_body_lines(text.body, x + 30, y + 50, w - 60, body_ink, &text);
     }
     pet_bubble_pixels_release(&text);
   }
@@ -3997,6 +4065,7 @@ static uint64_t session_overlay_signature(const pet_p4_runtime_state_t *state) {
   hash = session_cache_hash_bytes(hash, &text_revision, sizeof(text_revision));
   hash = session_cache_hash_bytes(hash, &state->session_queue_count, sizeof(state->session_queue_count));
   hash = session_cache_hash_bytes(hash, &state->current_session_index, sizeof(state->current_session_index));
+  hash = session_cache_hash_text(hash, state->current_session_agent);
   hash = session_cache_hash_bytes(hash, &state->session_voice_active, sizeof(state->session_voice_active));
   unsigned int selected, start, visible;
   session_overlay_visible_window(state, &selected, &start, &visible);
@@ -4105,12 +4174,8 @@ static void draw_session_queue_working_markers(
     const pet_p4_session_queue_item_t *item = &state->session_queue[start + row];
     if (session_view_status(item->state) != PET_P4_VIEW_STATUS_WORKING) continue;
     int y = first_y + (int) row * (PET_P4_SESSION_CARD_HEIGHT + PET_P4_SESSION_CARD_GAP);
-    draw_status_marker(
-      PET_P4_VIEW_STATUS_WORKING,
-      now_ms,
-      PET_P4_SESSION_CARD_X + PET_P4_SESSION_CARD_WIDTH - 26,
-      y + 26
-    );
+    draw_session_progress_dot(now_ms,
+      PET_P4_SESSION_CARD_X + PET_P4_SESSION_CARD_WIDTH - 12, y + 14);
   }
 }
 
@@ -7146,6 +7211,12 @@ static void draw_approval_button(
 /* R5 DSH approval: a modal dark card over the current page. It never mutates
  * normal page rendering; it is the last paint before rotation so it covers the
  * home page, component center and mini-app frames identically. */
+static void draw_mac_notice(const pet_p4_runtime_state_t *state) {
+  fill_round_rect_outline(20, 18, 600, 106, 14, rgb565(20, 30, 40), rgb565(90, 180, 200));
+  draw_text_line(state->mac_notice_title, 40, 32, 550, rgb565(145, 225, 230), 2, false);
+  draw_text_line(state->mac_notice_text, 40, 82, 552, rgb565(240, 244, 246), 1, false);
+}
+
 static void draw_approval_overlay(
   const pet_p4_runtime_state_t *state,
   unsigned long long now_ms
@@ -7219,6 +7290,43 @@ static void draw_approval_overlay(
   draw_approval_button(content_x + button_w + 16, card_y + 290, button_w, button_h,
                        "拒绝", rgb565(54, 22, 22), rgb565(236, 96, 88),
                        rgb565(255, 150, 140));
+}
+
+static void draw_ble_overlay(unsigned long long now_ms) {
+  unsigned long long notice_until_ms;
+  portENTER_CRITICAL(&g_notice_lock);
+  notice_until_ms = g_voice_usb_notice_until_ms;
+  portEXIT_CRITICAL(&g_notice_lock);
+  if (now_ms < notice_until_ms) {
+    fill_rect(20, 190, 600, 80, rgb565(17, 30, 29));
+    draw_text_center("语音需要 USB 连接", 320, 215, 560, rgb565(245, 240, 220), 1);
+  }
+  pet_p4_pair_snapshot_t pair;
+  pet_p4_ble_pair_snapshot(&pair);
+  if (pair.mode != PET_P4_PAIR_OFF) {
+    uint16_t bg = rgb565(17, 30, 29), fg = rgb565(245, 240, 220);
+    fill_rect(20, 60, 600, 360, bg);
+    const char *title = pair.mode == PET_P4_PAIR_SUCCESS ? "配对成功" :
+      pair.mode == PET_P4_PAIR_FAILED ? "配对失败" :
+      pair.mode == PET_P4_PAIR_REJECTED ? "已拒绝" :
+      pair.mode == PET_P4_PAIR_CLEARED ? "已清除全部绑定" : "配对模式";
+    draw_text_center(title, 320, 100, 560, fg, 2);
+    char text[48];
+    if (pair.mode == PET_P4_PAIR_COMPARE) {
+      snprintf(text, sizeof(text), "%06u", (unsigned)pair.number);
+      draw_text_center(text, 320, 170, 560, fg, 4);
+      draw_text_center("与电脑上显示的数字一致吗？", 320, 255, 560, fg, 1);
+      draw_text_center("SW1 确认   SW3 拒绝", 320, 300, 560, fg, 1);
+    } else if (pair.mode == PET_P4_PAIR_WINDOW) {
+      draw_text_center("在新电脑上打开 HachimoDock", 320, 190, 560, fg, 1);
+      draw_text_center("长按 SW3 3 秒：清除全部绑定", 320, 280, 560, fg, 1);
+    }
+    if (pair.mode == PET_P4_PAIR_WINDOW || pair.mode == PET_P4_PAIR_COMPARE) {
+      int64_t left = pair.deadline_ms - (int64_t)now_ms;
+      snprintf(text, sizeof(text), "%u 秒", (unsigned)(left > 0 ? (left+999)/1000 : 0));
+      draw_text_center(text, 320, 360, 560, fg, 1);
+    }
+  }
 }
 
 esp_err_t pet_p4_renderer_render(
@@ -7302,11 +7410,13 @@ esp_err_t pet_p4_renderer_render(
     g_last_realtime_conversation = realtime_mode;
   }
   const bool approval_visible = state && pet_p4_state_approval_pending(state, now_ms);
-  const bool approval_changed = approval_visible != g_last_approval_visible;
+  const bool notice_visible = state && now_ms < state->mac_notice_until_ms;
+  const bool overlay_visible = approval_visible || notice_visible;
+  const bool approval_changed = overlay_visible != g_last_approval_visible;
 #if PET_P4_APP_RETAIN_LOGICAL
   /* A final retained APP frame includes common overlays. Never reuse or publish
    * that final frame across an approval modal/countdown; keep the clean texture. */
-  if (approval_visible || approval_changed) g_app_may_retain = false;
+  if (overlay_visible || approval_changed) g_app_may_retain = false;
 #endif
   if (approval_changed) {
     // The modal dims arbitrary pixels; repaint the page beneath from black so
@@ -7316,7 +7426,7 @@ esp_err_t pet_p4_renderer_render(
     g_session_overlay_cache_valid = false;
     g_main_appearance_ready = false;
     pet_compact_underlay_forget(&g_main_compact_underlay);
-    g_last_approval_visible = approval_visible;
+    g_last_approval_visible = overlay_visible;
   }
   if (strcmp(page, "components") == 0) {
     render_component_center_page(view && view->component_loading);
@@ -7386,7 +7496,9 @@ esp_err_t pet_p4_renderer_render(
 #else
   if (!dedicated_page) draw_boot_diagnostic(now_ms);
 #endif
+  if (notice_visible && !approval_visible) draw_mac_notice(state);
   draw_approval_overlay(state, now_ms);
+  draw_ble_overlay(now_ms);
   int64_t rotate_started_us = esp_timer_get_time();
   g_render_trace.common_overlay_us = elapsed_us_clamped(common_overlay_started_us, rotate_started_us);
   uint32_t overlay_us = elapsed_us_clamped(overlay_started_us, rotate_started_us);
@@ -7440,7 +7552,7 @@ esp_err_t pet_p4_renderer_render(
   g_last_native_valid = lcd_err == ESP_OK;
 #if PET_P4_APP_RETAIN_LOGICAL
   pet_logical_retention_finish(&g_app_final_retention,g_app_common_plan,
-    lcd_err==ESP_OK&&g_app_final_eligible&&!approval_visible&&!strcmp(page,"app"));
+    lcd_err==ESP_OK&&g_app_final_eligible&&!overlay_visible&&!strcmp(page,"app"));
 #endif
   if (unchanged) g_lcd_skipped++;
   else if (lcd_err == ESP_OK) g_lcd_submitted++;

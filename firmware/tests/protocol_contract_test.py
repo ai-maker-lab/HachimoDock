@@ -683,7 +683,7 @@ def test_p4_component_packages_commit_through_validated_ab_catalog_snapshots():
         commit_start:
         miniapp.index("static bool remove_file_if_present", commit_start)
     ]
-    removal = miniapp[miniapp.index("bool pet_p4_miniapp_remove"):]
+    removal = miniapp[miniapp.index("bool pet_p4_miniapp_remove"): ]
 
     assert "MINIAPP_CATALOG_GENERATION_COUNT 2" in miniapp
     assert "MINIAPP_PACKAGE_GENERATION_COUNT 2" in miniapp
@@ -1189,18 +1189,19 @@ def test_p4_conversation_queue_is_synced_and_rendered_with_pixel_ellipsis():
     assert "draw_session_card_panel(" in renderer
     assert "rgb565(237, 249, 242)" in renderer
     assert "fill_round_rect(x + 4, y + 4, w - 8, h - 8" in renderer
-    assert "is_selected ? 7 : 4" in renderer
+    assert "draw_session_leading_mark(x, y, h, marker_status, status)" in renderer
     assert "rgb565(255, 255, 255)" in renderer
-    assert "draw_text_line_vcenter(text.title, x + 30, y + 10, 38, w - 82, ink, 2, true)" in renderer
+    assert "session_cache_hash_text(hash, state->current_session_agent)" in renderer
+    assert "draw_text_line_vcenter(text.title, x + 30 + inset + agent_width, y + 10, 38, title_width, title_ink, 2, true)" in renderer
     assert "static void draw_card_body_lines(" in renderer
     assert "const char *second_line = draw_text_line_medium_vcenter(" in renderer
     assert "first_line_y + 27, 27" in renderer
-    assert "draw_card_body_lines(text.body, x + 30, y + 50, w - 60, muted, &text)" in renderer
+    assert "draw_card_body_lines(text.body, x + 30, y + 50, w - 60, body_ink, &text)" in renderer
     assert "static const char *draw_text_line_medium(" in renderer
     assert "static const char *draw_text_line_medium_vcenter(" in renderer
     assert "pet_p4_view_status_t marker_status = session_view_status(item->state)" in renderer
-    assert "draw_working_markers || marker_status != PET_P4_VIEW_STATUS_WORKING" in renderer
-    assert "draw_status_marker(marker_status, now_ms, x + w - 26, y + 26)" in renderer
+    assert "draw_session_status_pill(marker_status, x + w - 12, y + 14)" in renderer
+    assert "draw_session_progress_dot(now_ms" in renderer
     assert "bool show_session_queue = !realtime && state && state->session_queue_count > 0;" in renderer
     assert "bool needs_ellipsis = ellipsis && utf8_text_width(cursor, -1, scale) > max_px" in renderer
     assert "bool needs_ellipsis = ellipsis && utf8_text_width_medium(cursor) > max_px" in renderer
@@ -1215,7 +1216,7 @@ def test_p4_conversation_queue_is_synced_and_rendered_with_pixel_ellipsis():
     assert "w = 72 + utf8_text_width(body, -1, 2)" in renderer
     assert "#define PET_P4_COMPACT_TEXT_OPTICAL_Y (-2)" in renderer
     assert "text_y_in_box(body, 2, y, h) + PET_P4_COMPACT_TEXT_OPTICAL_Y" in renderer
-    assert "draw_session_card_panel(x, y, w, h, PET_P4_SESSION_CARD_RADIUS, true, selection)" in renderer
+    assert "draw_session_card_panel(x, y, w, h, PET_P4_SESSION_CARD_RADIUS, true, selection, status)" in renderer
     assert "int banner_w = utf8_text_width(label, -1, 1) + 48" in renderer
     assert "int banner_x = PET_P4_UI_WIDTH - banner_w - 20" in renderer
     assert "int banner_y = 18" in renderer
@@ -2737,7 +2738,8 @@ def test_p4_dsh_approval_modal_is_single_shot_and_bounded():
         renderer.index("esp_err_t pet_p4_renderer_render_transfer_status(")
     ]
     assert "draw_approval_overlay(state, now_ms);" in render_source
-    assert "approval_visible != g_last_approval_visible" in renderer
+    assert "overlay_visible = approval_visible || notice_visible" in renderer
+    assert "overlay_visible != g_last_approval_visible" in renderer
     assert (
         render_source.index("draw_approval_overlay(state, now_ms);")
         > render_source.index("draw_boot_diagnostic")

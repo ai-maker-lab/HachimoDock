@@ -25,6 +25,8 @@ preserved in [Espressif ESP-SR LICENSE](licenses/Espressif-ESP-SR-LICENSE.txt).
 DSP and other transitive dependencies retain their upstream licenses and are
 pinned independently for each silicon family in the firmware lockfiles.
 
+The WiFi6 BLE build includes the P4 host of Espressif ESP-Hosted MCU 1.4.7 and the protobuf-c runtime. The original notices and local modifications are documented in the [ESP-Hosted license](licenses/Espressif-ESP-Hosted-LICENSE.txt), [protobuf-c license](licenses/protobuf-c-LICENSE.txt) and [host startup fixes](firmware/ble/ble_host/hosted-startup.cmake).
+
 The board support code in `firmware/components/esp32_p4_wifi6_touch_lcd_4_3/` is a locally modified Waveshare BSP adaptation under Apache-2.0. Its component LICENSE is retained, and the affected files mark their local adaptation and license. The display driver in `firmware/components/esp_lcd_st7701/` retains its own Apache-2.0 notices. See [BSP license](licenses/Espressif-Waveshare-BSP-LICENSE.txt) and [dependency provenance/redistribution notice](licenses/DEPENDENCY-LICENSE-NOTICE.md). The local `esp_lvgl_adapter` directory is a project build shim. ESP-IDF, LVGL, TinyUSB and other downloaded components retain their respective licenses in their distributions; exact resolved versions are recorded in `firmware/dependencies.lock`.
 
 Desktop npm and Rust dependency versions are recorded in package lockfiles and `pc/src-tauri/Cargo.lock`. Their licenses accompany the upstream packages and remain independent of HachimoDock's first-party license.

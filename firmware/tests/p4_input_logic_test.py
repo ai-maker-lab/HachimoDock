@@ -56,7 +56,7 @@ def test_home_back_stops_music_but_navigation_and_realtime_keep_priority(tmp_pat
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
-typedef struct { char screen_page[24]; unsigned long long last_update_ms; } pet_p4_runtime_state_t;
+typedef struct { char screen_page[24];bool ble_only_desktop; unsigned long long last_update_ms; } pet_p4_runtime_state_t;
 typedef struct { char action[40]; } pet_p4_input_binding_t;
 typedef struct { unsigned long long ts_ms; } pet_p4_input_event_t;
 typedef void (*pet_p4_send_line_fn)(const char *,void *);
@@ -69,6 +69,7 @@ static const pet_p4_input_binding_t *active_binding(const char *event) {
 static bool pet_p4_conversation_active(pet_p4_runtime_state_t *s){(void)s;return conversation;}
 static void copy_text(char *out,size_t n,const char *s){snprintf(out,n,"%s",s);}
 static void pet_p4_conversation_move(pet_p4_runtime_state_t *s,int d,unsigned long long t){(void)s;(void)d;(void)t;}
+static void pet_p4_renderer_voice_usb_notice(unsigned long long now_ms){(void)now_ms;}
 static void send_ignored_component_event(pet_p4_runtime_state_t *s,pet_p4_send_line_fn f,void *ctx,const pet_p4_input_event_t *e,const char *n,const char *g){(void)s;(void)f;(void)ctx;(void)e;(void)n;(void)g;}
 static void pet_p4_media_stop_background(pet_p4_send_line_fn f,void *ctx){(void)f;(void)ctx;stops++;}
 static void send_input_event(pet_p4_runtime_state_t *s,pet_p4_send_line_fn f,void *ctx,const pet_p4_input_event_t *e,const char *n,const char *g,const pet_p4_input_binding_t *b,const char *a,bool local){

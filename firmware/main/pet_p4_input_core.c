@@ -319,3 +319,16 @@ pet_p4_joystick_direction_t pet_p4_joystick_decoder_update(
   );
   return decoder->direction;
 }
+
+bool pet_p4_pair_chord_update(pet_p4_pair_chord_t *state, bool sw1, bool sw3, uint32_t ms) {
+  if (!sw1 && !sw3) { *state = (pet_p4_pair_chord_t){0}; return false; }
+  if (sw1 && sw3) {
+    state->latched = true;
+    state->held_ms = saturating_add_u32(state->held_ms, ms);
+    if (!state->fired && state->held_ms >= 5000) { state->fired = true; return true; }
+  } else if (state->latched) {
+    state->held_ms = 0;
+    state->fired = true; /* Early release cancels this entire chord. */
+  }
+  return false;
+}

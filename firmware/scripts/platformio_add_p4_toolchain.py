@@ -11,6 +11,7 @@ project_dir = env.subst("$PROJECT_DIR")
 env.Replace(COMPILATIONDB_INCLUDE_TOOLCHAIN=True,
             COMPILATIONDB_PATH=os.path.join(env.subst("$BUILD_DIR"), "platformio_compile_commands.json"))
 env["ENV"]["PET_P4_PROJECT_DIR"] = project_dir
+env["ENV"]["PET_P4_BLE"] = env.GetProjectOption("custom_p4_ble", "0")
 env["ENV"]["PET_P4_CHIP_FAMILY"] = env.GetProjectOption("custom_p4_chip_family", "v1")
 env["ENV"]["PET_P4_PROJECT_VER_OVERRIDE"] = env.GetProjectOption(
     "custom_p4_project_version", "0.7.57-p4"
@@ -23,6 +24,8 @@ env["ENV"]["PET_P4_UART_BAUD_OVERRIDE"] = env.GetProjectOption(
 def normalize_component_lock(source, target, env):
     """Restore only this project's local component source paths, not versions."""
     lock_name = "dependencies.v3.lock" if env.GetProjectOption("custom_p4_chip_family", "v1") == "v3" else "dependencies.lock"
+    if env.GetProjectOption("custom_p4_ble", "0") == "1":
+        lock_name = "dependencies.ble.lock"
     lock_path = os.path.join(project_dir, lock_name)
     if not os.path.isfile(lock_path):
         return

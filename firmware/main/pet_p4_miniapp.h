@@ -308,6 +308,7 @@ bool pet_p4_miniapp_dispatch_input(
   size_t action_size
 );
 
+/* Call under the shared state mutex after UI startup; true when boot pass finishes. */
 bool pet_p4_miniapp_install_begin(const cJSON *payload, char *error, size_t error_size);
 #if PET_P4_STORAGE_PRESERVE_UNCHANGED
 bool pet_p4_miniapp_install_unchanged(void);
