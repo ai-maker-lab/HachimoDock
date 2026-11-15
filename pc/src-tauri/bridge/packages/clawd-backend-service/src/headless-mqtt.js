@@ -35,7 +35,7 @@ const SPEECH_EXPIRES_MS = 30000;
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const STATUS_VALUES = new Set(["idle", "working", "speaking", "done", "reply_complete", "error", "waiting_user", "sleeping"]);
 const LEGACY_WORKING_STATUS_VALUES = new Set(["thinking", "tool_running"]);
-const KNOWN_AGENT_SOURCES = ["codex", "claude-code", "openclaw", "mimocode", "workbuddy", "devin", "deepseek-harness"];
+const KNOWN_AGENT_SOURCES = ["codex", "claude-code", "openclaw", "mimocode", "workbuddy", "devin", "deepseek-harness", "antigravity"];
 
 function requireOptional(name) {
   try {
@@ -2110,6 +2110,179 @@ function startClaudeLogMonitor(config) {
   };
 }
 
+// Antigravity 的 transcript 会随步骤增减被整体重写，监控器已自行处理重对齐；
+// 这里只负责把它的状态词汇翻译成设备认识的 idle/working/done/error/waiting_user。
+function mapAntigravityStateToStatus(state, event) {
+  const safe = typeof state === "string" ? state.trim().toLowerCase() : "";
+  const name = typeof event === "string" ? event.trim() : "";
+  if (name === "antigravity:error" || safe === "error") return "error";
+  if (safe === "working") return "working";
+  if (safe === "done") return "done";
+  if (safe === "attention") return "waiting_user";
+  return mapClawdStateToStatus(safe, name) || "idle";
+}
+
+function startAntigravityLogMonitor(config) {
+  let monitor = null;
+  let idleSpeechTimer = null;
+  const lastSpeechSignatureBySession = new Map();
+  // 设备上的气泡只会在收到新的 speech/text 时被改写，PC 侧 30s 的
+  // expiresAtMs 只是让快照文件过期，并不会清空设备文字。所以回答会一直挂在
+  // 设备上，直到下一次对话。这里补一层「空闲清屏」：这一轮已经结束、
+  // 且超过窗口期没有任何新事件时，主动发一条空正文 + idle 的气泡，
+  // 让设备回落到「休息中」。
+  // CLAWD_ANTIGRAVITY_SPEECH_IDLE_CLEAR_MS=0 可关闭，让回答长期保留。
+  const idleClearMs = Math.max(
+    0,
+    getEnvInt("CLAWD_ANTIGRAVITY_SPEECH_IDLE_CLEAR_MS", 10 * 60 * 1000),
+  );
+  const sessionSpeechState = new Map();
+  // Antigravity creates one brain directory per conversation, so these maps grow
+  // for the lifetime of the bridge. Cap them by evicting the oldest sessions that
+  // were already cleared; live sessions always survive.
+  const MAX_TRACKED_SPEECH_SESSIONS = 64;
+  const pruneSpeechSessions = () => {
+    if (sessionSpeechState.size <= MAX_TRACKED_SPEECH_SESSIONS) return;
+    const cleared = [...sessionSpeechState.entries()]
+      .filter(([, entry]) => entry.clearedAtMs > 0)
+      .sort((a, b) => a[1].atMs - b[1].atMs);
+    for (const [speechKey] of cleared) {
+      if (sessionSpeechState.size <= MAX_TRACKED_SPEECH_SESSIONS) break;
+      sessionSpeechState.delete(speechKey);
+      lastSpeechSignatureBySession.delete(speechKey);
+    }
+  };
+  // speech/text 只改设备上的气泡文字，不触发 TTS（TTS 走 audio 通道）。
+  // 因此 working 阶段也要发，否则设备会一直保留上一次空闲时的「休息中」文案。
+  const speechAntigravityEvents = new Set([
+    "antigravity:user_input",
+    "antigravity:thinking",
+    "antigravity:tool_call",
+    "antigravity:tool_result",
+    "antigravity:response",
+    "antigravity:completed",
+    "antigravity:error",
+  ]);
+  const sweepIdleSpeech = () => {
+    if (!idleClearMs) return;
+    const now = Date.now();
+    for (const [speechKey, entry] of sessionSpeechState) {
+      if (!entry.terminal || entry.clearedAtMs > 0) continue;
+      if (now - (entry.atMs || 0) < idleClearMs) continue;
+      entry.clearedAtMs = now;
+      try {
+        config.publisher.publishSpeech("antigravity", {
+          displayTitle: entry.title || "",
+          displayContent: "",
+          status: "idle",
+          event: "antigravity:idle_clear",
+          sessionId: entry.sessionId || undefined,
+          sessionTitle: entry.sessionTitle || undefined,
+          ts: nowIso(),
+          tsMs: now,
+          expiresAtMs: now + SPEECH_EXPIRES_MS,
+        });
+        lastSpeechSignatureBySession.delete(speechKey);
+        log("info", "antigravity bubble cleared after idle window", {
+          idleMs: now - (entry.atMs || 0),
+        });
+      } catch (error) {
+        log("warn", "antigravity bubble clear failed", { error: String(error.message || error) });
+      }
+    }
+  };
+  try {
+    monitor = startAgentLogMonitorWorker("antigravity", (sessionId, state, event, extra) => {
+      const normalized = mapAntigravityStateToStatus(state, event);
+      const out = {
+        source: "antigravity",
+        channel: "antigravity-log",
+        bridge: APP_NAME,
+        bridgeVersion: APP_VERSION,
+        state: normalized,
+        rawState: state,
+        reason: `antigravity.${event || state}`,
+        event: event || undefined,
+        sessionId,
+        sessionTitle: extra && typeof extra.sessionTitle === "string" ? extra.sessionTitle : undefined,
+        cwd: extra && typeof extra.cwd === "string" ? extra.cwd : undefined,
+        display: extra && extra.display && typeof extra.display === "object" ? extra.display : undefined,
+        session: extra && extra.session && typeof extra.session === "object" ? extra.session : undefined,
+        messages: extra && extra.messages && typeof extra.messages === "object" ? extra.messages : undefined,
+        tokenUsage: extra && extra.tokenUsage && typeof extra.tokenUsage === "object"
+          ? extra.tokenUsage
+          : undefined,
+        dailyTokenUsage: extra && extra.dailyTokenUsage && typeof extra.dailyTokenUsage === "object"
+          ? extra.dailyTokenUsage
+          : undefined,
+        ts: nowIso(),
+        tsMs: Date.now(),
+        ...(config.includeRaw ? { raw: extra } : {}),
+      };
+
+      const enriched = enrichPayloadMetrics(config.metricsTracker, out);
+      config.publisher.publishSource(enriched);
+      const speechKey = sessionId || "antigravity:session:auto";
+      sessionSpeechState.set(speechKey, {
+        sessionId: sessionId || "",
+        title: enriched.display && enriched.display.title ? enriched.display.title : "",
+        sessionTitle: enriched.sessionTitle || "",
+        status: normalized,
+        terminal: normalized === "done" || normalized === "error" || normalized === "waiting_user",
+        atMs: Number.isFinite(enriched.tsMs) ? enriched.tsMs : Date.now(),
+        clearedAtMs: 0,
+      });
+      pruneSpeechSessions();
+      if (speechAntigravityEvents.has(event) && enriched.display && (enriched.display.title || enriched.display.content)) {
+        const speechSignature = JSON.stringify({
+          sessionId: sessionId || "",
+          title: enriched.display.title || "",
+          content: enriched.display.content || "",
+          status: normalized,
+        });
+        if (speechSignature !== lastSpeechSignatureBySession.get(speechKey)) {
+          lastSpeechSignatureBySession.set(speechKey, speechSignature);
+          config.publisher.publishSpeech("antigravity", {
+            displayTitle: enriched.display.title || "",
+            displayContent: enriched.display.content || "",
+            status: normalized,
+            event: event || undefined,
+            sessionId,
+            sessionTitle: enriched.sessionTitle,
+            ts: enriched.ts,
+            tsMs: enriched.tsMs,
+            expiresAtMs: enriched.tsMs + SPEECH_EXPIRES_MS,
+          });
+        }
+      }
+    });
+
+    if (idleClearMs > 0) {
+      idleSpeechTimer = setInterval(
+        sweepIdleSpeech,
+        Math.min(30_000, Math.max(1_000, Math.floor(idleClearMs / 4))),
+      );
+      idleSpeechTimer.unref?.();
+    }
+
+    log("info", "antigravity log monitor worker started", { idleClearMs });
+  } catch (error) {
+    log("warn", "antigravity log monitor not started", { error: String(error.message || error) });
+  }
+
+  return {
+    stop() {
+      if (idleSpeechTimer) {
+        clearInterval(idleSpeechTimer);
+        idleSpeechTimer = null;
+      }
+      if (!monitor) return;
+      try { monitor.stop(); } catch {}
+      monitor = null;
+    },
+  };
+}
+
 function resolveConfig() {
   const defaultDeviceId = normalizeTopicPart(os.hostname().toLowerCase(), "devbox");
   const stateDirFallback = path.join(os.homedir(), ".status-bridge");
@@ -2144,6 +2317,12 @@ function resolveConfig() {
     },
     claude: {
       enabledLogMonitor: getEnvBool("CLAWD_ENABLE_CLAUDE_LOG_MONITOR", true),
+    },
+    antigravity: {
+      // 与 workbuddy 同样的判定：显式开关优先，其次看启用/选中通道，避免切换通道后仍在后台轮询。
+      enabled: getEnvBool("CLAWD_ENABLE_ANTIGRAVITY_MONITOR", false)
+        || parseCsvEnv("CLAWD_ENABLED_AGENTS", []).includes("antigravity")
+        || getEnv("CLAWD_SELECTED_AGENT_ID", "") === "antigravity",
     },
     openclaw: {
       enabled: getEnvBool("OPENCLAW_ENABLE", true),
@@ -2424,6 +2603,9 @@ async function main() {
   const claudeLogMonitor = config.claude.enabledLogMonitor
     ? startClaudeLogMonitor({ publisher, metricsTracker, includeRaw: config.includeRaw })
     : { stop() {} };
+  const antigravityLogMonitor = config.antigravity.enabled
+    ? startAntigravityLogMonitor({ publisher, metricsTracker, includeRaw: config.includeRaw })
+    : { stop() {} };
 
   let mimoDesktopMonitor = { stop() {} };
   if (config.mimocode.enabled) {
@@ -2566,6 +2748,7 @@ async function main() {
     mimoDesktopMonitor.stop();
     hermesMonitor.stop();
     dshMonitor.stop();
+    antigravityLogMonitor.stop();
     server.stop();
     publisher.stop();
     setTimeout(() => process.exit(0), 50).unref?.();
@@ -2582,6 +2765,7 @@ async function main() {
     version: APP_VERSION,
     codexMonitor: config.codex.enabled,
     claudeLogMonitor: config.claude.enabledLogMonitor,
+    antigravityLogMonitor: config.antigravity.enabled,
     openclawEnabled: config.openclaw.enabled,
     mimocodeEnabled: config.mimocode.enabled,
     dshEnabled: config.dsh.enabled,

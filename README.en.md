@@ -41,7 +41,7 @@ Prebuilt installers support Apple silicon Macs and Windows x64. The Mac package 
 
 Pet animations and task bubbles show thinking, working, waiting, completion and errors. Choose the Agent or session you want to follow and keep its progress visible beside your main screen.
 
-Integrations include **ChatGPT (Codex), Claude, OpenClaw, MiMo Desktop / MiMoCode, WorkBuddy and DeepSeek Harness**. Available events and controls vary by integration: status reporting, dictation, sending and switching desktop conversations are separate capabilities.
+Integrations include **ChatGPT (Codex), Claude, OpenClaw, MiMo Desktop / MiMoCode, WorkBuddy, DeepSeek Harness and Antigravity**. Available events and controls vary by integration: status reporting, dictation, sending and switching desktop conversations are separate capabilities.
 
 WorkBuddy and DeepSeek Harness can show the current session title and task state. Over USB or Wi-Fi, task bubbles use MiSans Medium at 32 px for titles and 24 px for body text.
 
@@ -56,7 +56,7 @@ WorkBuddy and DeepSeek Harness can show the current session title and task state
 
 Real-time conversation can also work with local to-dos and computer-status tools. With a connected Xiaomi Home account, it can control authorized devices and scenes that expose supported capabilities. This integration currently uses mainland China services; see the [smart-home guide](pc/docs/smart-home.md). These features require the desktop client and their respective services.
 
-**Dictation creates a draft; it does not send automatically.** Desktop input for ChatGPT (Codex), Claude, WorkBuddy and DeepSeek Harness depends on system accessibility and an accessible editor. Open the target conversation in WorkBuddy or DeepSeek first: selecting a device bubble does not switch those desktop conversations. MiMoCode voice support is platform-dependent, while OpenClaw uses its session routing. If the target is ambiguous or unavailable, the operation stops instead of guessing a historical conversation or sending again.
+**Dictation creates a draft; it does not send automatically.** Desktop input for ChatGPT (Codex), Claude, WorkBuddy and DeepSeek Harness depends on system accessibility and an accessible editor. Open the target conversation in WorkBuddy or DeepSeek first: selecting a device bubble does not switch those desktop conversations. MiMoCode voice support is platform-dependent, while OpenClaw uses its session routing. Antigravity reports status and bubbles only and offers no dictation; its transcript is rewritten when the context is trimmed, so the monitor realigns before continuing. If the target is ambiguous or unavailable, the operation stops instead of guessing a historical conversation or sending again.
 
 See the [desktop compatibility guide](pc/README.md), [WorkBuddy guide](pc/docs/workbuddy.md) and [real-time conversation guide](pc/docs/realtime-chat.md). Confirming a voice draft is separate from approving an Agent's tool permissions.
 

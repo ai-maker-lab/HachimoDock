@@ -67,6 +67,11 @@ function isNewTurnStartSignal(payload) {
   return [
     "userpromptsubmit",
     "user_message",
+    // Antigravity only has its transcript: a follow-up prompt shows up as
+    // `antigravity:user_input`. Without this marker the tracker kept the
+    // previous turn's terminal state and its answer text, so the device kept
+    // the old reply instead of switching to 「正在思考」 until the next reply.
+    "user_input",
     "task_started",
     "session.start",
     "session.pre",

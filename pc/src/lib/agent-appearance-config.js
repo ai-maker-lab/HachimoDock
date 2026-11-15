@@ -52,6 +52,11 @@ export const FIXED_AGENT_OPTIONS = [
     label: "Devin",
     detail: "Devin 云端会话状态与气泡；向 Devin Desktop 当前对话追加语音草稿",
   },
+  {
+    id: "antigravity",
+    label: "Antigravity",
+    detail: "Google Antigravity 智能体任务与状态渠道",
+  },
 ];
 
 export function loadEnabledAgents() {

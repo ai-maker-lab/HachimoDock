@@ -26,6 +26,7 @@ test("Rust routes DeepSeek voice through the current visible composer, not bound
 
   assert.match(rust, /detect_dsh\(\),/);
   assert.match(rust, /KNOWN_USB_STATE_SOURCES:[^=]+=[\s\S]*?"deepseek-harness"/);
+  assert.match(rust, /KNOWN_USB_STATE_SOURCES:[^=]+=[\s\S]*?"antigravity"/);
   assert.match(
     rust,
     /"deepseek-harness" \| "deepseek" \| "dsh" => Some\("deepseek-harness"\.to_string\(\)\)/,

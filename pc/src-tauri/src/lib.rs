@@ -1027,6 +1027,29 @@ fn p4_session_update_gate() -> &'static Mutex<()> {
     GATE.get_or_init(|| Mutex::new(()))
 }
 
+/// Empty card snapshots are destructive on the device: the firmware restores
+/// the idle view (bubble body becomes 休息中) whenever a `session/current`
+/// arrives with no cards. The dashboard re-issues the binding every few seconds
+/// as a lease refresh, so agents without a session feed would wipe their own
+/// reply right after it lands. Only the transition to an empty card list for a
+/// given board/agent/connection scope is worth sending.
+fn session_cards_send_allowed(scope_key: &str, empty_cards: bool) -> bool {
+    static LAST_EMPTY_SCOPE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    let state = LAST_EMPTY_SCOPE.get_or_init(|| Mutex::new(None));
+    let Ok(mut last_empty_scope) = state.lock() else {
+        return true;
+    };
+    if !empty_cards {
+        *last_empty_scope = None;
+        return true;
+    }
+    if last_empty_scope.as_deref() == Some(scope_key) {
+        return false;
+    }
+    *last_empty_scope = Some(scope_key.to_string());
+    true
+}
+
 fn p4_session_binding() -> &'static Mutex<P4SessionBinding> {
     static BINDING: OnceLock<Mutex<P4SessionBinding>> = OnceLock::new();
     BINDING.get_or_init(|| Mutex::new(P4SessionBinding::default()))
@@ -3882,7 +3905,7 @@ const BRIDGE_LAUNCH_AGENT_LABEL: &str = "com.petmanager.status-bridge";
 const BRIDGE_WINDOWS_STARTUP_SCRIPT_NAME: &str = "Pet Manager Status Bridge.cmd";
 const USB_STATE_MAX_AGE_MS: u64 = 10 * 60 * 1000;
 const USB_BRIDGE_SCAN_MAX_FILES: usize = 64;
-const KNOWN_USB_STATE_SOURCES: [&str; 8] = [
+const KNOWN_USB_STATE_SOURCES: [&str; 9] = [
     "claude-code",
     "codex",
     "openclaw",
@@ -3891,6 +3914,7 @@ const KNOWN_USB_STATE_SOURCES: [&str; 8] = [
     "workbuddy",
     "devin",
     "hermes",
+    "antigravity",
 ];
 #[cfg(windows)]
 const CREATE_NO_WINDOW_FLAG: u32 = 0x08000000;
@@ -5242,23 +5266,43 @@ fn set_p4_session_binding_blocking(
         } else {
             "会话已切换，客户端定位失败".to_string()
         };
-        usb_manager.send_session_current_for_connection(
-            &board_device_id,
-            connection_id,
-            &serde_json::json!({
-                "sessionId": displayed_session_id,
-                "title": device_title,
-                "index": session_index,
-                "count": session_count,
-                "sessions": device_sessions,
-                "agentId": &result.agent_id,
-                "activeSessionIds": active_session_ids,
-                "displayEnabled": input.display_enabled,
-                "notice": device_notice,
-                "desktopLocation": &result.desktop_location,
-                "desktopLocationError": &result.desktop_location_error,
-            }),
-        )?;
+        // An empty card list is destructive on the device: the firmware treats
+        // "no sessions" as "restore the idle session view", which rewrites the
+        // bubble body to 休息中 and erases a freshly delivered answer. Agents
+        // without a session feed (antigravity, workbuddy) re-issue this binding
+        // every P4_SESSION_LEASE_REFRESH_MS, so re-sending the same empty
+        // snapshot would wipe the reply a few seconds after it arrives. Send
+        // it only when the card list actually changed to empty for this
+        // board/agent/connection scope.
+        let scope_key = format!("{board_device_id}|{}|{connection_id}", result.agent_id);
+        let should_send_snapshot = session_cards_send_allowed(
+            &scope_key,
+            device_sessions.is_empty(),
+        );
+        if should_send_snapshot {
+            usb_manager.send_session_current_for_connection(
+                &board_device_id,
+                connection_id,
+                &serde_json::json!({
+                    "sessionId": displayed_session_id,
+                    "title": device_title,
+                    "index": session_index,
+                    "count": session_count,
+                    "sessions": device_sessions,
+                    "agentId": &result.agent_id,
+                    "activeSessionIds": active_session_ids,
+                    "displayEnabled": input.display_enabled,
+                    "notice": device_notice,
+                    "desktopLocation": &result.desktop_location,
+                    "desktopLocationError": &result.desktop_location_error,
+                }),
+            )?;
+        } else {
+            eprintln!(
+                "[p4-session] skipped redundant empty session snapshot agent={} (keeps device bubble)",
+                result.agent_id
+            );
+        }
     }
 
     *p4_session_binding().lock().map_err(|error| error.to_string())? = result.clone();
@@ -7158,6 +7202,78 @@ fn detect_codex() -> DetectedAgent {
     }
 }
 
+fn find_antigravity_executable(home: Option<&Path>) -> Option<String> {
+    find_agent_executable(
+        "agy",
+        home,
+        &[".local/bin/agy", ".gemini/antigravity/bin/agy"],
+        "agy.exe",
+    )
+}
+
+fn detect_antigravity() -> DetectedAgent {
+    let home = get_home_dir().ok();
+    let cli_path = find_antigravity_executable(home.as_deref());
+    let brain_dir = home
+        .as_ref()
+        .map(|path| {
+            path.join(".gemini")
+                .join("antigravity")
+                .join("brain")
+                .to_string_lossy()
+                .to_string()
+        })
+        .unwrap_or_default();
+
+    let has_brain = !brain_dir.is_empty() && Path::new(&brain_dir).exists();
+
+    let (detected, status, detail) = match &cli_path {
+        Some(path) => {
+            if has_brain {
+                (
+                    true,
+                    "ready".to_string(),
+                    format!("已检测到 Antigravity CLI 与会话记录: {}", path),
+                )
+            } else {
+                (
+                    true,
+                    "ready".to_string(),
+                    format!("已检测到 Antigravity CLI（等待会话生成）: {}", path),
+                )
+            }
+        }
+        None => {
+            if has_brain {
+                (
+                    true,
+                    "ready".to_string(),
+                    format!("已检测到 Antigravity 会话数据目录: {}", brain_dir),
+                )
+            } else {
+                (
+                    false,
+                    "not_found".to_string(),
+                    "未检测到 Antigravity CLI 或会话数据".to_string(),
+                )
+            }
+        }
+    };
+
+    DetectedAgent {
+        id: "antigravity".to_string(),
+        label: "Antigravity".to_string(),
+        detected,
+        ready: detected,
+        status,
+        detail,
+        command_path: cli_path.unwrap_or_default(),
+        config_path: brain_dir.clone(),
+        activity_path: brain_dir,
+        can_sync_hook: false,
+    }
+}
+
 /// Decide the OpenClaw discovery state from a real CLI entry and the local
 /// status-bridge identity file.
 ///
@@ -7657,6 +7773,7 @@ fn detect_local_agents_inner(devin_cloud_enabled: bool) -> Result<AgentDiscovery
     let agents = vec![
         detect_claude_code(),
         detect_codex(),
+        detect_antigravity(),
         detect_openclaw(),
         detect_mimocode(),
         detect_dsh(),
@@ -11328,6 +11445,7 @@ fn score_usb_source(source: &str) -> i32 {
         "claude-code" => 20,
         "mimocode" => 15,
         "workbuddy" => 15,
+        "antigravity" => 15,
         "openclaw" => 10,
         _ => 0,
     }
@@ -13186,7 +13304,7 @@ fn write_launch_script(
         shell_quote(&DEFAULT_BRIDGE_PORT.to_string())
     );
     let script = format!(
-        "#!/bin/sh\nset -eu\nunset NODE_OPTIONS\nmkdir -p {logs_dir}\nBRIDGE_ROOT=''\nfor candidate in {bridge_root_candidates}; do\n  if [ -f \"$candidate/{entry_relative_path}\" ]; then\n    BRIDGE_ROOT=\"$candidate\"\n    break\n  fi\ndone\nif [ -z \"$BRIDGE_ROOT\" ]; then\n  printf '%s\\n' 'bridge resources not found in any detected local path' >> {log_path}\n  exit 1\nfi\ncd \"$BRIDGE_ROOT/{workspace_relative_path}\"\nexport PATH={search_path}\nexport NODE_PATH=\"$BRIDGE_ROOT/{workspace_relative_path}/node_modules${{NODE_PATH:+:$NODE_PATH}}\"\n{codex_cli_export}{claude_cli_export}export MQTT_URL={mqtt_url}\nexport MQTT_USERNAME={mqtt_username}\nexport MQTT_PASSWORD={mqtt_password}\nexport STATUS_NAMESPACE={namespace}\nexport STATUS_DEVICE_ID={device_id}\nexport STATUS_BRIDGE_LOCAL_STATE_DIR={local_state_dir}\nexport CLAWD_BRIDGE_PORT={bridge_port}\nexport AGENT_BUS_PORT={agent_bus_port}\nexport PET_MANAGER_MANAGED_BRIDGE=1\nexport CLAWD_ENABLED_AGENTS={enabled_agents}\nexport CLAWD_SELECTED_AGENT_ID={selected_agent_id}\nexport CLAWD_DEVIN_CLOUD_ENABLED={devin_cloud_enabled}\nexport CLAWD_ENABLE_CLAUDE_LOG_MONITOR={claude_enabled}\nexport CLAWD_SYNC_HOOKS={claude_enabled}\nexport CLAWD_ENABLE_CODEX_MONITOR={codex_enabled}\nexport CLAWD_CODEX_SESSION_DIR={codex_session_dir}\nexport OPENCLAW_ENABLE={openclaw_enabled}\nexport CLAWD_ENABLE_MIMOCODE={mimocode_enabled}\nexec {node_path} \"$BRIDGE_ROOT/{entry_relative_path}\" >> {log_path} 2>&1\n",
+        "#!/bin/sh\nset -eu\nunset NODE_OPTIONS\nmkdir -p {logs_dir}\nBRIDGE_ROOT=''\nfor candidate in {bridge_root_candidates}; do\n  if [ -f \"$candidate/{entry_relative_path}\" ]; then\n    BRIDGE_ROOT=\"$candidate\"\n    break\n  fi\ndone\nif [ -z \"$BRIDGE_ROOT\" ]; then\n  printf '%s\\n' 'bridge resources not found in any detected local path' >> {log_path}\n  exit 1\nfi\ncd \"$BRIDGE_ROOT/{workspace_relative_path}\"\nexport PATH={search_path}\nexport NODE_PATH=\"$BRIDGE_ROOT/{workspace_relative_path}/node_modules${{NODE_PATH:+:$NODE_PATH}}\"\n{codex_cli_export}{claude_cli_export}export MQTT_URL={mqtt_url}\nexport MQTT_USERNAME={mqtt_username}\nexport MQTT_PASSWORD={mqtt_password}\nexport STATUS_NAMESPACE={namespace}\nexport STATUS_DEVICE_ID={device_id}\nexport STATUS_BRIDGE_LOCAL_STATE_DIR={local_state_dir}\nexport CLAWD_BRIDGE_PORT={bridge_port}\nexport AGENT_BUS_PORT={agent_bus_port}\nexport PET_MANAGER_MANAGED_BRIDGE=1\nexport CLAWD_ENABLED_AGENTS={enabled_agents}\nexport CLAWD_SELECTED_AGENT_ID={selected_agent_id}\nexport CLAWD_DEVIN_CLOUD_ENABLED={devin_cloud_enabled}\nexport CLAWD_ENABLE_CLAUDE_LOG_MONITOR={claude_enabled}\nexport CLAWD_ENABLE_ANTIGRAVITY_MONITOR={antigravity_enabled}\nexport CLAWD_SYNC_HOOKS={claude_enabled}\nexport CLAWD_ENABLE_CODEX_MONITOR={codex_enabled}\nexport CLAWD_CODEX_SESSION_DIR={codex_session_dir}\nexport OPENCLAW_ENABLE={openclaw_enabled}\nexport CLAWD_ENABLE_MIMOCODE={mimocode_enabled}\nexec {node_path} \"$BRIDGE_ROOT/{entry_relative_path}\" >> {log_path} 2>&1\n",
         logs_dir = shell_quote(
             log_path
                 .parent()
@@ -13220,6 +13338,7 @@ fn write_launch_script(
         }),
         claude_enabled = shell_quote(agent_enabled_env(profile, "claude-code")),
         codex_enabled = shell_quote(agent_enabled_env(profile, "codex")),
+        antigravity_enabled = shell_quote(agent_enabled_env(profile, "antigravity")),
         codex_session_dir = shell_quote(
             env::var("CLAWD_CODEX_SESSION_DIR")
                 .unwrap_or_default()
@@ -13362,6 +13481,7 @@ $env:CLAWD_DEVIN_CLOUD_ENABLED = {devin_cloud_enabled}\r\n\
 $env:CLAWD_ENABLE_CLAUDE_LOG_MONITOR = {claude_enabled}\r\n\
 $env:CLAWD_SYNC_HOOKS = {claude_enabled}\r\n\
 $env:CLAWD_ENABLE_CODEX_MONITOR = {codex_enabled}\r\n\
+$env:CLAWD_ENABLE_ANTIGRAVITY_MONITOR = {antigravity_enabled}\r\n\
 $env:CLAWD_CODEX_SESSION_DIR = {codex_session_dir}\r\n\
 $env:OPENCLAW_ENABLE = {openclaw_enabled}\r\n\
 $env:CLAWD_ENABLE_MIMOCODE = {mimocode_enabled}\r\n\
@@ -13402,6 +13522,7 @@ Set-Content -LiteralPath {pid_path} -Value $process.Id -Encoding ascii\r\n",
         }),
         claude_enabled = powershell_quote(agent_enabled_env(profile, "claude-code")),
         codex_enabled = powershell_quote(agent_enabled_env(profile, "codex")),
+        antigravity_enabled = powershell_quote(agent_enabled_env(profile, "antigravity")),
         codex_session_dir = powershell_quote(
             env::var("CLAWD_CODEX_SESSION_DIR")
                 .unwrap_or_default()
@@ -13702,6 +13823,10 @@ fn start_bridge_direct(
     command.env(
         "CLAWD_ENABLE_CODEX_MONITOR",
         if agent_on("codex") { "true" } else { "false" },
+    );
+    command.env(
+        "CLAWD_ENABLE_ANTIGRAVITY_MONITOR",
+        if agent_on("antigravity") { "true" } else { "false" },
     );
     command.env(
         "OPENCLAW_ENABLE",
@@ -15892,6 +16017,22 @@ mod tests {
             &enabled
         ));
         assert!(!usb_source_allowed_by_follow("codex", &selected, &enabled));
+    }
+
+    #[test]
+    fn empty_session_card_snapshots_are_sent_once_per_scope() {
+        let scope = "board-1|antigravity|7";
+        // First empty snapshot for a scope clears stale cards on the device.
+        assert!(session_cards_send_allowed(scope, true));
+        // Lease refreshes must not repeat it, or they would wipe the bubble.
+        assert!(!session_cards_send_allowed(scope, true));
+        assert!(!session_cards_send_allowed(scope, true));
+        // Cards present: always send, and re-arm the next empty transition.
+        assert!(session_cards_send_allowed(scope, false));
+        assert!(session_cards_send_allowed(scope, true));
+        // A different scope (agent/board/connection change) may clear again.
+        assert!(session_cards_send_allowed("board-1|workbuddy|7", true));
+        assert!(session_cards_send_allowed(scope, true));
     }
 
     #[test]
