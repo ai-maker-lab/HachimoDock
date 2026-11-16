@@ -27,6 +27,7 @@ function fixture({ matches = false } = {}) {
     dispatchBoardButtonConfig: async input => { writes.push(input); started(); return ack; },
     invoke: async command => { assert.equal(command, "usb_get_button_config"); return {}; },
     boardButtonConfigMatchesClient: () => matches,
+    hasDeferredDoublePress: () => false,
     setVoiceConfigOtaState: x => events.push(["state", x]),
     setVoiceConfigDirty: x => events.push(["dirty", x]),
     setButtonConfigHydratedFor: x => events.push(["hydrated", x]),

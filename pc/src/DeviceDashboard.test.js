@@ -232,7 +232,7 @@ test("dashboard keeps the client button map authoritative across reconnect and f
   const p4Protocol = readRepoFile("..", "firmware", "main", "pet_p4_protocol.c");
 
   assert.match(dashboard, /invoke\("usb_get_button_config"/);
-  assert.match(dashboard, /boardButtonConfigMatchesClient\(clientConfig, boardConfig, usb\.runtime\)/);
+  assert.match(dashboard, /boardButtonConfigMatchesClient\(clientConfig, boardConfig, usb\.runtime, usb\.capabilities\)/);
   assert.match(dashboard, /await syncClientConfig\(\)/);
   assert.match(dashboard, /已使用客户端按钮配置覆盖设备/);
   const queryFailure=dashboard.slice(dashboard.indexOf("} catch (error) {",dashboard.indexOf("const refreshButtonConfigFromBoard")),dashboard.indexOf("}, [",dashboard.indexOf("const refreshButtonConfigFromBoard")));
@@ -876,7 +876,7 @@ test("board button config sends twelve visible gestures as sixteen internal bind
   // helper, reused by both the manual OTA button and the component-center install.
   assert.match(source, /export async function dispatchBoardButtonConfig/);
   assert.match(source, /invoke\("button_config_signal"/);
-  assert.match(source, /bindings: buildBoardButtonConfigBindings\(buttonActions, buttonValues, runtime, voiceEnabled\)/);
+  assert.match(source, /bindings: buildBoardButtonConfigBindings\(buttonActions, buttonValues, runtime, voiceEnabled, capabilities\)/);
   assert.match(source, /const ack = await dispatchBoardButtonConfig\(/);
   assert.match(source, /voiceEnabled: requestedRuntimeVoiceEnabled/);
   assert.match(source, /按钮配置已写入，正在准备设备麦克风识别通道/);
@@ -899,7 +899,7 @@ test("board button config sends twelve visible gestures as sixteen internal bind
 
   const panelSource = readSource("dashboard/BoardButtonPanel.jsx");
   assert.match(panelSource, /个手势/);
-  assert.match(panelSource, /12 GESTURES/);
+  assert.match(panelSource, /\{controlRows\.length\} GESTURES/);
   assert.match(panelSource, /已同步/);
   assert.match(panelSource, /同步到设备/);
 

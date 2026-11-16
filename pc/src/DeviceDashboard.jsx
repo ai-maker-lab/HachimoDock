@@ -1,7 +1,7 @@
 /**
  * [Input] Bound device, useDeviceContext for state, Tauri voice/USB events, API-settings navigation, and useToast for notices.
  * [Output] Priority-ordered four-region device dashboard with runtime-aware Linux/P4 control maps,
- *          twelve exposed P4 button/joystick gestures (SW1-SW3 short/long plus
+ *          fifteen exposed P4 button/joystick gestures (SW1-SW3 short/double/long plus
  *          joystick center short/long and four directions), an internal hold transport for PTT,
  *          shared draft-then-confirm voice enablement with ordered background microphone signals,
  *          fully repeatable hardware actions with optional exit plus versioned default migration,
@@ -335,7 +335,7 @@ export function clampButtonActionValue(value, maxBytes = 159) {
   return output;
 }
 
-export function buildBoardButtonConfigBindings(buttonActions = {}, buttonValues = {}, runtime = "", voiceEnabled = false) {
+export function buildBoardButtonConfigBindings(buttonActions = {}, buttonValues = {}, runtime = "", voiceEnabled = false, capabilities = null) {
   const controlRows = buttonControlRowsForRuntime(runtime);
   const normalizedButtonActions = controlRows.reduce((next, row) => {
     next[row.id] = row.actionOptions.includes(buttonActions[row.id])
@@ -349,7 +349,8 @@ export function buildBoardButtonConfigBindings(buttonActions = {}, buttonValues 
       : row.defaultAction;
     const binding = { event: row.otaEvent || row.event, action };
     // Omitted double bindings keep requests compatible with older firmware.
-    if (row.capability === "buttonDoublePress" && action === "disabled") return [];
+    if (row.capability === "buttonDoublePress" && (action === "disabled"
+        || (capabilities !== null && capabilities?.buttonDoublePress !== "p4-button-double-press-v1"))) return [];
     if (action === "agent_prompt" || action === "miniapp_action") {
       binding.value = clampButtonActionValue(buttonValues[row.id] || row.defaultValue || "");
     }
@@ -363,6 +364,13 @@ export function buildBoardButtonConfigBindings(buttonActions = {}, buttonValues 
     return [binding, { event: row.holdEvent, action: "disabled" }];
   });
   return bindings;
+}
+
+export function hasDeferredDoublePress(buttonActions = {}, runtime = "", capabilities = {}) {
+  return String(runtime).toLowerCase() === P4_RUNTIME_ID
+    && capabilities?.buttonDoublePress !== "p4-button-double-press-v1"
+    && P4_BUTTON_CONTROL_ROWS.some((row) => row.capability === "buttonDoublePress"
+      && row.actionOptions.includes(buttonActions[row.id]) && buttonActions[row.id] !== "disabled");
 }
 
 function createButtonConfigRequestId() {
@@ -543,7 +551,7 @@ export function resolveButtonConfigForRuntime(value = {}, runtime = "") {
   };
 }
 
-function comparableButtonConfig(value = {}, runtime = "") {
+function comparableButtonConfig(value = {}, runtime = "", capabilities = null) {
   const resolved = resolveButtonConfigForRuntime(value, runtime);
   return {
     bindings: buildBoardButtonConfigBindings(
@@ -551,17 +559,18 @@ function comparableButtonConfig(value = {}, runtime = "") {
       resolved.config.buttonValues,
       runtime,
       resolved.voiceEnabled,
+      capabilities,
     ),
     voiceButton: resolved.voiceButton,
     voiceEnabled: resolved.voiceEnabled,
   };
 }
 
-export function boardButtonConfigMatchesClient(clientConfig = {}, response = {}, runtime = "") {
+export function boardButtonConfigMatchesClient(clientConfig = {}, response = {}, runtime = "", capabilities = null) {
   const boardConfig = mergeBoardButtonConfig(clientConfig, response, runtime);
   if (boardConfig.boardDefaultsMigrated === true) return false;
-  return JSON.stringify(comparableButtonConfig(clientConfig, runtime))
-    === JSON.stringify(comparableButtonConfig(boardConfig, runtime));
+  return JSON.stringify(comparableButtonConfig(clientConfig, runtime, capabilities))
+    === JSON.stringify(comparableButtonConfig(boardConfig, runtime, capabilities));
 }
 
 export function applyVoiceEnabledForRuntime(value = {}, enabled = false, runtime = "") {
@@ -635,12 +644,12 @@ function saveVoiceConfigToStorage(next) {
 // Single place that OTAs a button config to the board. Used by both the device
 // dashboard's manual "下发" button and the component center's install flow, so
 // the invoke shape lives in exactly one spot.
-export async function dispatchBoardButtonConfig({ boardDeviceId, buttonActions, buttonValues, runtime, voiceButton, voiceEnabled }) {
+export async function dispatchBoardButtonConfig({ boardDeviceId, buttonActions, buttonValues, runtime, voiceButton, voiceEnabled, capabilities = {} }) {
   const requestId = createButtonConfigRequestId();
   return invoke("button_config_signal", {
     boardDeviceId,
     requestId,
-    bindings: buildBoardButtonConfigBindings(buttonActions, buttonValues, runtime, voiceEnabled),
+    bindings: buildBoardButtonConfigBindings(buttonActions, buttonValues, runtime, voiceEnabled, capabilities),
     voiceButton,
     voiceEnabled,
   });
@@ -814,7 +823,9 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
   const realtimeChatKeyBound = Object.values(voiceConfig?.buttonActions || {}).includes("realtime_chat");
   voiceConfigRef.current = voiceConfig;
   const [voiceConfigDirty, setVoiceConfigDirty] = useState(false);
-  const usageHelp = useMemo(() => buildUsageHelp(buttonControlRowsForRuntime(usb.runtime), voiceConfig.buttonActions, voiceConfig.enabled, voiceConfigDirty), [usb.runtime, voiceConfig, voiceConfigDirty]);
+  const usageHelp = useMemo(() => buildUsageHelp(buttonControlRowsForRuntime(usb.runtime)
+    .filter((row) => row.capability !== "buttonDoublePress" || usb.capabilities?.buttonDoublePress === "p4-button-double-press-v1"),
+  voiceConfig.buttonActions, voiceConfig.enabled, voiceConfigDirty), [usb.runtime, usb.capabilities?.buttonDoublePress, voiceConfig, voiceConfigDirty]);
   useEffect(() => { setUsageHelp(usageHelp); }, [usageHelp, setUsageHelp]);
   const [voiceConfigOtaState, setVoiceConfigOtaState] = useState({ pending: false, tone: "", message: "" });
   const [buttonConfigHydratedFor, setButtonConfigHydratedFor] = useState("");
@@ -911,6 +922,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
       message: "正在校验设备与客户端按钮配置...",
     });
     const clientConfig = normalizeVoiceConfig(voiceConfigRef.current);
+    const deferredDoubles = hasDeferredDoublePress(clientConfig.buttonActions, usb.runtime, usb.capabilities);
     const syncClientConfig = async () => {
       if (!queryIsCurrent()) return null;
       const resolved = resolveButtonConfigForRuntime(clientConfig, usb.runtime);
@@ -921,6 +933,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
         runtime: usb.runtime,
         voiceButton: resolved.voiceButton,
         voiceEnabled: resolved.voiceEnabled,
+        capabilities: usb.capabilities,
       });
     };
     try {
@@ -928,12 +941,14 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
         expectedBoardDeviceId: buttonConfigTargetBoardDeviceId,
       });
       if (!queryIsCurrent()) return null;
-      if (boardButtonConfigMatchesClient(clientConfig, boardConfig, usb.runtime)) {
+      if (boardButtonConfigMatchesClient(clientConfig, boardConfig, usb.runtime, usb.capabilities)) {
         setVoiceConfigDirty(false);
         setVoiceConfigOtaState({
           pending: false,
           tone: "success",
-          message: "设备按钮配置与客户端一致。",
+          message: deferredDoubles
+            ? "设备支持的按键配置与客户端一致；双击设置已保存在电脑，等待固件支持。"
+            : "设备按钮配置与客户端一致。",
         });
         return boardConfig;
       }
@@ -951,7 +966,9 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
           setVoiceConfigOtaState({
             pending: false,
             tone: "success",
-            message: "检测到配置差异，已使用客户端按钮配置覆盖设备。",
+            message: deferredDoubles
+              ? "设备支持的按键配置已同步；双击设置保留在电脑，等待固件支持。"
+              : "检测到配置差异，已使用客户端按钮配置覆盖设备。",
           });
         }
       } catch (syncError) {
@@ -984,6 +1001,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
     hasKnownRuntime,
     usb.connected,
     usb.runtime,
+    usb.capabilities?.buttonDoublePress,
     voiceTarget.key,
     usb.connectionId,
     usb.bootId,
@@ -1115,10 +1133,13 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
       }
       saveVoiceConfigToStorage(next);
       setVoiceConfigDirty(true);
-      setVoiceConfigOtaState({ pending: false, tone: "warning", message: "修改已保存在电脑上，点击「同步到设备」后生效。" });
+      setVoiceConfigOtaState({ pending: false, tone: "warning", message:
+        hasDeferredDoublePress(next.buttonActions, usb.runtime, usb.capabilities)
+          ? "修改已保存在电脑上。当前固件尚不支持双击；其他手势可正常同步，双击等待配套固件。"
+          : "修改已保存在电脑上，点击「同步到设备」后生效。" });
       return next;
     });
-  }, [isP4Runtime]);
+  }, [isP4Runtime, usb.runtime, usb.capabilities?.buttonDoublePress]);
 
   const applyVoiceConfigOverUsb = useCallback(async (configOverride = null) => {
     const requestedRevision = buttonConfigRevisionRef.current;
@@ -1130,6 +1151,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
       : voiceConfig;
     const requested = resolveButtonConfigForRuntime(requestedConfigInput, usb.runtime);
     const requestedConfig = requested.config;
+    const deferredDoubles = hasDeferredDoublePress(requestedConfig.buttonActions, usb.runtime, usb.capabilities);
     const requestedRuntimeVoiceEnabled = requested.voiceEnabled;
     const requestedVoiceTriggerId = requested.voiceButton;
     if (!usb.connected) {
@@ -1150,6 +1172,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
         runtime: usb.runtime,
         voiceButton: requestedVoiceTriggerId,
         voiceEnabled: requestedRuntimeVoiceEnabled,
+        capabilities: usb.capabilities,
       });
       if (!isCurrent()) return;
       let voiceSetupWarning = "";
@@ -1202,16 +1225,18 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
       setVoiceConfigDirty(false);
       setVoiceConfigOtaState({
         pending: false,
-        tone: voiceSetupWarning ? "warning" : "success",
+        tone: voiceSetupWarning || deferredDoubles ? "warning" : "success",
         message: voiceSetupWarning
           ? `按钮配置已写入板端（${Number.isFinite(bindingCount) ? bindingCount : 0} 项）；语音通道未就绪：${voiceSetupWarning}`
-          : "按钮配置已同步到设备，可以按新的设置操作了。",
+          : deferredDoubles
+            ? "短按、长按和摇杆已同步。双击设置已保存在电脑，需升级配套固件后再同步生效。"
+            : "按钮配置已同步到设备，可以按新的设置操作了。",
       });
     } catch (err) {
       if (!isCurrent()) return;
       setVoiceConfigOtaState({ pending: false, tone: "error", message: `按钮配置下发失败: ${err}` });
     }
-  }, [voiceTarget.key, binding.boardDeviceId, isP4Runtime, onlineBoardDeviceId, sendAudioBridgeSignal, usb.boardDeviceId, usb.connected, usb.connectionId, usb.runtime, voiceConfig, voiceState.audioBridgeEnabled]);
+  }, [voiceTarget.key, binding.boardDeviceId, isP4Runtime, onlineBoardDeviceId, sendAudioBridgeSignal, usb.boardDeviceId, usb.connected, usb.connectionId, usb.runtime, usb.capabilities?.buttonDoublePress, voiceConfig, voiceState.audioBridgeEnabled]);
 
   const updateVoiceTrigger = useCallback(async (trigger) => {
     buttonConfigRevisionRef.current += 1;

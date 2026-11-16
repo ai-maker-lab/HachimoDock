@@ -118,7 +118,7 @@ test("SW2 long press defaults to one realtime toggle and respects explicit overr
   const rowSource = dashboard.match(/\{ id: "p4_sw2_long",[^\n]+/)[0].replace(/,$/, "");
   const row = new Function("P4_CUSTOM_ACTION_OPTIONS", `return (${rowSource});`)(["realtime_chat", "disabled"]);
   const builderSource = dashboard.slice(dashboard.indexOf("export function buildBoardButtonConfigBindings"), dashboard.indexOf("function createButtonConfigRequestId"));
-  const build = new Function("buttonControlRowsForRuntime", "clampButtonActionValue", `${builderSource.replace("export function", "function")}; return buildBoardButtonConfigBindings;`)(() => [row], (v) => v);
+  const build = new Function("buttonControlRowsForRuntime", "clampButtonActionValue", `${builderSource.replaceAll("export function", "function")}; return buildBoardButtonConfigBindings;`)(() => [row], (v) => v);
   assert.deepEqual(build({}, {}, "esp-p4"), [
     { event: "button.sw2.long_press", action: "realtime_chat" },
     { event: "button.sw2.hold", action: "disabled" },

@@ -16,6 +16,7 @@ import {
   DEFAULT_VOICE_CONFIG,
   actionOptionById,
   buttonControlRowsForRuntime,
+  hasDeferredDoublePress,
 } from "../DeviceDashboard.jsx";
 import Button from "../shell/Button";
 import { buildUsageHelp, friendlyControlLabel } from "../lib/usage-help.js";
@@ -153,11 +154,12 @@ export default function BoardButtonPanel({
   const [hoveredButtonId, setHoveredButton] = useState("");
   const triggerId = selectedTrigger?.id || DEFAULT_VOICE_CONFIG.trigger;
   const supportsDoublePress = capabilities?.buttonDoublePress === "p4-button-double-press-v1";
-  const controlRows = buttonControlRowsForRuntime(runtime)
-    .filter((row) => row.capability !== "buttonDoublePress" || supportsDoublePress);
+  const controlRows = buttonControlRowsForRuntime(runtime);
+  const hasPendingDoubles = hasDeferredDoublePress(buttonActions, runtime, capabilities);
   const isP4Runtime = String(runtime || "").toLowerCase() === "esp-p4";
   const controlGroups = groupControlRows(controlRows, isP4Runtime);
-  const help = buildUsageHelp(controlRows, buttonActions, voiceConfig?.enabled, voiceConfigDirty);
+  const help = buildUsageHelp(controlRows.filter((row) =>
+    row.capability !== "buttonDoublePress" || supportsDoublePress), buttonActions, voiceConfig?.enabled, voiceConfigDirty);
 
   if (controlRows.length === 0) {
     return (
@@ -204,8 +206,8 @@ export default function BoardButtonPanel({
         <div className="board-button-panel__sync-state">
           <h2>按钮配置</h2>
           <strong>{controlGroups.length} 个控件 <i /> {controlRows.length} 个手势</strong>
-          <span className={`board-button-panel__sync-label${voiceConfigDirty ? " is-dirty" : ""}`}>
-            {voiceConfigDirty ? "待同步" : "已同步"}
+          <span className={`board-button-panel__sync-label${voiceConfigDirty || hasPendingDoubles ? " is-dirty" : ""}`}>
+            {hasPendingDoubles ? "双击已保存 · 等待固件支持" : voiceConfigDirty ? "待同步" : "已同步"}
           </span>
         </div>
         <div className="board-button-panel__toolbar-actions">
@@ -236,12 +238,12 @@ export default function BoardButtonPanel({
       )}
 
       <div className="usage-help">
-        <p>为按键和摇杆选择功能，修改后点击「同步到设备」生效。同一个按键可以分别设置短按和长按。</p>
+        <p>为按键和摇杆选择功能，修改后自动保存在电脑，点击「同步到设备」后在设备上生效。同一个按键可以分别设置短按、双击和长按。</p>
         {isP4Runtime && (
           <p id="button-double-press-help">
             {supportsDoublePress
               ? "双击默认未绑定。设置双击后，该键短按会等待 300 毫秒；双击只触发一次双击功能。长按功能保持可用；蓄力组件内 SW1 优先用于按住操作，全局退出和实时对话仍优先。"
-              : "当前固件未声明双击能力，升级支持双击的固件后可配置 SW1、SW2、SW3 双击。"}
+              : "当前固件尚不支持双击。可以先设置并保存在电脑；本次只同步短按、长按和摇杆，双击需升级配套固件后再同步生效。"}
           </p>
         )}
         <details open>
@@ -276,7 +278,7 @@ export default function BoardButtonPanel({
                   <circle className="board-button-map__screen-status" cx="108" cy="82" r="4" />
                   <text className="board-button-map__screen-kicker" x="120" y="86">HARDWARE INPUT</text>
                   <text className="board-button-map__screen-title" x="108" y="128">
-                    12 GESTURES
+                      {controlRows.length} GESTURES
                   </text>
                   <text className="board-button-map__screen-copy" x="108" y="153">
                     SW1 · SW2 · SW3 · JOYSTICK
@@ -378,7 +380,7 @@ export default function BoardButtonPanel({
                     <small>
                       {group.id === "p4_joystick"
                         ? "上、下、左、右与中按分别配置"
-                        : "短按、长按分别配置"}
+                        : isP4Runtime ? "短按、双击、长按分别配置" : "短按、长按分别配置"}
                     </small>
                   </span>
                 </div>
@@ -405,6 +407,9 @@ export default function BoardButtonPanel({
                       >
                         <span className="board-button-control-field__head">
                           <label htmlFor={fieldId}>{gestureLabel(row, group)}</label>
+                          {row.capability === "buttonDoublePress" && !supportsDoublePress && (
+                            <span className="board-button-panel__voice-chip">需升级固件</span>
+                          )}
                           {isVoicePttRow && (
                             <span className={`board-button-panel__voice-chip${voiceConfig.enabled ? " is-on" : ""}`}>
                               <Mic size={11} />

@@ -1,17 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { COMPONENT_CONTROL_OPTIONS, resolveGlobalExitEvents } from "../component-center/button-config.js";
+import { COMPONENT_CONTROL_OPTIONS, resolveGlobalExitEvents, migrateP4V7ShippedBoardDefaults } from "../component-center/button-config.js";
 import { COMPONENT_BUTTON_EVENTS } from "../lib/clawpkg-contract.js";
 
 // Exercise the production pure configuration functions without mounting Tauri.
 const source = readFileSync(new URL("../DeviceDashboard.jsx", import.meta.url), "utf8");
 const constants = source.slice(source.indexOf("export const VOICE_CONFIG_STORAGE_KEY"), source.indexOf("function preferredVoiceRow"));
 const helpers = source.slice(source.indexOf("function preferredVoiceRow"), source.indexOf("function createButtonConfigRequestId"));
-const normalize = source.slice(source.indexOf("function normalizeVoiceConfig"), source.indexOf("export function mergeBoardButtonConfig"));
-const config = new Function("DEVICE_BUTTON_CONFIG_STORAGE_KEY", "DEVICE_BUTTON_CONFIG_MODEL_VERSION",
+const normalize = source.slice(source.indexOf("function normalizeVoiceConfig"), source.indexOf("function loadVoiceConfigFromStorage"));
+const config = new Function("DEVICE_BUTTON_CONFIG_STORAGE_KEY", "DEVICE_BUTTON_CONFIG_MODEL_VERSION", "migrateP4V7ShippedBoardDefaults",
   (constants + helpers + normalize).replaceAll("export ", "")
-    + ";return {buildBoardButtonConfigBindings,buttonControlRowsForRuntime,normalizeVoiceConfig};")("test", 10);
+    + ";return {buildBoardButtonConfigBindings,buttonControlRowsForRuntime,normalizeVoiceConfig,boardButtonConfigMatchesClient,hasDeferredDoublePress};")("test", 10, migrateP4V7ShippedBoardDefaults);
 
 test("unbound doubles leave the legacy 16-event payload unchanged", () => {
   const bindings = config.buildBoardButtonConfigBindings({}, {}, "esp-p4", true);
@@ -50,4 +50,25 @@ test("v9 client mappings survive v10 and doubles can be global exits", () => {
   assert.deepEqual(resolveGlobalExitEvents({ bindings: [
     { event: "button.sw2.double_press", action: "page_back" },
   ] }), ["button.sw2.double_press"]);
+});
+
+test("old firmware accepts normal mappings while double settings stay saved on PC", () => {
+  const current = config.normalizeVoiceConfig({ buttonModelVersion: 10,
+    buttonActions: { p4_sw1_double: "agent_prompt", p4_sw2_double: "realtime_chat", p4_sw3_double: "page_back" },
+    buttonValues: { p4_sw1_double: "记录灵感" } });
+  const oldPayload = config.buildBoardButtonConfigBindings(current.buttonActions, current.buttonValues, "esp-p4", true, {});
+  assert.equal(oldPayload.length, 16);
+  assert.ok(oldPayload.every((b) => !b.event.endsWith(".double_press")));
+  assert.equal(current.buttonValues.p4_sw1_double, "记录灵感");
+  assert.equal(current.buttonActions.p4_sw2_double, "realtime_chat");
+  assert.equal(config.hasDeferredDoublePress(current.buttonActions, "esp-p4", {}), true);
+  assert.equal(config.boardButtonConfigMatchesClient(current, { config: { version: 9, bindings: oldPayload } }, "esp-p4", {}), true);
+  const capabilities = { buttonDoublePress: "p4-button-double-press-v1" };
+  const newPayload = config.buildBoardButtonConfigBindings(current.buttonActions, current.buttonValues, "esp-p4", true, capabilities);
+  assert.equal(newPayload.length, 19);
+  assert.equal(config.hasDeferredDoublePress(current.buttonActions, "esp-p4", capabilities), false);
+  assert.equal(config.boardButtonConfigMatchesClient(current, { config: { version: 10,
+    bindings: [...oldPayload, ...[1, 2, 3].map(sw => ({ event: `button.sw${sw}.double_press`, action: "disabled" }))],
+  } }, "esp-p4", capabilities), false);
+  assert.equal(config.boardButtonConfigMatchesClient(current, { config: { version: 10, bindings: newPayload } }, "esp-p4", capabilities), true);
 });
