@@ -2318,14 +2318,15 @@ def test_p4_hardware_inputs_are_debounced_persistent_and_configurable():
 
     assert '"pet_p4_input.c"' in cmake
     assert '"pet_p4_input_core.c"' in cmake
-    assert "PET_P4_INPUT_SW1_GPIO GPIO_NUM_50" in input_source
-    assert "PET_P4_INPUT_SW2_GPIO GPIO_NUM_49" in input_source
-    assert "PET_P4_INPUT_SW3_GPIO GPIO_NUM_5" in input_source
-    assert "PET_P4_INPUT_ENCODER_PRESS_GPIO GPIO_NUM_4" in input_source
-    assert "PET_P4_INPUT_ENCODER_B_GPIO GPIO_NUM_3" in input_source
-    assert "PET_P4_INPUT_ENCODER_A_GPIO GPIO_NUM_2" in input_source
-    assert "PET_P4_INPUT_JOYSTICK_X_GPIO GPIO_NUM_21" in input_source
-    assert "PET_P4_INPUT_JOYSTICK_Y_GPIO GPIO_NUM_20" in input_source
+    # Board profiles are compiled in p4_board_profiles_test. Driver and hello
+    # must share those definitions instead of advertising stale WiFi6 pins.
+    header = read_required("main/pet_p4_input.h")
+    assert '#include "pet_p4_board_pins.h"' in header
+    for field, name in (("sw1", "SW1"), ("sw2", "SW2"), ("sw3", "SW3"),
+                        ("encoderPress", "ENCODER_PRESS"),
+                        ("encoderB", "ENCODER_B"), ("encoderA", "ENCODER_A")):
+        assert f'cJSON_AddNumberToObject(controls, "{field}", PET_P4_INPUT_{name}_GPIO);' in protocol
+        assert f'PET_P4_INPUT_{name}_GPIO' in input_source
     assert "PET_P4_INPUT_JOYSTICK_X_CHANNEL ADC1_GPIO21_CHANNEL" in input_source
     assert "PET_P4_INPUT_JOYSTICK_Y_CHANNEL ADC1_GPIO20_CHANNEL" in input_source
     assert '"esp_adc"' in cmake or "esp_adc" in cmake
@@ -2366,8 +2367,10 @@ def test_p4_hardware_inputs_are_debounced_persistent_and_configurable():
     assert "migrate_v6_config" in input_source
     assert "migrate_v7_config" in input_source
     assert "migrate_v8_config" in input_source
+    assert "migrate_v9_config" in input_source
     assert "migrate_input_config" in input_source
-    assert "PET_P4_INPUT_CONFIG_VERSION 9" in read_required("main/pet_p4_input.h")
+    assert "PET_P4_INPUT_CONFIG_VERSION 10" in header
+    assert "PET_P4_INPUT_MAX_BINDINGS 19" in header
     assert "center_binding" not in input_source
     assert '"page_toggle"' in input_source
     assert '"page_enter"' in input_source
@@ -2748,7 +2751,13 @@ def test_p4_dsh_approval_modal_is_single_shot_and_bounded():
         input_source.index("void pet_p4_input_process("):
         input_source.index("unsigned int pet_p4_input_dropped_events(")
     ]
-    assert "if (handle_approval_input(state, send_line, ctx, &event)) continue;" in input_process
+    approval_gate = re.search(
+        r"if \(handle_approval_input\(state, send_line, ctx, &event\)\) \{([^}]+)\}",
+        input_process,
+    )
+    assert approval_gate
+    assert "memset(g_button_clicks, 0, sizeof(g_button_clicks));" in approval_gate.group(1)
+    assert "continue;" in approval_gate.group(1)
     approval_input = input_source[
         input_source.index("static bool approval_decision_for_event("):
         input_source.index("static bool apply_local_action(")
