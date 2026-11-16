@@ -28,6 +28,12 @@ jobs:
         working-directory: pc
       - run: npm test
         working-directory: pc
+      - name: Install browser for button configuration acceptance
+        run: npx playwright install chromium
+        working-directory: pc
+      - name: Verify old and new firmware button controls
+        run: node scripts/test-button-double-press-browser.mjs
+        working-directory: pc
       - run: npm run test:bridge
         working-directory: pc
       - run: npm run build:web
