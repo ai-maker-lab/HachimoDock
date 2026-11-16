@@ -57,8 +57,19 @@ pub fn init_tray(app:&AppHandle)->tauri::Result<()>{
             "quit-app"=>app.exit(0),
             _=>{}
         });
-    let icon=app.default_window_icon().ok_or_else(||std::io::Error::new(std::io::ErrorKind::NotFound,"default tray icon unavailable"))?;
-    let tray=tray.icon(icon.clone()).build(app)?;
+    #[cfg(target_os="macos")]
+    let tray={
+        let image=image::load_from_memory_with_format(include_bytes!("../icons/tray-macos.png"),image::ImageFormat::Png)
+            .map_err(|error|std::io::Error::new(std::io::ErrorKind::InvalidData,error))?.to_rgba8();
+        let (width,height)=image.dimensions();
+        tray.icon(tauri::image::Image::new_owned(image.into_raw(),width,height)).icon_as_template(true)
+    };
+    #[cfg(not(target_os="macos"))]
+    let tray={
+        let icon=app.default_window_icon().ok_or_else(||std::io::Error::new(std::io::ErrorKind::NotFound,"default tray icon unavailable"))?;
+        tray.icon(icon.clone())
+    };
+    let tray=tray.build(app)?;
     // Keep an owned handle for the entire application lifetime.
     app.manage(tray);
     Ok(())
