@@ -15071,6 +15071,15 @@ mod tests {
 
     #[test]
     fn button_config_allows_joystick_session_and_miniapp_proxy_actions() {
+        for (label, control, event) in [
+            ("SW1 双击", "SW1", "button.sw1.double_press"),
+            ("SW2 双击", "SW2", "button.sw2.double_press"),
+            ("SW3 双击", "SW3", "button.sw3.double_press"),
+        ] {
+            assert!(is_allowed_button_config_event(event));
+            assert_eq!(canonical_binding_for_control(label), Some((control, event)));
+        }
+        assert!(!is_allowed_button_config_event("button.sw4.double_press"));
         assert!(is_allowed_button_config_event("joystick.up"));
         assert!(is_allowed_button_config_event("joystick.down"));
         assert!(is_allowed_button_config_action("session_next"));
