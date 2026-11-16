@@ -13,6 +13,7 @@
 #include "cJSON.h"
 #include "esp_err.h"
 #include "pet_p4_protocol.h"
+#include "pet_p4_board_pins.h"
 
 #ifdef __cplusplus
 extern "C" {

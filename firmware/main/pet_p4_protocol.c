@@ -3427,12 +3427,12 @@ void pet_p4_send_hello_for_board(const char *board_id, pet_p4_send_line_fn send_
   cJSON_AddBoolToObject(features, "safeReboot", true);
   cJSON_AddItemToObject(capabilities, "features", features);
 
-  cJSON_AddNumberToObject(controls, "sw1", 50);
-  cJSON_AddNumberToObject(controls, "sw2", 49);
-  cJSON_AddNumberToObject(controls, "sw3", 5);
-  cJSON_AddNumberToObject(controls, "encoderPress", 4);
-  cJSON_AddNumberToObject(controls, "encoderB", 3);
-  cJSON_AddNumberToObject(controls, "encoderA", 2);
+  cJSON_AddNumberToObject(controls, "sw1", PET_P4_INPUT_SW1_GPIO);
+  cJSON_AddNumberToObject(controls, "sw2", PET_P4_INPUT_SW2_GPIO);
+  cJSON_AddNumberToObject(controls, "sw3", PET_P4_INPUT_SW3_GPIO);
+  cJSON_AddNumberToObject(controls, "encoderPress", PET_P4_INPUT_ENCODER_PRESS_GPIO);
+  cJSON_AddNumberToObject(controls, "encoderB", PET_P4_INPUT_ENCODER_B_GPIO);
+  cJSON_AddNumberToObject(controls, "encoderA", PET_P4_INPUT_ENCODER_A_GPIO);
   cJSON_AddBoolToObject(controls, "activeLow", true);
   cJSON_AddBoolToObject(controls, "configPersistent", true);
   cJSON_AddBoolToObject(controls, "touchscreen", touch_ready);

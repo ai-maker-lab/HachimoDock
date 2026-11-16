@@ -1504,6 +1504,11 @@ For hold bindings, `hold_start` is emitted only after the 700ms threshold;
 
 ## USB PTT Audio
 
+The Pico v3 acceptance target uses SW1 GPIO14, SW2 GPIO6 and SW3 GPIO5.
+The default WiFi6 target keeps GPIO50/49/5. Both the driver and hello `controls`
+read `pet_p4_board_pins.h`; a firmware version's board-specific startup mapping
+must not be inferred from an older hardcoded hello declaration.
+
 The default `button.sw1.hold -> voice_ptt` mapping starts board-microphone capture on
 `hold_start` and stops it on `hold_end`. Audio is PCM S16LE, 16kHz, mono, in
 20ms (640-byte) frames. Capture stops automatically after 30 seconds.

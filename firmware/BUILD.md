@@ -19,10 +19,13 @@
 
 Pico 双击候选可用 `python -m platformio run -e esp32_p4_pico_v3_doublepress`
 构建，版本为 `0.7.103-p4-r181-dbl-pico`。它使用公开 r181 源码、v3 的
-ESP-IDF 5.5.4 / 24 MHz 屏幕时钟以及 ES8311 双工音频探测，**不是 r229-pico
+ESP-IDF 5.5.4 / 24 MHz 屏幕时钟、Pico SW1/SW2 的 GPIO14/6（SW3 为 GPIO5）
+以及 ES8311 双工音频探测，**不是 r229-pico
 发布二进制的源码重建**。测试时先备份实际设备完整 Flash，核对 3.0–3.99 芯片
 门槛和实际分区表，再通过应用 OTA 写入备用分区。不要用完整出厂镜像擦除已有设备，
 也不要覆盖当前有效应用作为测试的第一步。编译成功不等于真机按键、屏幕和录音验收通过。
+引脚由 `main/pet_p4_board_pins.h` 同时提供给实际驱动和能力声明；Pico 的引脚
+依据 r229-pico 驱动的实际启动日志核对，不能只依据其仍写着 GPIO50/49 的旧 hello 字段。
 
 ## 获取与构建
 
