@@ -4758,6 +4758,9 @@ fn is_allowed_button_config_event(event: &str) -> bool {
             | "screen.region.tap"
             | "screen.region.long_press"
             | "button.sw1.short_press"
+            | "button.sw1.double_press"
+            | "button.sw2.double_press"
+            | "button.sw3.double_press"
             | "button.sw1.long_press"
             | "button.sw1.hold"
             | "button.sw2.short_press"
@@ -5143,6 +5146,10 @@ async fn button_config_signal(
         }
         if !is_allowed_button_config_action(action) {
             return Err(format!("invalid button action '{action}'"));
+        }
+        if event.ends_with(".double_press")
+            && usb_status.capabilities["buttonDoublePress"] != "p4-button-double-press-v1" {
+            return Err("当前设备固件不支持双击，请先升级固件；按键配置未写入".into());
         }
         let value = binding.value.as_deref().unwrap_or("").trim();
         if value.len() >= 160 {
@@ -9774,6 +9781,9 @@ fn canonical_binding_for_control(control: &str) -> Option<(&'static str, &'stati
         "屏幕点击" => ("屏幕区域", "screen.region.tap"),
         "屏幕长按" => ("屏幕区域", "screen.region.long_press"),
         "SW1 短按" => ("SW1", "button.sw1.short_press"),
+        "SW1 双击" => ("SW1", "button.sw1.double_press"),
+        "SW2 双击" => ("SW2", "button.sw2.double_press"),
+        "SW3 双击" => ("SW3", "button.sw3.double_press"),
         "SW1 长按" => ("SW1", "button.sw1.long_press"),
         "SW2 短按" => ("SW2", "button.sw2.short_press"),
         "SW3 短按" => ("SW3", "button.sw3.short_press"),

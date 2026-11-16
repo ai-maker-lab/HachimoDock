@@ -106,10 +106,13 @@ export const DEFAULT_BUTTON_ACTIONS = {
   encoder_button: "system_reset",
   encoder_rotate: "volume_adjust",
   p4_sw1_short: "page_enter",
+  p4_sw1_double: "disabled",
   p4_sw1_long: "voice_ptt",
   p4_sw2_short: "component_center",
+  p4_sw2_double: "disabled",
   p4_sw2_long: "realtime_chat",
   p4_sw3_short: "page_back",
+  p4_sw3_double: "disabled",
   p4_sw3_long: "disabled",
   p4_encoder_press: "page_enter",
   p4_encoder_long: "disabled",
@@ -176,10 +179,13 @@ const P4_CUSTOM_ACTION_OPTIONS = [
 ];
 export const P4_BUTTON_CONTROL_ROWS = [
   { id: "p4_sw1_short", controlId: "p4_sw1", label: "SW1 短按", event: "button.sw1.short_press", defaultAction: "page_enter", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
+  { id: "p4_sw1_double", controlId: "p4_sw1", label: "SW1 双击", event: "button.sw1.double_press", defaultAction: "disabled", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true, capability: "buttonDoublePress" },
   { id: "p4_sw1_long", controlId: "p4_sw1", label: "SW1 长按", event: "button.sw1.long_press", holdEvent: "button.sw1.hold", voiceTriggerId: P4_DEFAULT_VOICE_TRIGGER, defaultAction: "voice_ptt", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
   { id: "p4_sw2_short", controlId: "p4_sw2", label: "SW2 短按", event: "button.sw2.short_press", defaultAction: "component_center", defaultValue: P4_DEFAULT_PROMPT, actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
+  { id: "p4_sw2_double", controlId: "p4_sw2", label: "SW2 双击", event: "button.sw2.double_press", defaultAction: "disabled", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true, capability: "buttonDoublePress" },
   { id: "p4_sw2_long", controlId: "p4_sw2", label: "SW2 长按", event: "button.sw2.long_press", holdEvent: "button.sw2.hold", voiceTriggerId: "sw2.hold", defaultAction: "realtime_chat", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
   { id: "p4_sw3_short", controlId: "p4_sw3", label: "SW3 短按", event: "button.sw3.short_press", defaultAction: "page_back", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
+  { id: "p4_sw3_double", controlId: "p4_sw3", label: "SW3 双击", event: "button.sw3.double_press", defaultAction: "disabled", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true, capability: "buttonDoublePress" },
   { id: "p4_sw3_long", controlId: "p4_sw3", label: "SW3 长按", event: "button.sw3.long_press", holdEvent: "button.sw3.hold", voiceTriggerId: "sw3.hold", defaultAction: "disabled", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
   { id: "p4_joystick_up", controlId: "p4_joystick", label: "摇杆向上", event: "joystick.up", defaultAction: "session_previous", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
   { id: "p4_joystick_down", controlId: "p4_joystick", label: "摇杆向下", event: "joystick.down", defaultAction: "session_next", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
@@ -342,6 +348,8 @@ export function buildBoardButtonConfigBindings(buttonActions = {}, buttonValues 
       ? normalizedButtonActions[row.id]
       : row.defaultAction;
     const binding = { event: row.otaEvent || row.event, action };
+    // Omitted double bindings keep requests compatible with older firmware.
+    if (row.capability === "buttonDoublePress" && action === "disabled") return [];
     if (action === "agent_prompt" || action === "miniapp_action") {
       binding.value = clampButtonActionValue(buttonValues[row.id] || row.defaultValue || "");
     }
@@ -370,7 +378,9 @@ function normalizeVoiceConfig(value = {}) {
   const storedButtonModelVersion = Number(value.buttonModelVersion || 0);
   const migrateLegacyP4Defaults = storedButtonModelVersion !== DEVICE_BUTTON_CONFIG_MODEL_VERSION
     && Object.keys(incoming).some((key) => key.startsWith("p4_"));
-  const previousP4Defaults = storedButtonModelVersion === 8
+  const previousP4Defaults = storedButtonModelVersion === 9
+    ? DEFAULT_BUTTON_ACTIONS
+    : storedButtonModelVersion === 8
     ? P4_V8_DEFAULT_BUTTON_ACTIONS
     : storedButtonModelVersion === 7
     ? P4_V7_DEFAULT_BUTTON_ACTIONS
@@ -1568,6 +1578,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
           buttonValues={voiceConfig.buttonValues}
           buttonLabels={voiceConfig.buttonLabels}
           runtime={usb.runtime}
+          capabilities={usb.capabilities}
           voiceConfigDirty={voiceConfigDirty}
           voiceConfigOtaState={voiceConfigOtaState}
           usbConnected={Boolean(usb.connected)}

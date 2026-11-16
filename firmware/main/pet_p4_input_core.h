@@ -1,6 +1,6 @@
 /*
  * [Input] Raw physical samples and elapsed sampling time.
- * [Output] Public state and APIs for button, legacy rotary, and four-direction
+ * [Output] Public state and APIs for button/double-click, legacy rotary, and four-direction
  *          joystick decoding with center-aware directional thresholds and no
  *          ESP-IDF dependencies.
  * [Pos] Testable input-decoder contract shared by firmware and host tests.
@@ -28,7 +28,23 @@ enum {
   PET_P4_BUTTON_EVENT_SHORT_PRESS = 1 << 2,
   PET_P4_BUTTON_EVENT_LONG_PRESS = 1 << 3,
   PET_P4_BUTTON_EVENT_LONG_RELEASE = 1 << 4,
+  PET_P4_BUTTON_EVENT_DOUBLE_PRESS = 1 << 5,
 };
+
+#define PET_P4_BUTTON_DOUBLE_PRESS_MS 300
+
+/* Owned by the dispatch task, after debounce. No cross-task mutable state.
+ * A second down within the window reserves the click until short/long release.
+ * Long presses and ownership changes cancel a pending click. */
+typedef struct {
+  bool pending;
+  bool second_down;
+  uint64_t released_ms;
+  uint64_t context;
+} pet_p4_button_click_t;
+
+uint8_t pet_p4_button_click_update(pet_p4_button_click_t *click,
+  uint8_t events, uint64_t now_ms, uint64_t context, bool enabled);
 
 typedef struct {
   bool raw_pressed;

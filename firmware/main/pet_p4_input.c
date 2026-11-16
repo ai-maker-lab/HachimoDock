@@ -93,12 +93,14 @@ typedef enum {
   PET_P4_INPUT_GESTURE_DOWN,
   PET_P4_INPUT_GESTURE_UP,
   PET_P4_INPUT_GESTURE_SHORT_PRESS,
+  PET_P4_INPUT_GESTURE_DOUBLE_PRESS,
   PET_P4_INPUT_GESTURE_LONG_PRESS,
   PET_P4_INPUT_GESTURE_HOLD_START,
   PET_P4_INPUT_GESTURE_HOLD_END,
   PET_P4_INPUT_GESTURE_ROTATE,
   PET_P4_INPUT_GESTURE_DIRECTION,
   PET_P4_INPUT_GESTURE_REPEAT,
+  PET_P4_INPUT_GESTURE_TICK,
 } pet_p4_input_gesture_t;
 
 typedef struct {
@@ -117,6 +119,7 @@ typedef struct {
 static const char *TAG = "pet-p4-input";
 static QueueHandle_t g_event_queue;
 static pet_p4_input_config_t g_config;
+static pet_p4_button_click_t g_button_clicks[3];
 static atomic_uint g_dropped_events;
 static unsigned int g_event_sequence;
 static adc_oneshot_unit_handle_t g_joystick_adc;
@@ -156,12 +159,15 @@ static const char *json_string(const cJSON *object, const char *key) {
 static bool event_is_allowed(const char *event) {
   static const char *const allowed[] = {
     "button.sw1.short_press",
+    "button.sw1.double_press",
     "button.sw1.long_press",
     "button.sw1.hold",
     "button.sw2.short_press",
+    "button.sw2.double_press",
     "button.sw2.long_press",
     "button.sw2.hold",
     "button.sw3.short_press",
+    "button.sw3.double_press",
     "button.sw3.long_press",
     "button.sw3.hold",
     "button.encoder.short_press",
@@ -234,12 +240,15 @@ static void load_default_config(pet_p4_input_config_t *config) {
   memset(config, 0, sizeof(*config));
   config->version = PET_P4_INPUT_CONFIG_VERSION;
   add_default_binding(config, "button.sw1.short_press", "page_enter", "");
+  add_default_binding(config, "button.sw1.double_press", "disabled", "");
   add_default_binding(config, "button.sw1.long_press", "disabled", "");
   add_default_binding(config, "button.sw1.hold", "voice_ptt", "");
   add_default_binding(config, "button.sw2.short_press", "component_center", "");
+  add_default_binding(config, "button.sw2.double_press", "disabled", "");
   add_default_binding(config, "button.sw2.long_press", "realtime_chat", "");
   add_default_binding(config, "button.sw2.hold", "disabled", "");
   add_default_binding(config, "button.sw3.short_press", "page_back", "");
+  add_default_binding(config, "button.sw3.double_press", "disabled", "");
   add_default_binding(config, "button.sw3.long_press", "disabled", "");
   add_default_binding(config, "button.sw3.hold", "disabled", "");
   add_default_binding(config, "button.encoder.short_press", "page_enter", "");
@@ -454,6 +463,15 @@ static bool migrate_v8_config(pet_p4_input_config_t *config) {
     "session_next",
     ""
   );
+  config->version = 9;
+  return true;
+}
+
+static bool migrate_v9_config(pet_p4_input_config_t *config) {
+  if (!config || config->version != 9 || !config_bindings_are_valid(config)) return false;
+  add_default_binding(config, "button.sw1.double_press", "disabled", "");
+  add_default_binding(config, "button.sw2.double_press", "disabled", "");
+  add_default_binding(config, "button.sw3.double_press", "disabled", "");
   config->version = PET_P4_INPUT_CONFIG_VERSION;
   return true;
 }
@@ -466,7 +484,8 @@ static bool migrate_input_config(pet_p4_input_config_t *config) {
   if (config->version == 5 && !migrate_v5_config(config)) return false;
   if (config->version == 6 && !migrate_v6_config(config)) return false;
   if (config->version == 7 && !migrate_v7_config(config)) return false;
-  return config->version == 8 && migrate_v8_config(config);
+  if (config->version == 8 && !migrate_v8_config(config)) return false;
+  return config->version == 9 && migrate_v9_config(config);
 }
 
 static esp_err_t persist_config(const pet_p4_input_config_t *config) {
@@ -481,16 +500,21 @@ static esp_err_t persist_config(const pet_p4_input_config_t *config) {
 
 static void load_persisted_config(void) {
   nvs_handle_t handle;
-  pet_p4_input_config_t stored;
+  pet_p4_input_config_t stored = {0};
   size_t size = sizeof(stored);
   load_default_config(&g_config);
   if (nvs_open(PET_P4_INPUT_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return;
   esp_err_t err = nvs_get_blob(handle, PET_P4_INPUT_NVS_KEY, &stored, &size);
   nvs_close(handle);
-  if (err == ESP_OK && size == sizeof(stored) && config_is_valid(&stored)) {
+  /* v2-v9 stored exactly 16 slots. Read into a zeroed larger buffer without
+   * discarding user mappings when v10 grows the persisted structure. */
+  const size_t legacy_size = sizeof(stored) - 3 * sizeof(stored.bindings[0]);
+  bool valid_size = size == sizeof(stored)
+    || (size == legacy_size && stored.version <= 9 && stored.binding_count <= 16);
+  if (err == ESP_OK && valid_size && config_is_valid(&stored)) {
     g_config = stored;
     ESP_LOGI(TAG, "restored %u input bindings from NVS", (unsigned int) g_config.binding_count);
-  } else if (err == ESP_OK && size == sizeof(stored)) {
+  } else if (err == ESP_OK && valid_size) {
     const uint32_t stored_version = stored.version;
     if (!migrate_input_config(&stored)) {
       ESP_LOGW(TAG, "ignored input config version %u", (unsigned int) stored_version);
@@ -641,6 +665,7 @@ bool pet_p4_input_handle_config(
     return false;
   }
   g_config = *next;
+  memset(g_button_clicks, 0, sizeof(g_button_clicks));
   free(next);
   send_config_ack(
     send_line,
@@ -962,7 +987,10 @@ esp_err_t pet_p4_input_reset_config(void) {
   pet_p4_input_config_t defaults;
   load_default_config(&defaults);
   esp_err_t err = persist_config(&defaults);
-  if (err == ESP_OK) g_config = defaults;
+  if (err == ESP_OK) {
+    g_config = defaults;
+    memset(g_button_clicks, 0, sizeof(g_button_clicks));
+  }
   return err;
 }
 
@@ -1566,12 +1594,60 @@ static void process_button_event(
     }
     return;
   }
-  if (event->gesture == PET_P4_INPUT_GESTURE_SHORT_PRESS) {
+  if (event->gesture == PET_P4_INPUT_GESTURE_DOUBLE_PRESS) {
+    snprintf(event_name, sizeof(event_name), "%s.double_press", prefix);
+    dispatch_binding_event(state, send_line, ctx, event, event_name, "double_press");
+  } else if (event->gesture == PET_P4_INPUT_GESTURE_SHORT_PRESS) {
     snprintf(event_name, sizeof(event_name), "%s.short_press", prefix);
     dispatch_binding_event(state, send_line, ctx, event, event_name, "short_press");
   } else if (event->gesture == PET_P4_INPUT_GESTURE_LONG_PRESS) {
     snprintf(event_name, sizeof(event_name), "%s.long_press", prefix);
     dispatch_binding_event(state, send_line, ctx, event, event_name, "long_press");
+  }
+}
+
+static void process_click_event(pet_p4_runtime_state_t *state,
+  pet_p4_send_line_fn send_line, void *ctx, const pet_p4_input_event_t *event) {
+  if (event->control > PET_P4_INPUT_CONTROL_SW3) {
+    process_button_event(state, send_line, ctx, event);
+    return;
+  }
+  char name[PET_P4_INPUT_EVENT_MAX];
+  snprintf(name, sizeof(name), "%s.double_press", button_event_prefix(event->control));
+  const pet_p4_input_binding_t *binding = active_binding(name);
+  bool in_app = state && !pet_p4_conversation_active(state) && !strcmp(state->screen_page, "app");
+  bool enabled = (binding && strcmp(binding->action, "disabled"))
+    || (in_app && pet_p4_miniapp_has_input(name));
+  /* Charge/release owns SW1 except for the established global exit/realtime
+   * priority. Other global doubles must not steal its immediate key-down. */
+  if (in_app && event->control == PET_P4_INPUT_CONTROL_SW1
+      && pet_p4_miniapp_hold_input("button.sw1.short_press")
+      && !active_global_priority_binding(state, name)) enabled = false;
+  unsigned page = state && pet_p4_conversation_active(state) ? 4
+    : in_app ? 0 : state && !strcmp(state->screen_page, "main") ? 1
+    : state && !strcmp(state->screen_page, "components") ? 2 : 3;
+  uint64_t context = pet_p4_miniapp_input_context() | ((uint64_t)page << 60)
+    | ((uint64_t)(state && state->native_usb_mounted) << 59)
+    | ((uint64_t)(state && state->approval_active) << 58);
+  uint8_t flags = event->gesture == PET_P4_INPUT_GESTURE_DOWN ? PET_P4_BUTTON_EVENT_DOWN
+    : event->gesture == PET_P4_INPUT_GESTURE_UP ? PET_P4_BUTTON_EVENT_UP
+    : event->gesture == PET_P4_INPUT_GESTURE_SHORT_PRESS ? PET_P4_BUTTON_EVENT_SHORT_PRESS
+    : event->gesture == PET_P4_INPUT_GESTURE_LONG_PRESS ? PET_P4_BUTTON_EVENT_LONG_PRESS : 0;
+  uint8_t clicks = pet_p4_button_click_update(&g_button_clicks[event->control],
+    flags, event->ts_ms, context, enabled && !(state && state->approval_active));
+  pet_p4_input_event_t resolved = *event;
+  if (clicks & PET_P4_BUTTON_EVENT_SHORT_PRESS) {
+    resolved.gesture = PET_P4_INPUT_GESTURE_SHORT_PRESS;
+    process_button_event(state, send_line, ctx, &resolved);
+  }
+  if (clicks & PET_P4_BUTTON_EVENT_DOUBLE_PRESS) {
+    resolved.gesture = PET_P4_INPUT_GESTURE_DOUBLE_PRESS;
+    process_button_event(state, send_line, ctx, &resolved);
+  }
+  if (event->gesture != PET_P4_INPUT_GESTURE_SHORT_PRESS
+      && event->gesture != PET_P4_INPUT_GESTURE_TICK
+      && !(enabled && event->gesture == PET_P4_INPUT_GESTURE_DOWN)) {
+    process_button_event(state, send_line, ctx, event);
   }
 }
 
@@ -1588,7 +1664,10 @@ void pet_p4_input_process(
     pet_p4_miniapp_activation_guard(state && !strcmp(state->screen_page, "components")
       && !pet_p4_conversation_active(state));
     /* The pending DSH approval owns every physical event while it is visible. */
-    if (handle_approval_input(state, send_line, ctx, &event)) continue;
+    if (handle_approval_input(state, send_line, ctx, &event)) {
+      memset(g_button_clicks, 0, sizeof(g_button_clicks));
+      continue;
+    }
     if (event.control == PET_P4_INPUT_CONTROL_JOYSTICK
         && (event.gesture == PET_P4_INPUT_GESTURE_DIRECTION||event.gesture==PET_P4_INPUT_GESTURE_REPEAT)) {
       static pet_p4_input_gate_t gate;
@@ -1692,8 +1771,16 @@ void pet_p4_input_process(
         event.delta > 0 ? "rotate_cw" : "rotate_ccw"
       );
     } else {
-      process_button_event(state, send_line, ctx, &event);
+      process_click_event(state, send_line, ctx, &event);
     }
+  }
+  /* Drain queued samples before expiring clicks so scheduling jitter cannot
+   * turn an already-queued second depression into two unrelated clicks. */
+  for (int control = PET_P4_INPUT_CONTROL_SW1; control <= PET_P4_INPUT_CONTROL_SW3; control++) {
+    if (!g_button_clicks[control].pending) continue;
+    pet_p4_input_event_t tick = {.control = control, .gesture = PET_P4_INPUT_GESTURE_TICK,
+      .ts_ms = (unsigned long long)(esp_timer_get_time() / 1000ULL)};
+    process_click_event(state, send_line, ctx, &tick);
   }
   pet_p4_miniapp_activation_guard(state && !strcmp(state->screen_page, "components")
     && !pet_p4_conversation_active(state));

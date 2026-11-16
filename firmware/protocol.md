@@ -1258,6 +1258,26 @@ legacy EC11 decoder on GPIO2/GPIO3 remains active, so the same firmware also
 supports the previous board revision. Firmware queues input events outside
 GPIO and render callbacks, and stores accepted mappings in NVS.
 
+SW1/SW2/SW3 also support opt-in `button.sw1.double_press`,
+`button.sw2.double_press`, and `button.sw3.double_press`. Hello advertises
+`buttonDoublePress: "p4-button-double-press-v1"`; the desktop checks this before
+sending double bindings or installing a component that uses them. Config v10
+has 19 slots and migrates the old 16-slot NVS blob without changing user mappings.
+All three double bindings default to `disabled`; absent bindings have the same
+effect, including when an older desktop sends the original 16 events.
+
+Only keys with an active global or component double binding wait for a second
+press. A second debounced down strictly within 300 ms of the first short release
+reserves the pair; its short release emits `double_press` once, with no short
+event. Otherwise a single short event is dispatched at the deadline. A second
+long press cancels the pending short and retains long/hold/PTT handling. Each key
+has independent state. Page/component/state, conversation, USB mount, approval,
+and config ownership changes discard pending clicks. Approval dialogs retain
+their immediate short-press decisions. SW1 charge/release components retain
+key-down ownership: other global doubles are suspended there, and component
+packages cannot combine `input.hold` with an SW1 double binding. Explicit global
+Back/realtime double bindings retain priority over component charge/release.
+
 PC to board:
 
 ```json
@@ -1265,15 +1285,18 @@ PC to board:
   "topic": "input/config",
   "payload": {
     "requestId": "input-42",
-    "version": 9,
+    "version": 10,
     "bindings": [
       {"event":"button.sw1.short_press","action":"page_enter","value":""},
+      {"event":"button.sw1.double_press","action":"disabled","value":""},
       {"event":"button.sw1.long_press","action":"disabled","value":""},
       {"event":"button.sw1.hold","action":"voice_ptt","value":""},
       {"event":"button.sw2.short_press","action":"component_center","value":""},
+      {"event":"button.sw2.double_press","action":"disabled","value":""},
       {"event":"button.sw2.long_press","action":"disabled","value":""},
       {"event":"button.sw2.hold","action":"disabled","value":""},
       {"event":"button.sw3.short_press","action":"page_back","value":""},
+      {"event":"button.sw3.double_press","action":"disabled","value":""},
       {"event":"button.sw3.long_press","action":"disabled","value":""},
       {"event":"button.sw3.hold","action":"disabled","value":""},
       {"event":"button.encoder.short_press","action":"page_enter","value":""},

@@ -2,6 +2,14 @@
 
 本文件描述当前 Pet Manager 与 ESP32-P4 运行时共同接受的 `.clawpkg` 格式。生成器、校验器和发布器必须遵循同一契约。
 
+实体键可新增 `button.sw1.double_press`、`button.sw2.double_press`、
+`button.sw3.double_press` 绑定。目标设备必须声明
+`buttonDoublePress: "p4-button-double-press-v1"`。例如 `buttons.json` 中
+`{"action":"note.capture","control":"SW2","event":"button.sw2.double_press","label":"记灵感"}`
+会触发组件已有的 `note.capture` transition，不会自行录音或识别语音。
+双击启用后，该键单击等待 300 毫秒；双击只触发一次。全局退出和实时对话优先，
+`input.hold` 蓄力组件不能同时声明 SW1 双击。详见 `input-policy.md`。
+
 本文中的 JSON 均为字段级说明片段，不是可发布模板。新组件必须从用户需求推导状态、实体、规则、布局和参数；禁止复制内置组件、历史生成包或其他完整 `.clawpkg` 后改名。
 
 ## 1. 目标设备

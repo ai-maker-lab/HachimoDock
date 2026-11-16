@@ -15,7 +15,50 @@ static void release_to_center(pet_p4_joystick_decoder_t *decoder) {
   assert(pet_p4_joystick_decoder_update(decoder, 2048, 2048, 5) == PET_P4_JOYSTICK_CENTER);
 }
 
+static void test_clicks(void) {
+  pet_p4_button_click_t keys[3] = {0};
+  const uint8_t down = PET_P4_BUTTON_EVENT_DOWN;
+  const uint8_t short_press = PET_P4_BUTTON_EVENT_SHORT_PRESS;
+  const uint8_t double_press = PET_P4_BUTTON_EVENT_DOUBLE_PRESS;
+  for (int key = 0; key < 3; key++) {
+    pet_p4_button_click_t *c = &keys[key];
+    assert(pet_p4_button_click_update(c, short_press, 10, 1, false) == short_press);
+    assert(!pet_p4_button_click_update(c, short_press, 100, 1, true));
+    assert(!pet_p4_button_click_update(c, 0, 399, 1, true));
+    assert(pet_p4_button_click_update(c, 0, 400, 1, true) == short_press);
+    assert(!pet_p4_button_click_update(c, 0, 1000, 1, true));
+    /* The second down reserves the pair; release emits only a double. */
+    assert(!pet_p4_button_click_update(c, short_press, 1100, 1, true));
+    assert(pet_p4_button_click_update(c, down, 1399, 1, true) == down);
+    assert(!pet_p4_button_click_update(c, 0, 1400, 1, true));
+    assert(pet_p4_button_click_update(c, short_press, 1500, 1, true) == double_press);
+    /* Triple click = double followed by a single. */
+    assert(!pet_p4_button_click_update(c, short_press, 1600, 1, true));
+    assert(pet_p4_button_click_update(c, 0, 1900, 1, true) == short_press);
+    /* A down exactly at the deadline starts an independent depression. */
+    assert(!pet_p4_button_click_update(c, short_press, 2000, 1, true));
+    assert(pet_p4_button_click_update(c, down, 2300, 1, true) == (down | short_press));
+    assert(!pet_p4_button_click_update(c, short_press, 2350, 1, true));
+    /* Ownership changes and clock rollback cancel pending clicks. */
+    assert(!pet_p4_button_click_update(c, 0, 2650, 2, true));
+    assert(!pet_p4_button_click_update(c, short_press, 2700, 2, true));
+    assert(!pet_p4_button_click_update(c, 0, 2600, 2, true));
+    /* A second depression held long cancels the pending short. */
+    assert(!pet_p4_button_click_update(c, short_press, 3000, 2, true));
+    assert(pet_p4_button_click_update(c, down, 3100, 2, true) == down);
+    assert(pet_p4_button_click_update(c, PET_P4_BUTTON_EVENT_LONG_PRESS, 3800, 2, true)
+      == PET_P4_BUTTON_EVENT_LONG_PRESS);
+    assert(!pet_p4_button_click_update(c, 0, 4000, 2, true));
+  }
+  assert(!pet_p4_button_click_update(&keys[0], short_press, 5000, 2, true));
+  assert(!pet_p4_button_click_update(&keys[1], short_press, 5100, 2, true));
+  assert(pet_p4_button_click_update(&keys[0], 0, 5300, 2, true) == short_press);
+  assert(!pet_p4_button_click_update(&keys[1], 0, 5300, 2, true));
+  assert(pet_p4_button_click_update(&keys[1], 0, 5400, 2, true) == short_press);
+}
+
 int main(void) {
+  test_clicks();
   pet_p4_input_gate_t gate={0};
   assert(pet_p4_input_gate_accept(&gate,false,1));
   assert(pet_p4_input_gate_accept(&gate,false,1));

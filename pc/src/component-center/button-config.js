@@ -2,7 +2,7 @@
  * [Input] Per-component buttons.json bindings and install-time control-label overrides.
  * [Output] Shared screen/SW1-SW3/joystick option catalog, label resolution,
  *          exact shipped-v7 board-default migration, authoritative optional
- *          global-exit event resolution, and button-config model-v9 signaling.
+ *          global-exit event resolution, and button-config model-v10 signaling.
  *          Current installs keep bindings package-owned.
  * [Pos] component-center contract helper in pc/src/component-center
  * [Sync] If this file changes, update `pc/src/component-center/.folder.md`.
@@ -33,6 +33,11 @@ export const COMPONENT_CONTROL_OPTIONS = [
       help: `按下设备 ${control} 后触发这个组件动作。`,
     };
   }),
+  ...[1, 2, 3].map((sw) => ({
+    label: `SW${sw} 双击`, shortLabel: `SW${sw} 双击`, control: `SW${sw}`,
+    event: `button.sw${sw}.double_press`,
+    help: "300 毫秒内再次按下；该键短按会等待双击判定，全局退出和实时对话绑定优先。",
+  })),
   {
     label: "SW1 长按",
     shortLabel: "SW1 长按",
@@ -95,6 +100,9 @@ export const P4_COMPONENT_BUTTON_EVENTS = [
   "button.sw1.short_press",
   "button.sw2.short_press",
   "button.sw3.short_press",
+  "button.sw1.double_press",
+  "button.sw2.double_press",
+  "button.sw3.double_press",
   "button.encoder.short_press",
   "button.encoder.long_press",
   "knob.rotate_cw",
@@ -125,7 +133,7 @@ const GLOBAL_EXIT_CONTROL_LABELS = {
 };
 
 export const DEVICE_BUTTON_CONFIG_STORAGE_KEY = "pet-manager.board-voice-config";
-export const DEVICE_BUTTON_CONFIG_MODEL_VERSION = 9;
+export const DEVICE_BUTTON_CONFIG_MODEL_VERSION = 10;
 
 export function resolveGlobalExitEvents(response = {}) {
   const boardConfig = response?.config && typeof response.config === "object"

@@ -39,6 +39,9 @@ FORBIDDEN_SUFFIXES = {
 }
 ALLOWED_KINDS = {"game", "tool"}
 ALLOWED_EVENTS = {
+    "button.sw1.double_press",
+    "button.sw2.double_press",
+    "button.sw3.double_press",
     "button.sw1.short_press",
     "button.sw2.short_press",
     "button.sw3.short_press",
@@ -173,6 +176,7 @@ DEFAULT_CAPABILITIES = {
     "widgetFlappyTuning": "p4-flappy-tuning-v1",
     "widgetLifecycle": "p4-lifecycle-v1",
     "widgetInput": "p4-input-v1",
+    "buttonDoublePress": "p4-button-double-press-v1",
     "widgetLocalTools": "p4-local-tools-v1",
     "widgetLocalToolsMasks": "p4-local-masks-v2",
     "widgetLogic": "p4-logic-v1",
@@ -1872,6 +1876,10 @@ def validate_buttons(
                 errors.append(f"SW1/SW2/SW3 不支持长按或 hold: {event}")
             if event not in ALLOWED_EVENTS and not media_lyric_key:
                 errors.append(f"buttons.json[{index}].event 不受支持: {event}")
+            if event.endswith(".double_press") and capabilities.get("buttonDoublePress") != "p4-button-double-press-v1":
+                errors.append("双击绑定需要支持 buttonDoublePress 的设备固件")
+            if event == "button.sw1.double_press" and runtime.get("input", {}).get("hold"):
+                errors.append("SW1 蓄力按住操作不能同时绑定 SW1 双击")
             if event.startswith("screen.") and not touch_ready:
                 errors.append(f"目标设备未声明触控可用，不能绑定 {event}")
             for slot in event_slots(event):

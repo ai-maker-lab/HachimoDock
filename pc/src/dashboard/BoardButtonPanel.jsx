@@ -142,6 +142,7 @@ export default function BoardButtonPanel({
   buttonValues = {},
   buttonLabels = {},
   runtime = "",
+  capabilities = {},
   voiceConfigDirty,
   voiceConfigOtaState,
   usbConnected,
@@ -151,7 +152,9 @@ export default function BoardButtonPanel({
 }) {
   const [hoveredButtonId, setHoveredButton] = useState("");
   const triggerId = selectedTrigger?.id || DEFAULT_VOICE_CONFIG.trigger;
-  const controlRows = buttonControlRowsForRuntime(runtime);
+  const supportsDoublePress = capabilities?.buttonDoublePress === "p4-button-double-press-v1";
+  const controlRows = buttonControlRowsForRuntime(runtime)
+    .filter((row) => row.capability !== "buttonDoublePress" || supportsDoublePress);
   const isP4Runtime = String(runtime || "").toLowerCase() === "esp-p4";
   const controlGroups = groupControlRows(controlRows, isP4Runtime);
   const help = buildUsageHelp(controlRows, buttonActions, voiceConfig?.enabled, voiceConfigDirty);
@@ -234,6 +237,13 @@ export default function BoardButtonPanel({
 
       <div className="usage-help">
         <p>为按键和摇杆选择功能，修改后点击「同步到设备」生效。同一个按键可以分别设置短按和长按。</p>
+        {isP4Runtime && (
+          <p id="button-double-press-help">
+            {supportsDoublePress
+              ? "双击默认未绑定。设置双击后，该键短按会等待 300 毫秒；双击只触发一次双击功能。长按功能保持可用；蓄力组件内 SW1 优先用于按住操作，全局退出和实时对话仍优先。"
+              : "当前固件未声明双击能力，升级支持双击的固件后可配置 SW1、SW2、SW3 双击。"}
+          </p>
+        )}
         <details open>
           <summary>常用操作 · 按当前配置显示{voiceConfigDirty ? "（待同步）" : ""}</summary>
           <dl className="usage-help__operations">
@@ -410,6 +420,7 @@ export default function BoardButtonPanel({
                           <span className="voice-button-action-select-shell">
                             <select
                               id={fieldId}
+                              aria-describedby={row.capability === "buttonDoublePress" ? "button-double-press-help" : undefined}
                               className="voice-button-action-select"
                               value={currentActionId}
                               aria-label={`${friendlyControlLabel(group.label)}${gestureLabel(row, group)}功能`}

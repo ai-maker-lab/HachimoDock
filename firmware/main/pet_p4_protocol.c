@@ -2989,6 +2989,7 @@ void pet_p4_send_hello_for_board(const char *board_id, pet_p4_send_line_fn send_
   cJSON_AddStringToObject(capabilities, "widgetFlappyTuning", "p4-flappy-tuning-v1");
   cJSON_AddStringToObject(capabilities, "widgetLifecycle", "p4-lifecycle-v1");
   cJSON_AddStringToObject(capabilities, "widgetInput", "p4-input-v1");
+  cJSON_AddStringToObject(capabilities, "buttonDoublePress", "p4-button-double-press-v1");
   cJSON_AddStringToObject(capabilities, "widgetLocalTools", "p4-local-tools-v1");
   cJSON_AddStringToObject(capabilities, "widgetLocalToolsMasks", "p4-local-masks-v2");
   cJSON_AddStringToObject(capabilities, "widgetLogic", "p4-logic-v1");

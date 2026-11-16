@@ -2121,6 +2121,7 @@ static const char *const keys[]={"engine","repeat","press","swipe","confirm","dr
     if(!cJSON_IsString(hold)||!runtime_has_transition_action(r,hold->valuestring)||(!side&&!cJSON_GetObjectItemCaseSensitive(scene,"motion")))return false;
     bool bound=false;for(int b=0;b<r->button_count;b++)if(!strcmp(r->buttons[b].action,hold->valuestring)&&!strcmp(r->buttons[b].event,"button.sw1.short_press"))bound=true;
     if(!bound||cJSON_HasObjectItem(p,"drag"))return false;
+    for(int b=0;b<r->button_count;b++)if(!strcmp(r->buttons[b].event,"button.sw1.double_press"))return false;
     const char *conflicts[]={"repeat","press","confirm","cooldown"};
     for(int k=0;k<4;k++){const cJSON *v=cJSON_GetObjectItemCaseSensitive(p,conflicts[k]),*item;
       if(k<2){cJSON_ArrayForEach(item,v)if(cJSON_IsString(item)&&!strcmp(item->valuestring,hold->valuestring))return false;}
@@ -4729,8 +4730,8 @@ static bool app_surface_locked(pet_surface_t *surface,const pet_host_render_t *h
     if(g_pressed_node>=0&&memcmp(g_pressed_scroll,scroll,sizeof(scroll))){g_viewport_epoch++;g_pressed_node=-1;}
     surface->viewport.offset=scroll[0];
     for(int i=0;i<surface->viewport_count;i++)surface->viewports[i].offset=scroll[i+1];
-    static const char *const events[]={"button.sw1.short_press","button.sw2.short_press","button.sw3.short_press","button.encoder.short_press","button.encoder.long_press","knob.rotate_ccw","knob.rotate_cw","joystick.up","joystick.down"};
-    static const char *const labels[]={"SW1","SW2","SW3","中按","中长","左","右","上","下"};
+    static const char *const events[]={"button.sw1.short_press","button.sw2.short_press","button.sw3.short_press","button.encoder.short_press","button.encoder.long_press","knob.rotate_ccw","knob.rotate_cw","joystick.up","joystick.down","button.sw1.double_press","button.sw2.double_press","button.sw3.double_press"};
+    static const char *const labels[]={"SW1","SW2","SW3","中按","中长","左","右","上","下","SW1双击","SW2双击","SW3双击"};
 #if PET_FORM_V2_ENABLED
     /* Capture/format each field once under this runtime lock, not once for
      * every bound node (up to 32). Normal builds have no extra scratch/calls. */
@@ -4818,7 +4819,7 @@ static bool app_surface_locked(pet_surface_t *surface,const pet_host_render_t *h
       if(!n->key_for[0])continue;
       copy_utf8(n->text,sizeof(n->text),"—");
       for(int b=0;b<g_runtime.button_count;b++)if(!strcmp(n->key_for,g_runtime.buttons[b].action)){
-        for(int e=0;e<9;e++)if(!strcmp(g_runtime.buttons[b].event,events[e]))copy_utf8(n->text,sizeof(n->text),labels[e]);
+        for(size_t e=0;e<sizeof(events)/sizeof(events[0]);e++)if(!strcmp(g_runtime.buttons[b].event,events[e]))copy_utf8(n->text,sizeof(n->text),labels[e]);
         break;
       }
     }

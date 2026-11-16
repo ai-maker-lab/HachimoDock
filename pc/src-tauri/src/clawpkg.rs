@@ -93,6 +93,9 @@ const COMPONENT_BUTTON_EVENTS: &[&str] = &[
     "button.sw1.short_press",
     "button.sw2.short_press",
     "button.sw3.short_press",
+    "button.sw1.double_press",
+    "button.sw2.double_press",
+    "button.sw3.double_press",
     "button.encoder.short_press",
     "button.encoder.long_press",
     "knob.rotate_cw",
@@ -1834,6 +1837,9 @@ fn build_manifest_preview(
         if let Some(hold)=runtime["input"]["hold"].as_str(){
             let b=files.get("buttons.json").and_then(|v|serde_json::from_slice::<serde_json::Value>(v).ok());
             if !b.as_ref().and_then(|v|v.as_array()).is_some_and(|a|a.iter().any(|b|b["action"]==hold&&b["event"]=="button.sw1.short_press")){errors.push("蓄力动作必须绑定 SW1 短按以捕获按住和松开".into());}
+            if b.as_ref().and_then(|v|v.as_array()).is_some_and(|a|a.iter().any(|b|b["event"]=="button.sw1.double_press")) {
+                errors.push("SW1 蓄力按住操作不能同时绑定 SW1 双击".into());
+            }
         }
         if runtime.get("host").is_some()||files.contains_key("pc/application.json"){
             match files.get("pc/application.json").ok_or("缺少 PC 应用声明".to_string()).and_then(|b|crate::app_services::parse(b,&runtime)){

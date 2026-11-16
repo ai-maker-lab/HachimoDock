@@ -5266,6 +5266,20 @@ impl UsbSerialManager {
             *bytes = prepare_p4_widget_file(widget_id, rel, bytes)?;
         }
 
+        // Check the final buttons after overrides, before starting any transfer.
+        if let Some((_, bytes)) = entries.iter().find(|(path, _)| path == "buttons.json") {
+            let buttons: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+            let needs_double = buttons.as_array().is_some_and(|items| items.iter().any(|b|
+                b["event"].as_str().is_some_and(|event| event.ends_with(".double_press"))));
+            if needs_double && install_status.capabilities["buttonDoublePress"] != "p4-button-double-press-v1" {
+                return Err("组件双击绑定需要升级支持双击的设备固件；未写入组件".into());
+            }
+            if widget_definition["input"]["hold"].is_string()
+                && buttons.as_array().is_some_and(|items| items.iter().any(|b| b["event"] == "button.sw1.double_press")) {
+                return Err("SW1 蓄力按住操作不能同时绑定 SW1 双击；未写入组件".into());
+            }
+        }
+
         // Validate actual user-remapped form controls, never assume SW1/SW2 roles.
         // This is still before widget/begin, so a bad override writes no device state.
         if widget_definition.get("form").is_some(){
@@ -7660,6 +7674,9 @@ fn canonical_binding_for_control(control: &str) -> Option<(&'static str, &'stati
         "屏幕点击" => ("屏幕区域", "screen.region.tap"),
         "屏幕长按" => ("屏幕区域", "screen.region.long_press"),
         "SW1 短按" => ("SW1", "button.sw1.short_press"),
+        "SW1 双击" => ("SW1", "button.sw1.double_press"),
+        "SW2 双击" => ("SW2", "button.sw2.double_press"),
+        "SW3 双击" => ("SW3", "button.sw3.double_press"),
         "SW1 长按" => ("SW1", "button.sw1.long_press"),
         "SW2 短按" => ("SW2", "button.sw2.short_press"),
         "SW3 短按" => ("SW3", "button.sw3.short_press"),

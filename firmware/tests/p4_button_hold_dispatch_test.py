@@ -23,17 +23,23 @@ def test_physical_hold_owns_depression_without_legacy_ptt_or_release_replay(tmp_
 #include <string.h>
 #include "pet_p4_input_core.h"
 #define PET_P4_INPUT_EVENT_MAX 64
-typedef struct { char screen_page[24]; } pet_p4_runtime_state_t;
+typedef struct { char screen_page[24]; bool native_usb_mounted, approval_active; } pet_p4_runtime_state_t;
 typedef struct { char action[40]; } pet_p4_input_binding_t;
 typedef void (*pet_p4_send_line_fn)(const char *,void *);
 ''' + controls + r'''
-static pet_p4_runtime_state_t state={"app"};
+static pet_p4_runtime_state_t state={.screen_page="app"};
+static pet_p4_button_click_t g_button_clicks[3];
+static uint64_t input_context=1;
+static uint64_t pet_p4_miniapp_input_context(void){return input_context;}
+static pet_p4_input_binding_t double_binding={"disabled"};
 static pet_p4_input_binding_t hold={"voice_ptt"}, short_binding={"disabled"}, long_binding={"disabled"};
 static bool conversation, motion=true, press, accept=true;
 static int starts, releases, cancels, dispatched, voice_events;
+static int shorts, doubles;
 static unsigned long long now;
 static const char *button_event_prefix(pet_p4_input_control_t c){return c==PET_P4_INPUT_CONTROL_SW1?"button.sw1":"button.sw2";}
 static const pet_p4_input_binding_t *active_binding(const char *e){
+  if(strstr(e,".double_press"))return &double_binding;
   if(!strcmp(e,"button.sw1.hold"))return &hold;
   if(!strcmp(e,"button.sw1.short_press"))return &short_binding;
   if(!strcmp(e,"button.sw1.long_press"))return &long_binding;
@@ -52,12 +58,14 @@ static bool pet_p4_miniapp_hold_event(const char *a,int phase,unsigned owner,uns
 }
 static void dispatch_binding_event(pet_p4_runtime_state_t *s,pet_p4_send_line_fn f,void *c,const pet_p4_input_event_t *e,const char *n,const char *g){
   (void)s;(void)f;(void)c;(void)e;(void)g;dispatched++;
+  if(strstr(n,".short_press"))shorts++;
+  if(strstr(n,".double_press"))doubles++;
   const pet_p4_input_binding_t *b=active_binding(n);
   if(b&&!strcmp(b->action,"voice_ptt"))voice_events++;
 }
 ''' + priority + process + r'''
 static void queue_event(pet_p4_input_control_t c,pet_p4_input_gesture_t g,int d){
-  pet_p4_input_event_t e={c,g,d,now};process_button_event(&state,NULL,NULL,&e);
+  pet_p4_input_event_t e={c,g,d,now};process_click_event(&state,NULL,NULL,&e);
 }
 ''' + queue + r'''
 static void samples(pet_p4_button_decoder_t *d,bool down,int ms){
@@ -67,7 +75,7 @@ static void stroke(int ms){
   pet_p4_button_decoder_t d;pet_p4_button_decoder_init(&d,false,25,700);
   samples(&d,true,ms);samples(&d,false,50);
 }
-static void reset(void){starts=releases=cancels=dispatched=voice_events=0;}
+static void reset(void){starts=releases=cancels=dispatched=voice_events=shorts=doubles=0;memset(g_button_clicks,0,sizeof(g_button_clicks));}
 int main(void){
   // Default persisted legacy PTT must not block an app's explicit hold action.
   stroke(500);assert(starts==1&&releases==1&&dispatched==0&&voice_events==0);
@@ -93,6 +101,21 @@ int main(void){
   motion=false;press=true;reset();stroke(500);assert(starts==0&&dispatched==1);
   strcpy(hold.action,"disabled");reset();stroke(500);assert(dispatched==1&&starts==0);
   motion=true;press=false;reset();stroke(500);assert(starts==1&&releases==1&&dispatched==0);
+  // Real debounce/queue ordering yields one double and no early SW1 press.
+  motion=false;press=true;strcpy(double_binding.action,"agent_enter");reset();
+  stroke(80);assert(dispatched==0);stroke(80);assert(doubles==1&&shorts==0);
+  now+=400;queue_event(PET_P4_INPUT_CONTROL_SW1,PET_P4_INPUT_GESTURE_TICK,0);
+  assert(doubles==1&&shorts==0);
+  reset();stroke(80);now+=300;queue_event(PET_P4_INPUT_CONTROL_SW1,PET_P4_INPUT_GESTURE_TICK,0);
+  assert(shorts==1&&doubles==0);
+  reset();stroke(80);input_context++;now+=300;
+  queue_event(PET_P4_INPUT_CONTROL_SW1,PET_P4_INPUT_GESTURE_TICK,0);assert(dispatched==0);
+  strcpy(hold.action,"voice_ptt");reset();stroke(80);stroke(900);
+  assert(shorts==0&&doubles==0&&voice_events==2);
+  // Charge/release keeps ownership when global double is configured.
+  motion=true;press=false;reset();stroke(500);assert(starts==1&&releases==1&&dispatched==0);
+  strcpy(double_binding.action,"page_back");reset();stroke(80);stroke(80);
+  assert(starts==0&&doubles==1&&shorts==0);
 }
 '''
     file = tmp_path / "button-hold.c"

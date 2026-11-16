@@ -1,7 +1,7 @@
 /*
  * [Input] Debounced button levels, rotary quadrature states, and calibrated
  *         two-axis joystick ADC samples.
- * [Output] Heap-free logical button, legacy rotary, and four-direction
+ * [Output] Heap-free logical button and opt-in double-click, legacy rotary, and four-direction
  *          joystick events with center-aware per-direction hysteresis and
  *          held-direction repeat.
  * [Pos] Platform-independent physical-input decoder core.
@@ -10,6 +10,41 @@
  */
 
 #include "pet_p4_input_core.h"
+
+uint8_t pet_p4_button_click_update(pet_p4_button_click_t *click,
+  uint8_t events, uint64_t now_ms, uint64_t context, bool enabled) {
+  if (!click) return events;
+  if (!enabled || click->context != context || now_ms < click->released_ms) {
+    *click = (pet_p4_button_click_t){.context = context};
+  }
+  if (!enabled) return events;
+  if ((events & PET_P4_BUTTON_EVENT_LONG_PRESS)
+      || ((events & PET_P4_BUTTON_EVENT_UP) && click->second_down)) {
+    click->pending = false;
+    click->second_down = false;
+    return events;
+  }
+  uint8_t result = events & ~PET_P4_BUTTON_EVENT_SHORT_PRESS;
+  if (click->pending && !click->second_down
+      && now_ms - click->released_ms >= PET_P4_BUTTON_DOUBLE_PRESS_MS) {
+    click->pending = false;
+    result |= PET_P4_BUTTON_EVENT_SHORT_PRESS;
+  }
+  if ((events & PET_P4_BUTTON_EVENT_DOWN) && click->pending) {
+    click->second_down = true;
+  }
+  if (events & PET_P4_BUTTON_EVENT_SHORT_PRESS) {
+    if (click->pending && click->second_down) {
+      click->pending = false;
+      click->second_down = false;
+      result |= PET_P4_BUTTON_EVENT_DOUBLE_PRESS;
+    } else {
+      click->pending = true;
+      click->released_ms = now_ms;
+    }
+  }
+  return result;
+}
 
 bool pet_p4_input_gate_accept(pet_p4_input_gate_t *gate,bool neutral,uint64_t context){
   if(!gate)return false;
