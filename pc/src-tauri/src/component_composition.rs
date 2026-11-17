@@ -84,6 +84,7 @@ enum Source {
         value: Value,
     },
     Clock {},
+    LocalTelemetry { source: String },
     Counter {
         initial: i32,
         min: i32,
@@ -162,6 +163,7 @@ struct Receipt {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 enum Model {
+    AccountView { slot: u8 },
     Counter {
         value: i32,
     },
@@ -209,6 +211,7 @@ fn operations(source: &Source) -> &'static [&'static str] {
         Source::Timer { .. } => &["start", "pause", "reset"],
         Source::Ledger { .. } => &["append", "remove_latest", "previous", "next"],
         Source::JsonGet { .. } => &["refresh"],
+        Source::LocalTelemetry { source } => crate::local_telemetry::operations(source),
         Source::Document { .. } => &["set", "append", "remove"],
         Source::Collection { .. } => crate::component_collection::OPERATIONS,
         Source::Workflow { .. } => &["start", "resume", "cancel"],
@@ -367,6 +370,9 @@ pub fn validate(d: &Declaration, r: &Value) -> Result<(), String> {
                     return Err(bad());
                 }
             }
+            Source::LocalTelemetry { source } => {
+                if !crate::local_telemetry::registered(source) { return Err("未注册的本机遥测源".into()); }
+            }
             Source::Clock {} => {}
             Source::Workflow { workflow } => {
                 if !p.async_workflows.contains_key(workflow) {
@@ -521,7 +527,7 @@ fn validate_workflows(p: &Plan, d: &Declaration, r: &Value) -> Result<(), String
                 .filter(|(alias, _)| *alias != "flow")
                 .ok_or("流程目标无效")?;
             let source = &p.sources[alias];
-            if matches!(source, Source::JsonGet { .. } | Source::Workflow { .. } | Source::Collection { .. }) {
+            if matches!(source, Source::JsonGet { .. } | Source::LocalTelemetry { .. } | Source::Workflow { .. } | Source::Collection { .. }) {
                 return Err("本地事务流程不允许网络副作用，尚未提交请求".into());
             }
             if let Source::Document { initial } = source {
@@ -743,7 +749,7 @@ fn within_limits(r: &Value, key: &str, value: &Value) -> bool {
     }
 }
 pub fn permissions(d: &Declaration) -> Value {
-    let hosts = plan(d)
+    let mut hosts = plan(d)
         .map(|p| {
             p.sources
                 .values()
@@ -771,7 +777,11 @@ pub fn permissions(d: &Declaration) -> Value {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    json!({"storage":true,"networkHosts":hosts,"microphone":false,"deviceAudio":false,"speechProvider":false,"composition":true,"durableWorkflows":d.engine==ENGINE_V3,"authenticatedWrites":false})
+    let local_telemetry = plan(d).is_ok_and(|p| p.sources.values().any(|s| matches!(s, Source::LocalTelemetry { .. })));
+    if plan(d).is_ok_and(|p|p.sources.values().any(|s|matches!(s,Source::LocalTelemetry{source} if source=="codex.accounts"))) {
+        hosts.extend(["auth.openai.com".to_string(),"chatgpt.com".to_string()]);hosts.sort();hosts.dedup();
+    }
+    json!({"storage":true,"networkHosts":hosts,"localTelemetry":local_telemetry,"microphone":false,"deviceAudio":false,"speechProvider":false,"composition":true,"durableWorkflows":d.engine==ENGINE_V3,"authenticatedWrites":false})
 }
 
 #[derive(Clone, Default)]
@@ -1490,6 +1500,7 @@ fn source_value(
     if matches!(
         source,
         Source::Counter { .. }
+            | Source::LocalTelemetry { .. }
             | Source::Timer { .. }
             | Source::Ledger { .. }
             | Source::Document { .. }
@@ -1524,6 +1535,13 @@ fn source_value(
             }
             Ok(value.clone())
         }
+        Source::LocalTelemetry { source } if source == "codex.accounts" => {
+            let model=s.models.entry(alias.into()).or_insert(Model::AccountView{slot:1});
+            let Model::AccountView{slot}=model else{return Err(bad());};
+            if !(1..=crate::local_telemetry::accounts::settings::MAX_ACCOUNTS).contains(slot){return Err(bad());}
+            crate::local_telemetry::accounts::managed_snapshot(slot,now,op)
+        },
+        Source::LocalTelemetry { source } => crate::local_telemetry::snapshot(source, now, op == Some("refresh")),
         Source::Constant { value } => Ok(value.clone()),
         Source::Clock {} => {
             use chrono::{Datelike, TimeZone, Timelike};
@@ -1681,6 +1699,7 @@ fn collection_value(alias:&str,source:&Source,state:&mut Saved,
 fn snapshot_sources(
     id: &str,
     p: &Plan,
+    runtime: &Value,
     state: &mut Saved,
     now: i64,
     selected: Option<(&str, &str)>,
@@ -1700,7 +1719,7 @@ fn snapshot_sources(
             status.insert(alias, phase);
             continue;
         }
-        let value = if matches!(source,Source::Collection{..}){
+        let mut value = if matches!(source,Source::Collection{..}){
             collection_value(&alias,source,state,&values,event,op)
         } else if let Source::Computed { expression } = source {
             crate::component_expr::eval(
@@ -1711,6 +1730,18 @@ fn snapshot_sources(
         } else {
             source_value(&alias, source, state, now, op)
         };
+        if matches!(source,Source::LocalTelemetry{source} if source=="codex.accounts") {
+            if let Ok(snapshot)=&value {
+                // An email must identify the displayed quota. Do not send an
+                // unreadable new identity through an older package's glyph bank.
+                if let Some(fonts)=runtime["surface"]["fonts"].as_array().filter(|v|!v.is_empty()) {
+                    let chars:String=fonts.iter().filter_map(|font|font["chars"].as_str()).collect();
+                    if snapshot["identity"].as_str().is_some_and(|text|text.chars().any(|c|!chars.contains(c))) {
+                        value=Err("当前额度看板无法显示此账号邮箱，请先更新文字资源".into());
+                    }
+                }
+            }
+        }
         match value {
             Ok(v) => {
                 values.insert(alias.clone(), v);
@@ -1959,7 +1990,7 @@ fn request_with_dispatch(
     if let Some(("flow", flow)) = effective {
         let known = p.sources.keys().cloned().collect();
         for step in &p.workflows[flow] {
-            let (values, _) = snapshot_sources(id, &p, &mut state, now, None, &event)?;
+            let (values, _) = snapshot_sources(id, &p, r, &mut state, now, None, &event)?;
             let ctx = json!({"sources":values,"event":event});
             if let Some(condition) = &step.when {
                 let allowed = crate::component_expr::eval(condition, &ctx, &known)?
@@ -2000,6 +2031,7 @@ fn request_with_dispatch(
     let (sources, status) = snapshot_sources(
         id,
         &p,
+        r,
         &mut state,
         now,
         effective.filter(|(alias, _)| {
@@ -2122,7 +2154,7 @@ fn request_with_dispatch(
                 }
                 let ready = status.get(alias) != Some(&"error")
                     || op == "reset"
-                    || matches!(p.sources[alias], Source::JsonGet { .. });
+                    || matches!(p.sources[alias], Source::JsonGet { .. } | Source::LocalTelemetry { .. });
                 if let (
                     Source::Ledger {
                         unit,
@@ -3186,6 +3218,41 @@ mod tests {
     }
     fn declaration(value: &Value) -> Declaration {
         serde_json::from_value(value.clone()).unwrap()
+    }
+    #[test]
+    fn codex_accounts_requires_a_registered_source_and_bounded_operations() {
+        let suite = contract();
+        let mut value = suite["declaration"].clone();
+        value["content"][0]["sources"]["labels"] =
+            json!({"kind":"local-telemetry","source":"codex.accounts"});
+        value["content"][0]["bindings"]["caption"]["pointer"] = "/identity".into();
+        let parsed = declaration(&value);
+        validate(&parsed, &suite["runtime"]).unwrap();
+        assert_eq!(permissions(&parsed)["localTelemetry"], true);
+        assert_eq!(permissions(&parsed)["networkHosts"], json!(["auth.openai.com", "chatgpt.com"]));
+        for source in [
+            json!({"kind":"local-telemetry","source":"codex.usage"}),
+            json!({"kind":"local-telemetry","source":"codex.accounts","path":"/tmp/fixture"}),
+        ] {
+            let mut bad = value.clone();
+            bad["content"][0]["sources"]["labels"] = source;
+            assert!(crate::app_services::parse(&serde_json::to_vec(&bad).unwrap(), &suite["runtime"]).is_err());
+        }
+        let mut bad = value;
+        bad["actions"]["host.start"] = "labels:login".into();
+        assert!(validate(&declaration(&bad), &suite["runtime"]).is_err());
+    }
+    #[test]
+    fn codex_accounts_cannot_run_in_a_local_atomic_workflow() {
+        let suite: Value = serde_json::from_str(include_str!(
+            "../../skills/petui/contracts/composition-v2.json"
+        )).unwrap();
+        let mut value = suite["declaration"].clone();
+        value["content"][0]["sources"]["usage"] =
+            json!({"kind":"local-telemetry","source":"codex.accounts"});
+        validate(&declaration(&value), &suite["runtime"]).unwrap();
+        value["content"][0]["workflows"]["save"] = json!([{"target":"usage:refresh"}]);
+        assert!(validate(&declaration(&value), &suite["runtime"]).is_err());
     }
     #[test]
     fn shared_contract_and_rejections() {

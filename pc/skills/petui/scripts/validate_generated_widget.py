@@ -1951,7 +1951,7 @@ def validate_widget(
         for f in widget_dir.rglob('*'):
             relative=f.relative_to(widget_dir).as_posix()
             notice=relative in {'LICENSE.txt','THIRD_PARTY_NOTICES.txt'} or bool(re.fullmatch(r'licenses/[A-Za-z0-9_.-]+\.(?:txt|md)',relative))
-            if f.is_file() and not notice and relative not in REQUIRED_FILES|{'pc/application.json','assets/.keep'}|{i.get('asset') for i in runtime.get('surface',{}).get('images',[]) if isinstance(i,dict)}:errors.append('PC 应用包含额外文件')
+            if f.is_file() and not notice and relative not in REQUIRED_FILES|{'hachiapp.json','pc/application.json','pc/cover.png','assets/.keep'}|{i.get('asset') for i in runtime.get('surface',{}).get('images',[]) if isinstance(i,dict)}:errors.append('PC 应用包含额外文件')
     pc_file=widget_dir / "pc" / "extension.json"
     source=runtime.get("media",{}).get("source","") if isinstance(runtime,dict) else ""
     if pc_file.exists() or source.startswith("pc."):

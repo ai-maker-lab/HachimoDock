@@ -1803,6 +1803,20 @@ fn build_manifest_preview(
     let kind = v.get("kind").and_then(|x| x.as_str());
     let had_errors_before = errors.len();
     validate_p4_device_json_strings(files, errors);
+    if let Some(bytes)=files.get("hachiapp.json") {
+        match serde_json::from_slice::<serde_json::Value>(bytes) {
+            Ok(m) if m["format"]=="hachiapp/1" && m["id"]==v["id"] && m.as_object().is_some_and(|o|o.len()==2) => {},
+            _=>errors.push("hachiapp 清单与组件身份不一致".into()),
+        }
+        if !files.contains_key("pc/cover.png"){errors.push("hachiapp 缺少 pc/cover.png".into());}
+    }
+    if let Some(bytes)=files.get("pc/cover.png") {
+        let dimensions=image::ImageReader::with_format(std::io::Cursor::new(bytes),image::ImageFormat::Png).into_dimensions();
+        if bytes.len()>256*1024 || image::guess_format(bytes).ok()!=Some(image::ImageFormat::Png) || dimensions.ok()!=Some((640,480)) || image::load_from_memory(bytes).is_err() {
+            errors.push("封面须为可解码的 640×480 PNG，且不超过 256 KiB".into());
+        }
+    }
+
     if id.is_empty() || name.is_empty() || version.is_empty() {
         errors.push("component.json 必须含 id、name、version".to_string());
     }
@@ -1844,7 +1858,7 @@ fn build_manifest_preview(
             for path in files.keys(){
                 let notice=path=="LICENSE.txt"||path=="THIRD_PARTY_NOTICES.txt"||path.starts_with("licenses/");
                 let media=crate::component_capability_ext::media_assets(&source_runtime).iter().any(|(p,_)|p==path);
-                if !REQUIRED_FILES.contains(&path.as_str())&&path!="pc/application.json"&&path!="assets/.keep"&&!images.contains(path.as_str())&&!media&&!notice{errors.push("PC 应用包含额外文件".into());}
+                if !REQUIRED_FILES.contains(&path.as_str())&&path!="pc/application.json"&&path!="pc/cover.png"&&path!="hachiapp.json"&&path!="assets/.keep"&&!images.contains(path.as_str())&&!media&&!notice{errors.push("PC 应用包含额外文件".into());}
             }
         }
         if runtime.get("surface").is_some()&&runtime.get("media").is_none(){

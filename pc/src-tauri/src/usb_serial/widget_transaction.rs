@@ -138,7 +138,7 @@ pub(super) fn widget_ota_relative_path(root: &Path, path: &Path) -> Result<Strin
 
 pub(super) fn widget_ota_should_skip_path(path: &str) -> bool {
     path.starts_with("pc/") || path.starts_with("licenses/")
-        || matches!(path, "LICENSE.txt" | "THIRD_PARTY_NOTICES.txt")
+        || matches!(path, "hachiapp.json" | "LICENSE.txt" | "THIRD_PARTY_NOTICES.txt")
         || path.split('/').next_back() == Some(".keep")
 }
 

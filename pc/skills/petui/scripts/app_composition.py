@@ -8,10 +8,13 @@ ENGINE = 'pc-app-composition-v1'
 ENGINE_V2 = 'pc-app-composition-v2'
 ENGINE_V3 = 'pc-app-composition-v3'
 OPERATIONS = {'constant': set(), 'clock': set(), 'counter': {'increment', 'decrement', 'reset'},
-              'timer': {'start', 'pause', 'reset'}, 'json-get': {'refresh'},
+              'timer': {'start', 'pause', 'reset'}, 'json-get': {'refresh'}, 'local-telemetry': {'refresh','previous','next'},
               'ledger': {'append','remove_latest','previous','next'},'computed':set(),'document':{'set','append','remove'},
               'workflow': {'start', 'resume', 'cancel'},
               'collection': {'page_next','page_previous','up','down','clear_selection'} | {'row_'+str(i) for i in range(8)}}
+
+def operations(source):
+    return OPERATIONS[source['kind']]
 
 def name(value, limit):
     return isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,%d}' % limit, value) is not None
@@ -123,10 +126,12 @@ def composition_errors(value, runtime):
             assert v2 or kind not in ('computed','document','collection')
             assert v3 or kind != 'workflow'
             fields = {'kind'} | {'constant': {'value'}, 'clock': set(), 'counter': {'initial', 'min', 'max', 'step'},
-                                 'timer': {'seconds'}, 'json-get': {'endpoint', 'hosts', 'refresh_sec'},
+                                 'timer': {'seconds'}, 'json-get': {'endpoint', 'hosts', 'refresh_sec'}, 'local-telemetry': {'source'},
                                  'ledger': {'unit','target','capacity','label'},'computed':{'expression'},'document':{'initial'},'workflow':{'workflow'},'collection':{'expression','view'}}[kind]
             assert set(source) == fields
-            if kind == 'constant':
+            if kind == 'local-telemetry':
+                assert source['source'] == 'codex.accounts'
+            elif kind == 'constant':
                 assert len(json.dumps(source['value'], ensure_ascii=False, separators=(',', ':')).encode()) <= 4096
             elif kind == 'workflow':
                 assert source['workflow'] in async_workflows
@@ -169,7 +174,7 @@ def composition_errors(value, runtime):
                 assert isinstance(step,dict) and 'target' in step and set(step)<={'target','pointer','value','when'}
                 assert isinstance(step['target'],str) and step['target'].count(':')==1
                 alias,op=step['target'].split(':')
-                assert alias in sources and op in OPERATIONS[sources[alias]['kind']] and sources[alias]['kind'] not in ('json-get','workflow','collection')
+                assert alias in sources and op in operations(sources[alias]) and sources[alias]['kind'] not in ('json-get','local-telemetry','workflow','collection')
                 if sources[alias]['kind']=='document':
                     ptr=step['pointer'];assert isinstance(ptr,str) and len(ptr.encode())<=128 and (not ptr or ptr.startswith('/')) and re.search(r'~(?:[^01]|$)',ptr) is None
                     assert (op=='remove')==('value' not in step) and (op!='remove' or ptr!='')
@@ -197,7 +202,7 @@ def composition_errors(value, runtime):
             assert isinstance(action, str) and re.fullmatch(r'host\.[a-z_]{1,32}', action)
             assert isinstance(target, str) and target.count(':') == 1
             alias, operation = target.split(':')
-            assert alias=='flow' and operation in workflows or alias in sources and sources[alias]['kind']!='document' and operation in OPERATIONS[sources[alias]['kind']]
+            assert alias=='flow' and operation in workflows or alias in sources and sources[alias]['kind']!='document' and operation in operations(sources[alias])
         rules = [r for r in runtime['transitions'] if not writers['mixed'] or isinstance(r.get('on'),str) and r['on'].startswith('host.')]
         assert len(rules) == len(actions) and {r['on'] for r in rules} == set(actions)
         assert all(set(r) == {'from', 'on'} and r['from'] == '*' for r in rules)
