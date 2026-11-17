@@ -252,7 +252,9 @@ static unsigned g_native_framebuffer_index,g_render_trace_frame,g_lcd_skipped,g_
 static int64_t g_previous_render_ended_us;
 static bool g_main_appearance_ready,g_last_native_valid,g_app_logical_same,g_asset_cache_pending,g_framebuffer_initialized,g_last_realtime_conversation,g_last_approval_visible,g_session_overlay_cache_valid,g_logged_missing_asset;
 static unsigned g_last_decode_us,g_last_h264_pack_us,g_last_h264_convert_us;
-static char g_last_render_page[32];static bool worker_idle,init_fail,rotate_fail;static unsigned retire_polls,decoder_starts;
+static char g_last_render_page[32];static bool worker_idle,init_fail,rotate_fail,lcd_fail;
+static unsigned retire_polls,decoder_starts,frames_presented;
+static int g_behavior;
 static bool renderer_component_media_frame(const void*s){assert(!s);retire_polls++;return worker_idle;}
 static int pet_p4_renderer_init(void){return init_fail?7:0;}
 static int64_t esp_timer_get_time(void){static int64_t t;return ++t;}
@@ -269,7 +271,8 @@ static unsigned elapsed_us_clamped(int64_t a,int64_t b){return b-a;}
 #define render_component_center_page(...) ((void)0)
 #define render_touch_test_page(...) ((void)0)
 #define render_miniapp_page(...) ((void)0)
-static bool render_asset_pet_frame(const pet_p4_runtime_state_t*s,const pet_p4_view_model_t*v,uint64_t n){(void)s;(void)v;(void)n;assert(worker_idle);decoder_starts++;return true;}
+static bool render_asset_pet_frame(const pet_p4_runtime_state_t*s,const pet_p4_view_model_t*v,uint64_t n,int*frame){(void)s;(void)v;(void)n;assert(worker_idle);*frame=decoder_starts++;return true;}
+static void pet_p4_behavior_presented_video_frame(int*behavior,int frame,uint64_t ms){(void)ms;assert(behavior==&g_behavior&&frame>=0&&!lcd_fail);frames_presented++;}
 #define draw_standalone_voice_overlay(...) ((void)0)
 #define pet_compact_underlay_forget(...) ((void)0)
 #define main_compact_underlay_prepare(...) ((void)0)
@@ -286,7 +289,7 @@ static bool render_asset_pet_frame(const pet_p4_runtime_state_t*s,const pet_p4_v
 #define draw_approval_overlay(...) ((void)0)
 static int rotate_landscape_to_panel(void){return rotate_fail?8:0;}
 #define pet_p4_frame_unchanged(...) false
-#define pet_p4_lcd_draw_rgb565(...) 0
+#define pet_p4_lcd_draw_rgb565(...) (lcd_fail?9:0)
 #define ppa_trace_frame_snapshot(...) ((void)0)
 #define record_render_performance(a,b,c,d,e,f) ((void)(a),(void)(b),(void)(c),(void)(d),(void)(e),(void)(f))
 '''+function(text,'pet_p4_renderer_render')+r'''
@@ -294,8 +297,10 @@ int main(void){pet_p4_runtime_state_t s={0};pet_p4_view_model_t v={.page="main"}
  for(unsigned frame=0;frame<4;frame++){assert(pet_p4_renderer_render(&s,&v,frame)==0);assert(retire_polls==frame+1&&!decoder_starts&&g_asset_cache_pending);}
  rotate_fail=true;assert(pet_p4_renderer_render(&s,&v,10)==8&&retire_polls==5&&!decoder_starts);
  init_fail=true;assert(pet_p4_renderer_render(&s,&v,11)==7&&retire_polls==6&&!decoder_starts);init_fail=rotate_fail=false;
- worker_idle=true;assert(pet_p4_renderer_render(&s,&v,12)==0&&retire_polls==7&&decoder_starts==1&&!g_asset_cache_pending);
- v.page="components";worker_idle=false;assert(pet_p4_renderer_render(&s,&v,13)==0&&retire_polls==8&&decoder_starts==1);return 0;}
+ worker_idle=true;assert(pet_p4_renderer_render(&s,&v,12)==0&&retire_polls==7&&decoder_starts==1&&!g_asset_cache_pending&&frames_presented==1);
+ lcd_fail=true;assert(pet_p4_renderer_render(&s,&v,13)==9&&retire_polls==8&&decoder_starts==2&&frames_presented==1);
+ lcd_fail=false;v.page="components";worker_idle=false;
+ assert(pet_p4_renderer_render(&s,&v,14)==0&&retire_polls==9&&decoder_starts==2&&frames_presented==1);return 0;}
 '''
     run(tmp_path,code,'render-entry')
 

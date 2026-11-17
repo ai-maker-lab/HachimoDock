@@ -1555,10 +1555,10 @@ def test_p4_behavior_rotates_native_families_without_per_frame_manifest_parsing(
     assert "selected_since_ms" in behavior_header
     assert "PET_P4_WELCOME_MAX_MS" not in behavior
     assert "PET_P4_TOUCH_REACTION_MAX_MS" not in touch
-    assert "playback_elapsed_ms" in renderer
     assert "playback_duration_ms = asset.duration_ms" in renderer
-    assert "cycle_elapsed_ms * (unsigned long long) asset.frames" in renderer
-    assert "now_ms - g_behavior.selected_since_ms" in renderer
+    assert "pet_p4_behavior_video_target_frame" in renderer
+    assert "behavior->first_video_frame_ms" in behavior
+    assert "pet_p4_behavior_presented_video_frame" in renderer
     assert "cJSON_Parse" not in renderer
     assert "#define PET_P4_ASSET_CACHE_SLOTS 2U" in renderer
     assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in renderer
@@ -1735,7 +1735,7 @@ def test_p4_rgb565_output_uses_matching_rgb_panel_order():
 def test_p4_renderer_keeps_screen_visible_when_assets_are_unusable():
     renderer = read("main/pet_p4_renderer.c")
 
-    assert "bool drew_asset = component_media_idle&&render_asset_pet_frame(state, view, now_ms);" in renderer
+    assert "bool drew_asset = component_media_idle&&render_asset_pet_frame(state, view, now_ms, &presented_video_frame);" in renderer
     assert "if(!component_media_idle)g_asset_cache_pending=true;" in renderer
     assert "if (!drew_asset && !g_asset_cache_pending)" in renderer
     assert "g_asset_decode_blocked_until_ms" in renderer

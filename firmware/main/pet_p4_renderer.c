@@ -74,6 +74,7 @@
 #include "pet_p4_audio.h"
 #include "pet_p4_instrument_core.h"
 #include "pet_p4_behavior.h"
+#include "pet_p4_conversation.h"
 #include "pet_p4_raw_assets.h"
 #include "pet_p4_resources_device.h"
 
@@ -1213,6 +1214,8 @@ typedef struct {
   int width;
   int height;
   pet_p4_asset_codec_t codec;
+  bool play_once;
+  uint64_t selection_ms;
 } pet_p4_asset_selection_t;
 
 typedef struct {
@@ -2250,12 +2253,13 @@ static bool select_asset(
   const pet_p4_asset_entry_t *entry;
   int index;
   if (!state || !out) return false;
-  index = pet_p4_behavior_select(
+  index = pet_p4_behavior_select_video(
     &g_behavior,
     &state->asset_catalog,
     pet_p4_state_effective_lifecycle(state, now_ms),
     state->asset_revision,
-    now_ms
+    now_ms,
+    !pet_p4_conversation_active(state)
   );
   if (index < 0 || index >= state->asset_catalog.count) return false;
   entry = &state->asset_catalog.entries[index];
@@ -2270,6 +2274,8 @@ static bool select_asset(
   out->duration_ms = entry->duration_ms;
   out->width = entry->width;
   out->height = entry->height;
+  out->play_once = g_behavior.play_video_once;
+  out->selection_ms = g_behavior.selected_since_ms;
   for (int i = 0; i < entry->frames && i < PET_P4_MAX_MJPEG_FRAMES; i += 1) {
     out->frame_sizes[i] = entry->frame_sizes[i];
   }
@@ -2947,9 +2953,8 @@ static bool render_h264_asset_frame(
   const pet_p4_asset_selection_t *asset,
   const char *fs_path,
   const pet_p4_asset_cache_entry_t *stream,
-  unsigned long long cycle_elapsed_ms
+  int target_frame
 ) {
-  int target_frame;
   int i420_stride;
   int i420_storage_h;
   const uint8_t *packed_yuv420 = NULL;
@@ -2960,11 +2965,6 @@ static bool render_h264_asset_frame(
   /* Immutable cache entries are validated once by the low-priority preparer.
    * validate_us remains render-thread wall time (zero), never worker CPU time. */
   if (!stream->single_slice_valid) return false;
-  target_frame = (int) (
-    (cycle_elapsed_ms * (unsigned long long) asset->frames)
-    / (unsigned long long) asset->duration_ms
-  );
-  if (target_frame >= asset->frames) target_frame = asset->frames - 1;
   g_render_trace.restart_reason |= pet_p4_render_restart_reason(
     g_h264_decoder != NULL, strcmp(g_h264_fs_path, fs_path) == 0,
     target_frame < g_h264_decoded_frame
@@ -3095,7 +3095,8 @@ static pet_p4_asset_cache_entry_t *conversation_animation_cached(unsigned int re
   return NULL;
 }
 #endif
-static bool render_asset_pet_frame(const pet_p4_runtime_state_t *state, const pet_p4_view_model_t *view, unsigned long long now_ms) {
+static bool render_asset_pet_frame(const pet_p4_runtime_state_t *state, const pet_p4_view_model_t *view,
+                                   unsigned long long now_ms, int *presented_frame) {
   char fs_path[80];
   pet_p4_asset_selection_t asset;
   portENTER_CRITICAL(&g_asset_prepare_mux);
@@ -3169,6 +3170,7 @@ static bool render_asset_pet_frame(const pet_p4_runtime_state_t *state, const pe
     stream=conversation_animation_cached(state->asset_revision,source_slot,request_epoch,storage_epoch);
     if(stream){
       asset=g_conversation_animation.asset;
+      asset.play_once=false;
       snprintf(fs_path,sizeof(fs_path),"%s",g_conversation_animation.fs_path);
       g_asset_cache_pending=false;g_render_trace.cache_hit=PET_RENDER_CACHE_HIT;
       g_render_trace.stream_size=asset.stream_bytes;
@@ -3198,15 +3200,15 @@ static bool render_asset_pet_frame(const pet_p4_runtime_state_t *state, const pe
     playback_duration_ms = ((unsigned long long) asset.frames * 1000ULL) / (unsigned long long) asset.fps;
   }
   if (playback_duration_ms == 0) playback_duration_ms = PET_P4_RENDER_INTERVAL_MS * (unsigned long long) asset.frames;
-  unsigned long long playback_elapsed_ms = now_ms >= g_behavior.selected_since_ms
-    ? now_ms - g_behavior.selected_since_ms : 0;
-  unsigned long long cycle_elapsed_ms = playback_elapsed_ms % playback_duration_ms;
   g_last_decode_us = 0;
   if (asset.codec == PET_P4_ASSET_CODEC_H264) {
 #if PET_P4_H264_PREFETCH
     bool rendered=render_h264_asset_frame_async(&asset,fs_path,stream,playback_duration_ms);
+    int frame = asset.play_once ? g_h264_presented_frame : -1;
 #else
-    bool rendered = render_h264_asset_frame(&asset, fs_path, stream, cycle_elapsed_ms);
+    int target_frame = pet_p4_behavior_video_target_frame(&g_behavior, asset.frames, playback_duration_ms, now_ms);
+    bool rendered = render_h264_asset_frame(&asset, fs_path, stream, target_frame);
+    int frame = g_h264_decoded_frame;
 #endif
     if (!rendered) {
       if(g_asset_cache_pending)return false; /* native work is not an asset error */
@@ -3230,6 +3232,7 @@ static bool render_asset_pet_frame(const pet_p4_runtime_state_t *state, const pe
       g_logged_asset = true;
     }
     note_asset_decode_success();
+    *presented_frame = frame;
 #if PET_P4_CONVERSATION_VIDEO
     if(state){
       g_conversation_animation.asset=asset;
@@ -3251,10 +3254,7 @@ static bool render_asset_pet_frame(const pet_p4_runtime_state_t *state, const pe
     reset_h264_decoder_measured();
   }
 #endif
-  int frame_index = (int) (
-    (cycle_elapsed_ms * (unsigned long long) asset.frames) / playback_duration_ms
-  );
-  if (frame_index >= asset.frames) frame_index = asset.frames - 1;
+  int frame_index = pet_p4_behavior_video_target_frame(&g_behavior, asset.frames, playback_duration_ms, now_ms);
   size_t offset = 0;
   for (int i = 0; i < frame_index; i += 1) offset += asset.frame_sizes[i];
   uint32_t frame_size = asset.frame_sizes[frame_index];
@@ -3346,6 +3346,7 @@ static bool render_asset_pet_frame(const pet_p4_runtime_state_t *state, const pe
     g_logged_asset = true;
   }
   note_asset_decode_success();
+  *presented_frame = frame_index;
   return true;
 }
 
@@ -7303,6 +7304,7 @@ esp_err_t pet_p4_renderer_render(
   }
   const bool approval_visible = state && pet_p4_state_approval_pending(state, now_ms);
   const bool approval_changed = approval_visible != g_last_approval_visible;
+  int presented_video_frame = -1;
 #if PET_P4_APP_RETAIN_LOGICAL
   /* A final retained APP frame includes common overlays. Never reuse or publish
    * that final frame across an approval modal/countdown; keep the clean texture. */
@@ -7328,7 +7330,7 @@ esp_err_t pet_p4_renderer_render(
     bool realtime = view && view->realtime_conversation;
     bool show_session_queue = !realtime && state && state->session_queue_count > 0;
     int64_t asset_started_us = esp_timer_get_time();
-    bool drew_asset = component_media_idle&&render_asset_pet_frame(state, view, now_ms);
+    bool drew_asset = component_media_idle&&render_asset_pet_frame(state, view, now_ms, &presented_video_frame);
     if(drew_asset)g_main_appearance_ready=true;
     if(!component_media_idle)g_asset_cache_pending=true;
     /* A queued prepare is not a missing/bad asset. Keep the last logical pixels
@@ -7445,6 +7447,9 @@ esp_err_t pet_p4_renderer_render(
   if (unchanged) g_lcd_skipped++;
   else if (lcd_err == ESP_OK) g_lcd_submitted++;
   int64_t render_ended_us = esp_timer_get_time();
+  if (lcd_err == ESP_OK && presented_video_frame >= 0) {
+    pet_p4_behavior_presented_video_frame(&g_behavior, presented_video_frame, (uint64_t)render_ended_us / 1000);
+  }
   g_render_trace.end_us = (uint64_t)render_ended_us;
   g_previous_render_ended_us=render_ended_us;
   ppa_trace_frame_snapshot(&g_render_trace.ppa);
