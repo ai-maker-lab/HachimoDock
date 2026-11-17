@@ -7248,6 +7248,7 @@ esp_err_t pet_p4_renderer_render(
   int64_t render_started_us = esp_timer_get_time();
   int64_t overlay_started_us = render_started_us;
   uint32_t asset_us = 0;
+  int presented_video_frame = -1;
   g_last_decode_us = 0;
   g_last_h264_pack_us = 0;
   g_last_h264_convert_us = 0;
@@ -7304,7 +7305,6 @@ esp_err_t pet_p4_renderer_render(
   }
   const bool approval_visible = state && pet_p4_state_approval_pending(state, now_ms);
   const bool approval_changed = approval_visible != g_last_approval_visible;
-  int presented_video_frame = -1;
 #if PET_P4_APP_RETAIN_LOGICAL
   /* A final retained APP frame includes common overlays. Never reuse or publish
    * that final frame across an approval modal/countdown; keep the clean texture. */

@@ -1632,7 +1632,7 @@ def test_p4_h264_uses_the_v9_single_slice_full_duration_aspect_fit_contract():
     assert "ESP_H264_RAW_FMT_I420" in renderer
     assert "h264_stream_has_single_slice_access_units" in renderer
     assert "if (!stream->single_slice_valid) return false;" in renderer
-    assert "cycle_elapsed_ms = playback_elapsed_ms % playback_duration_ms" in renderer
+    assert "render_h264_asset_frame(&asset, fs_path, stream, target_frame)" in renderer
     assert "target_frame < g_h264_decoded_frame" in renderer
     assert "strcmp(g_h264_fs_path, fs_path) != 0" in renderer
     assert "rewriteH264Sps" in prebuilder
