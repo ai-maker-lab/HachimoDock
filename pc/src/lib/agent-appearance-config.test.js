@@ -44,12 +44,17 @@ test("the fixed Agents put ChatGPT（Codex） first and use it as the first-run 
       "mimocode",
       "deepseek-harness",
       "workbuddy",
+      "devin",
       "hermes",
     ],
   );
   assert.deepEqual(
     FIXED_AGENT_OPTIONS.slice(0, 2).map((agent) => agent.label),
     ["ChatGPT（Codex）", "Claude"],
+  );
+  assert.equal(
+    FIXED_AGENT_OPTIONS.find((agent) => agent.id === "devin").detail,
+    "Devin 云端会话状态与气泡；向 Devin Desktop 当前对话追加语音草稿",
   );
 });
 

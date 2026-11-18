@@ -301,11 +301,14 @@ export function deviceVoiceRouterReducer(state, action) {
 }
 
 export function transcriptMessage(payload, phase, composerMode) {
-  const visibleAgentLabel = normalizeText(payload?.agentId).toLowerCase() === "deepseek-harness" ? "DeepSeek Harness" : normalizeText(payload?.agentId).toLowerCase() === "workbuddy" ? "WorkBuddy" : normalizeText(payload?.agentId).toLowerCase() === "claude-code"
-    ? "Claude"
-    : "ChatGPT（Codex）";
+  const agentId = normalizeText(payload?.agentId).toLowerCase();
+  const visibleAgentLabel = agentId === "deepseek-harness" ? "DeepSeek Harness"
+    : agentId === "workbuddy" ? "WorkBuddy"
+      : agentId === "devin" ? "Devin"
+        : agentId === "claude-code" ? "Claude"
+          : "ChatGPT（Codex）";
   if (phase === "listening") {
-    if (["WorkBuddy", "DeepSeek Harness"].includes(visibleAgentLabel)) {
+    if (["WorkBuddy", "DeepSeek Harness", "Devin"].includes(visibleAgentLabel)) {
       return `正在聆听；松开后将完整识别结果一次追加到 ${visibleAgentLabel} 输入框，不自动发送。`;
     }
     if (composerMode === "visible") {
@@ -317,7 +320,7 @@ export function transcriptMessage(payload, phase, composerMode) {
     return "正在聆听并实时识别。";
   }
   if (phase === "partial") {
-    if (["WorkBuddy", "DeepSeek Harness"].includes(visibleAgentLabel)) {
+    if (["WorkBuddy", "DeepSeek Harness", "Devin"].includes(visibleAgentLabel)) {
       return `正在实时识别；松开后一次写入 ${visibleAgentLabel}，写入确认前请保持目标对话在前台。`;
     }
     if (composerMode === "visible") {

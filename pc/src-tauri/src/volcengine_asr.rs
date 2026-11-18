@@ -935,6 +935,11 @@ pub fn configure_storage_dir(path: PathBuf) -> Result<(), String> {
     }
 }
 
+#[cfg(all(test, not(target_os = "macos")))]
+pub fn configure_storage_dir(_path: std::path::PathBuf) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(windows)]
 fn credential_entry() -> Result<keyring::Entry, String> {
     keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)

@@ -1,11 +1,16 @@
 /*
- * [Input] A bound or current-visible ChatGPT（Codex）/Claude session, a current-visible WorkBuddy/DeepSeek Harness composer, or a captured MiMoCode terminal caret, plus staged voice text and an explicit confirm action.
+ * [Input] A bound or current-visible ChatGPT（Codex）/Claude session, a current-visible WorkBuddy/Devin/DeepSeek Harness composer, or a captured MiMoCode terminal caret, plus staged voice text and an explicit confirm action.
  * [Output] Read-only frontmost-Agent detection, exact desktop-session navigation, bounded composer lookup, per-recording appended draft updates, and explicit-confirm submission without automatic send on ASR finalization.
  * [Pos] Cross-platform foreground input bridge with session, draft, clipboard, stale-focus recovery, Windows minimized-Claude restoration, and runtime-compatible UIA pattern lookup.
  * [Sync] If this file changes, update pc/.folder.md.
  */
 
-use serde_json::{json, Value};
+#[cfg(any(windows, target_os = "macos"))]
+use serde_json::json;
+use serde_json::Value;
+
+// Devin Desktop's Windows executable name has not been independently verified.
+pub const DEVIN_DESKTOP_EXE_NAME: &str = "devin.exe";
 
 #[cfg(any(windows, target_os = "macos"))]
 fn task_submission_mode(reply: &Value) -> Result<String, String> {
@@ -69,6 +74,7 @@ const WINDOWS_COMPOSER_PROCESS_MEMORY_LIMIT_BYTES: usize = 512 * 1024 * 1024;
 fn composer_startup_timeout_message(agent: &str, stage: &str) -> String {
     let label = match agent {
         "workbuddy" => "WorkBuddy",
+        "devin" => "Devin",
         "deepseek-harness" => "DeepSeek Harness",
         "claude" | "claude-code" => "Claude",
         "codex" => "ChatGPT（Codex）",
@@ -759,6 +765,7 @@ impl CodexComposerBridge {
             "codex" => &["chatgpt.exe", "codex.exe"],
             "claude-code" => &["claude.exe"],
             "workbuddy" => &["workbuddy.exe"],
+            "devin" => &[DEVIN_DESKTOP_EXE_NAME],
             "deepseek-harness" => &["deepseek harness.exe"],
             _ => return false,
         };
@@ -803,10 +810,11 @@ impl CodexComposerBridge {
             "codex" => "codex",
             "claude-code" => "claude",
             "workbuddy" => "workbuddy",
+            "devin" => "devin",
             "deepseek-harness" => "deepseek-harness",
             _ => {
                 return Err(
-                    "Current visible composer requires ChatGPT（Codex）, Claude, WorkBuddy or DeepSeek Harness".to_string(),
+                    "Current visible composer requires ChatGPT（Codex）, Claude, WorkBuddy, Devin or DeepSeek Harness".to_string(),
                 )
             }
         };
@@ -818,7 +826,7 @@ impl CodexComposerBridge {
         callback: impl Fn(CodexComposerEvent) + Send + Sync + 'static,
     ) -> Result<RetainedComposerStartup, ComposerNoWriterError> {
         let agent=match agent_id.trim() {
-            "codex"=>"codex", "claude-code"=>"claude", "workbuddy"=>"workbuddy", "deepseek-harness"=>"deepseek-harness",
+            "codex"=>"codex", "claude-code"=>"claude", "workbuddy"=>"workbuddy", "devin"=>"devin", "deepseek-harness"=>"deepseek-harness",
             _=>return Err("Unsupported current visible composer".to_string().into()),
         };
         Self::start_with_purpose_retained(agent,"","","","","current_voice",callback)
@@ -954,12 +962,17 @@ impl CodexComposerBridge {
         let session_id = session_id.trim();
         let deep_link = deep_link.trim();
         let session_title = session_title.trim();
-        if !matches!(agent, "codex" | "claude" | "workbuddy" | "deepseek-harness") {
+        if !matches!(agent, "codex" | "claude" | "workbuddy" | "devin" | "deepseek-harness") {
             return Err("visible composer agent is invalid".to_string().into());
         }
         let current_visible = matches!(purpose, "current_voice" | "current_task");
-        if matches!(agent, "workbuddy" | "deepseek-harness") && !current_visible {
-            return Err("WorkBuddy 仅向当前可见对话输入，不回退到其他 Agent".into());
+        if matches!(agent, "workbuddy" | "devin" | "deepseek-harness") && !current_visible {
+            let label = match agent {
+                "workbuddy" => "WorkBuddy",
+                "devin" => "Devin",
+                _ => "DeepSeek Harness",
+            };
+            return Err(format!("{label} 仅向当前可见对话输入，不回退到其他 Agent").into());
         }
         if !current_visible
             && agent == "claude"
@@ -3629,12 +3642,12 @@ function Initialize-WorkBuddyAccessibility([IntPtr]$handle, [int]$ownerProcessId
 }
 
 function Test-CurrentElectronAgent([string]$agent) {
-  return @('workbuddy','deepseek-harness') -contains $agent -or ($agent -eq 'codex' -and $script:NativeVoiceAppendOnly)
+  return @('workbuddy','devin','deepseek-harness') -contains $agent -or ($agent -eq 'codex' -and $script:NativeVoiceAppendOnly)
 }
 
 function Get-WorkBuddyTarget([string[]]$allowedValues, [string]$agent = 'workbuddy') {
   Write-ComposerProgress 'resolve_window'
-  $processName = if ($agent -eq 'deepseek-harness') { 'DeepSeek Harness' } elseif ($agent -eq 'codex') { 'ChatGPT' } else { 'WorkBuddy' }
+  $processName = if ($agent -eq 'deepseek-harness') { 'DeepSeek Harness' } elseif ($agent -eq 'codex') { 'ChatGPT' } elseif ($agent -eq 'devin') { 'Devin' } else { 'WorkBuddy' }
   $processNames = if ($agent -eq 'codex') { @('ChatGPT','Codex') } else { @($processName) }
   $windows = @(Get-Process -Name $processNames -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 })
   if ($agent -eq 'codex' -and $windows.Count -gt 1) { $windows = @($windows | Where-Object { [CodexVoiceNative]::IsForeground([IntPtr]$_.MainWindowHandle) }) }
@@ -4153,7 +4166,7 @@ function Get-ComposerSubmitLabelScore([string]$value, [string]$agent = '') {
 }
 
 function Get-TaskDraftSnapshot($state) {
-  if ($null -eq $state -or -not $state.CurrentTask -or @('codex','workbuddy','deepseek-harness') -notcontains $state.Agent) {
+  if ($null -eq $state -or -not $state.CurrentTask -or @('codex','workbuddy','devin','deepseek-harness') -notcontains $state.Agent) {
     throw 'DESKTOP_TASK_TARGET_CHANGED'
   }
   # Edits made between voice requests are intentional. Pin the current value
@@ -4490,7 +4503,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         break
       }
       'dispatch' {
-        if ($null -eq $state -or @('codex','workbuddy','deepseek-harness') -notcontains $state.Agent) { throw 'Desktop composer is not ready' }
+        if ($null -eq $state -or @('codex','workbuddy','devin','deepseek-harness') -notcontains $state.Agent) { throw 'Desktop composer is not ready' }
         Assert-TargetCurrent $state $true
         if ($null -ne $command.draftSnapshot) {
           Assert-TaskDraftSnapshot $state $command.draftSnapshot

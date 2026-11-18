@@ -136,8 +136,8 @@ test("API settings owns voice and generation credential inputs", () => {
   assert.match(source, /https:\/\/ark\.volcengine\.com\/model\/detail\?name=doubao-seedance-2-0-mini/);
   assert.match(source, /provider\.id === "volcengine"/);
   assert.equal((source.match(/Key 获取方式/g) || []).length, 2);
-  assert.equal((source.match(/target="_blank"/g) || []).length, 3);
-  assert.equal((source.match(/rel="noreferrer"/g) || []).length, 3);
+  assert.equal((source.match(/target="_blank"/g) || []).length, 4);
+  assert.equal((source.match(/rel="noreferrer"/g) || []).length, 4);
 });
 
 test("saved ASR credentials are broadcast before the optional cloud probe", () => {

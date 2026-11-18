@@ -1447,6 +1447,18 @@ select:focus-visible {
 }
 
 .api-settings__form--speech { grid-template-columns: minmax(240px, 1fr) auto; }
+.api-settings__form--devin { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.api-settings__devin-enable,
+.api-settings__devin-actions { grid-column: 1 / -1; }
+.api-settings__devin-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.api-settings__devin-actions .api-settings__result {
+  flex: 1 1 220px;
+}
 
 .api-settings__secret-input {
   padding: 0 11px;
@@ -1546,6 +1558,10 @@ select:focus-visible {
 
 .api-settings__provider-result.is-error {
   color: var(--danger);
+}
+
+@media (max-width: 640px) {
+  .api-settings__form--devin { grid-template-columns: 1fr; }
 }
 
 .generation-api-status {

@@ -33,9 +33,9 @@ const APP_VERSION = "0.1.0";
 const PROTOCOL_VERSION_FALLBACK = 3;
 const SPEECH_EXPIRES_MS = 30000;
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
-const STATUS_VALUES = new Set(["idle", "working", "speaking", "done", "reply_complete", "error", "waiting_user"]);
+const STATUS_VALUES = new Set(["idle", "working", "speaking", "done", "reply_complete", "error", "waiting_user", "sleeping"]);
 const LEGACY_WORKING_STATUS_VALUES = new Set(["thinking", "tool_running"]);
-const KNOWN_AGENT_SOURCES = ["codex", "claude-code", "openclaw", "mimocode", "workbuddy"];
+const KNOWN_AGENT_SOURCES = ["codex", "claude-code", "openclaw", "mimocode", "workbuddy", "devin"];
 
 function requireOptional(name) {
   try {
@@ -1664,7 +1664,9 @@ function publishClawdState(config, payload) {
       ? buildMiMoCodeHookDisplay(payload, status, event)
       : source === "workbuddy"
         ? buildWorkBuddyHookDisplay(payload, status, event)
-        : undefined;
+        : source === "devin"
+          ? buildDevinCloudDisplay(payload, status, event)
+          : undefined;
   const explicitSessionTitle = compactHookText(payload.session_title, 160);
   const sessionTitle = explicitSessionTitle
     || (display && display.title)
@@ -1720,6 +1722,19 @@ function buildWorkBuddyHookDisplay(payload, status, event) {
   }[status] || "正在处理";
   // Sanitized current-turn prose only; status is a fallback when unavailable.
   return { title: "WorkBuddy", content, status, event, updatedAtMs: Date.now() };
+}
+
+function buildDevinCloudDisplay(payload, status, event) {
+  const title = compactHookText(payload?.session_title, 160) || "Devin 会话";
+  const content = compactHookText(payload?.display_content, 320);
+  if (!title && !content) return undefined;
+  return {
+    title,
+    content: content || compactHookText(payload?.display_title, 320),
+    status,
+    event,
+    updatedAtMs: Date.now(),
+  };
 }
 
 function publishPermissionRequest(config, payload) {
@@ -2156,6 +2171,11 @@ function resolveConfig() {
       enabled: parseCsvEnv("CLAWD_ENABLED_AGENTS", []).includes("workbuddy")
         || getEnv("CLAWD_SELECTED_AGENT_ID", "") === "workbuddy",
     },
+    devin: {
+      enabled: getEnv("CLAWD_DEVIN_CLOUD_ENABLED", "false").toLowerCase() === "true"
+        || parseCsvEnv("CLAWD_ENABLED_AGENTS", []).includes("devin")
+        || getEnv("CLAWD_SELECTED_AGENT_ID", "") === "devin",
+    },
     openclawState: {
       idleTimeoutMs: Math.max(1000, getEnvInt("STATUS_IDLE_TIMEOUT_MS", 15000)),
       idleWatchTickMs: Math.max(500, getEnvInt("STATUS_IDLE_WATCH_TICK_MS", 1000)),
@@ -2287,7 +2307,7 @@ async function main() {
     port: config.http.port,
     strictPort: config.http.strictPort,
     publisher,
-    onState: config.http.syncHooks || config.mimocode.enabled || config.workbuddy.enabled
+    onState: config.http.syncHooks || config.mimocode.enabled || config.workbuddy.enabled || config.devin.enabled
       ? (payload) => publishClawdState({
           publisher,
           metricsTracker,

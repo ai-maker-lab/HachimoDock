@@ -4,7 +4,7 @@
 
 Pet Manager 用于连接设备、管理形象和组件，以及将 Agent 状态与语音输入同步到桌面小屏。支持 macOS arm64 与 Windows x64。
 
-Agent 状态跟随、语音草稿、确认发送与对话切换是不同能力，应按实际平台与客户端能力核验。当前源码支持 [WorkBuddy](docs/workbuddy.md)：独立形象绑定、状态与气泡同步、当前可见对话的按键语音草稿及组件生成 Skill 安装。历史会话需在 WorkBuddy 手动打开。已发布安装包的能力以对应版本为准。
+Agent 状态跟随、语音草稿、确认发送与对话切换是不同能力，应按实际平台与客户端能力核验。当前源码支持 [WorkBuddy](docs/workbuddy.md) 与 [Devin](docs/devin.md)：WorkBuddy 支持独立形象绑定、状态与气泡同步、当前可见对话的按键语音草稿及组件生成 Skill 安装；Devin 可同步云端会话状态与气泡，并在 Windows Devin Desktop 当前可见对话中追加语音草稿及安装组件 Skill。历史会话需在各应用中手动打开。已发布安装包的能力以对应版本为准。
 
 直接使用请前往 [下载页面](https://github.com/ai-maker-lab/HachimoDock/releases/latest)。以下内容面向需要自行编译或修改客户端的开发者，技术栈为 Tauri 2 + React。
 

@@ -40,6 +40,7 @@ const AGENT_ICONS = {
   openclaw: Zap,
   mimocode: Braces,
   workbuddy: Code,
+  devin: Code,
   "deepseek-harness": Braces,
 };
 

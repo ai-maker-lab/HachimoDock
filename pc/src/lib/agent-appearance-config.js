@@ -43,6 +43,11 @@ export const FIXED_AGENT_OPTIONS = [
     detail: "WorkBuddy 状态与气泡跟随；向当前可见对话追加语音草稿",
   },
   {
+    id: "devin",
+    label: "Devin",
+    detail: "Devin 云端会话状态与气泡；向 Devin Desktop 当前对话追加语音草稿",
+  },
+  {
     id: "hermes",
     label: "Hermes Agent",
     detail: "跟随 Hermes 本地会话状态",

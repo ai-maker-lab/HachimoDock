@@ -394,6 +394,30 @@ test("GET /agent/sessions includes hook-only desktop sessions", async () => {
   }
 });
 
+test("GET /agent/sessions includes cloud-only Devin sessions", async () => {
+  const { bus, port } = await startBus({
+    agentId: "devin",
+    sessionStatusProvider: () => [{
+      id: "devin:cloud-session-001",
+      state: "working",
+      updatedAt: 34567,
+      title: "Devin 云端任务",
+      displayTitle: "Devin 云端任务",
+      displayContent: "正在处理",
+    }],
+  });
+  try {
+    const { status, body } = await jsonRequest(port, "GET", "/agent/sessions?agentId=devin&limit=5");
+    assert.equal(status, 200);
+    const session = body.sessions.find((item) => item.id === "cloud-session-001");
+    assert.equal(session.state, "working");
+    assert.equal(session.summary, "Devin 云端任务");
+    assert.equal(session.displayContent, "正在处理");
+  } finally {
+    await bus.stop();
+  }
+});
+
 test("GET /agent/sessions never pairs a terminal state with active-only card text", async () => {
   const { bus, port } = await startBus({
     agentId: "claude-code",

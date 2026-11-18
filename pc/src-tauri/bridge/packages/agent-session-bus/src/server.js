@@ -327,7 +327,7 @@ class AgentSessionBus {
           }
           return session;
         });
-        if (agentId === "claude-code" || agentId === "codex" || agentId === "mimocode" || agentId === "workbuddy") {
+        if (agentId === "claude-code" || agentId === "codex" || agentId === "mimocode" || agentId === "workbuddy" || agentId === "devin") {
           for (const status of Array.isArray(statuses) ? statuses : []) {
             const id = normalizeStatusId(status?.id);
             if (!id || seen.has(id)) continue;
@@ -338,7 +338,7 @@ class AgentSessionBus {
               : "";
             const title = agentId === "codex"
               ? [statusTitle, displayTitle].find((value) => value && value !== "Codex 会话") || ""
-              : statusTitle || displayTitle || (agentId === "workbuddy" ? "WorkBuddy 会话" : agentId === "mimocode" ? "MiMoCode 会话" : "Claude 会话");
+              : statusTitle || displayTitle || (agentId === "devin" ? "Devin 会话" : agentId === "workbuddy" ? "WorkBuddy 会话" : agentId === "mimocode" ? "MiMoCode 会话" : "Claude 会话");
             const resolvedDisplayTitle = agentId === "codex" && displayTitle === "Codex 会话"
               ? title
               : displayTitle || title;

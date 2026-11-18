@@ -108,14 +108,107 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
     llmTone: "muted",
     llmMessage: "正在读取对话大模型配置…",
   });
+  const [devin, setDevin] = useState({
+    loading: true,
+    pending: false,
+    testPending: false,
+    token: "",
+    hasToken: false,
+    orgId: "",
+    enabled: false,
+    tone: "muted",
+    message: "正在读取 Devin 配置…",
+  });
+  const [savedDevinDraft, setSavedDevinDraft] = useState(null);
+  const devinDraft = JSON.stringify([devin.token, devin.orgId, devin.enabled]);
   const mimo = mimoConnection(voiceChat.llmProvider);
   const llmDraft = JSON.stringify([voiceChat.llmProvider, voiceChat.llmBaseUrl, voiceChat.llmModel,
     voiceChat.llmWebSearch, voiceChat.llmApiKey, voiceChat.llmSearchMode, voiceChat.llmSearchApiKey]);
   useEffect(() => { if (!voiceChat.loading && savedLlm === null) setSavedLlm(llmDraft); }, [voiceChat.loading, savedLlm, llmDraft]);
   const dirty = JSON.stringify(videoConfigs) !== JSON.stringify(savedVideoConfigs)
-    || !!asrApiKey || (savedLlm !== null && savedLlm !== llmDraft);
-  const saving = voiceChat.llmPending || asrState.pending || Object.values(providerPending).some(Boolean);
+    || !!asrApiKey || (savedLlm !== null && savedLlm !== llmDraft)
+    || (savedDevinDraft !== null && savedDevinDraft !== devinDraft);
+  const saving = voiceChat.llmPending || asrState.pending || devin.pending || Object.values(providerPending).some(Boolean);
   useExitProtection(saving ? "API 配置正在保存或测试" : dirty ? "API 配置有未保存的修改" : "");
+
+  useEffect(() => {
+    if (!active) return undefined;
+    let cancelled = false;
+    invoke("devin_cloud_get_config")
+      .then((config) => {
+        if (cancelled) return;
+        const draft = JSON.stringify(["", config.orgId || "", config.enabled === true]);
+        setSavedDevinDraft(draft);
+        setDevin((current) => ({
+          ...current,
+          loading: false,
+          hasToken: config.hasToken === true,
+          orgId: config.orgId || "",
+          enabled: config.enabled === true,
+          tone: config.error ? "error" : "muted",
+          message: config.error || (config.hasToken ? "已读取加密保存的 Devin 配置。" : "尚未配置 Devin PAT。"),
+        }));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setDevin((current) => ({
+          ...current,
+          loading: false,
+          tone: "error",
+          message: `读取 Devin 配置失败：${error}`,
+        }));
+      });
+    return () => { cancelled = true; };
+  }, [active]);
+
+  const saveDevin = async () => {
+    setDevin((current) => ({ ...current, pending: true, tone: "muted", message: "正在保存 Devin 配置…" }));
+    try {
+      await invoke("devin_cloud_save_config", {
+        token: devin.token.trim() ? devin.token : null,
+        orgId: devin.orgId,
+        enabled: devin.enabled,
+      });
+      const hasToken = devin.hasToken || Boolean(devin.token.trim());
+      const draft = JSON.stringify(["", devin.orgId, devin.enabled]);
+      setSavedDevinDraft(draft);
+      setDevin((current) => ({
+        ...current,
+        pending: false,
+        token: "",
+        hasToken,
+        tone: "success",
+        message: "配置已加密保存，云端状态轮询已更新。",
+      }));
+    } catch (error) {
+      setDevin((current) => ({
+        ...current,
+        pending: false,
+        tone: "error",
+        message: `保存 Devin 配置失败：${error}`,
+      }));
+    }
+  };
+
+  const testDevin = async () => {
+    setDevin((current) => ({ ...current, testPending: true, tone: "muted", message: "正在测试 Devin 连接…" }));
+    try {
+      const result = await invoke("devin_cloud_test");
+      setDevin((current) => ({
+        ...current,
+        testPending: false,
+        tone: result.ok ? "success" : "error",
+        message: result.message,
+      }));
+    } catch (error) {
+      setDevin((current) => ({
+        ...current,
+        testPending: false,
+        tone: "error",
+        message: `Devin 连接测试失败：${error}`,
+      }));
+    }
+  };
 
   const applyVoiceChatStatus = (status, patch = {}) => {
     setVoiceChat((current) => ({
@@ -403,6 +496,89 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
       </section>
 
 
+
+      <Card
+        title="Devin 云端会话"
+        subtitle="加密保存 Devin PAT 与组织 ID；启用后同步最近会话状态到设备气泡，不读取或展示会话回复内容。"
+        actions={(
+          <span className={`api-settings__status${devin.hasToken ? " is-success" : ""}`}>
+            {devin.loading ? <Loader2 size={13} className="spin" /> : <CheckCircle2 size={13} />}
+            {devin.loading ? "读取中" : devin.hasToken ? "PAT 已保存" : "未配置"}
+          </span>
+        )}
+      >
+        <div className="api-settings__form api-settings__form--devin">
+          <label className="ui-field" htmlFor="api-settings-devin-token">
+            <span className="ui-field__label">Personal Access Token（PAT）</span>
+            <input
+              id="api-settings-devin-token"
+              className="ui-control api-settings__secret-input"
+              type={showSecrets ? "text" : "password"}
+              autoComplete="new-password"
+              value={devin.token}
+              onChange={(event) => setDevin((current) => ({ ...current, token: event.target.value }))}
+              placeholder={devin.hasToken ? "已保存 PAT；留空则保留现有密钥" : "粘贴 Devin PAT"}
+              disabled={devin.loading || devin.pending}
+            />
+          </label>
+          <label className="ui-field" htmlFor="api-settings-devin-org">
+            <span className="ui-field__label">组织 ID</span>
+            <input
+              id="api-settings-devin-org"
+              className="ui-control"
+              value={devin.orgId}
+              onChange={(event) => setDevin((current) => ({ ...current, orgId: event.target.value }))}
+              placeholder="org-..."
+              disabled={devin.loading || devin.pending}
+            />
+          </label>
+          <label className="ui-field api-settings__devin-enable">
+            <span>
+              <input
+                type="checkbox"
+                checked={devin.enabled}
+                onChange={(event) => setDevin((current) => ({ ...current, enabled: event.target.checked }))}
+                disabled={devin.loading || devin.pending}
+              />
+              启用 Devin 云端会话状态同步
+            </span>
+            <span className="muted small">每 15 秒轮询一次；只同步状态和会话标题，不读取回复文本。</span>
+          </label>
+          <div className="api-settings__devin-actions">
+            <a
+              className="api-settings__credential-link"
+              href="https://docs.devin.ai/api-reference/personal-access-tokens"
+              target="_blank"
+              rel="noreferrer"
+            >
+              PAT 创建说明
+              <ExternalLink size={11} aria-hidden="true" />
+            </a>
+            <div className={`api-settings__result${resultToneClass(devin.tone)}`} role="status">
+              {devin.tone === "error" ? <AlertCircle size={13} /> : <CheckCircle2 size={13} />}
+              {devin.message}
+            </div>
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={testDevin}
+              disabled={devin.loading || devin.pending || devin.testPending || !devin.hasToken || dirty}
+            >
+              {devin.testPending ? <Loader2 size={13} className="spin" /> : null}
+              测试连接
+            </button>
+            <button
+              type="button"
+              className="btn-primary btn-sm"
+              onClick={saveDevin}
+              disabled={devin.loading || devin.pending || devin.testPending}
+            >
+              {devin.pending ? <Loader2 size={13} className="spin" /> : null}
+              保存
+            </button>
+          </div>
+        </div>
+      </Card>
 
       <Card
         title="语音识别与合成"

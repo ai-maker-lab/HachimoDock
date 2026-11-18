@@ -70,7 +70,7 @@ test("generation result acknowledgement also removes its persistent toast", () =
 test("Agent discovery leaves the UI thread without permanently caching missing executables", () => {
   const backend = readSource("src-tauri/src/lib.rs");
   assert.match(backend, /async fn detect_local_agents\(/);
-  assert.match(backend, /spawn_blocking\(detect_local_agents_inner\)/);
+  assert.match(backend, /spawn_blocking\(move \|\| detect_local_agents_inner\(devin_cloud_enabled\)\)/);
   assert.doesNotMatch(backend, /static (?:FULL_SHELL_PATH|NPM_GLOBAL_BIN): OnceLock/);
 });
 
