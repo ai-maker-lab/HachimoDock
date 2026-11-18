@@ -7,6 +7,7 @@
  */
 
 #pragma once
+#include "pet_p4_voice_feedback.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -99,6 +100,7 @@ typedef struct {
   pet_p4_session_queue_item_t session_queue_staging[PET_P4_SESSION_QUEUE_MAX];
   unsigned int session_queue_count;
   bool session_voice_active;
+  pet_voice_feedback_t voice_feedback;
   unsigned long long session_snapshot_last_seen_ms;
   char screen_page[PET_P4_PAGE_MAX];
   /* DSH 审批上屏（R5）：PC bridge 下发的单条 pending approval。active 时渲染

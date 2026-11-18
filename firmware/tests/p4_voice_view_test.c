@@ -24,10 +24,10 @@ int main(void) {
   pet_p4_build_view_model(&state, &view);
   assert(view.show_voice_overlay && !view.show_bubble);
 
-  // A real Session appearing mid-hold uses its existing card, not two overlays.
+  // Voice always keeps the original short strip, even if a Session arrives.
   state.session_queue_count = 1;
   pet_p4_build_view_model(&state, &view);
-  assert(!view.show_voice_overlay && state.session_voice_active);
+  assert(view.show_voice_overlay && state.session_voice_active);
   state.session_queue_count = 0;
   pet_p4_build_view_model(&state, &view);
   assert(view.show_voice_overlay);
@@ -45,6 +45,14 @@ int main(void) {
   pet_p4_build_view_model(&state, &view);
   assert(view.show_voice_overlay);
   state.session_voice_active = false;
+  state.voice_feedback.phase = PET_VOICE_RECOGNIZING;
+  pet_p4_build_view_model(&state, &view);
+  assert(view.show_voice_overlay && !view.show_bubble);
+  state.voice_feedback.phase = PET_VOICE_DRAFT;
+  strcpy(state.voice_feedback.text, "识别文字");
+  pet_p4_build_view_model(&state, &view);
+  assert(view.show_voice_overlay);
+  state.voice_feedback.phase = PET_VOICE_IDLE;
   pet_p4_build_view_model(&state, &view);
   assert(!view.show_voice_overlay && view.show_bubble && view.compact_bubble);
   assert(strcmp(view.body, "休息中") == 0);
