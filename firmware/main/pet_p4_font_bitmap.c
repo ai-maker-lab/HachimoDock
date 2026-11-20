@@ -95,6 +95,9 @@ static bool prepare_metrics(void){
 /* app_main calls before audio/tasks/render. Failure is latched: never retry
  * a decode over a live glyph buffer. No font or decoder pointer leaves C. */
 #if PET_FONT_NATIVE_32
+#if PET_FONT_ROW_PLANES
+#include "pet_p4_font_row_planes.inc.h"
+#else
 #include "pet_p4_font_glyph_columns_size.h"
 extern const unsigned char font_glyph_columns_packed[] asm("_binary_pet_cn_16_glyph_columns_deflate_start");
 extern const unsigned char font_glyph_columns_packed_end[] asm("_binary_pet_cn_16_glyph_columns_deflate_end");
@@ -140,7 +143,8 @@ static bool prepare_bitmap_after_columns(void){
     &&restore_bitmap_glyphs();
   return bitmap_ok;
 }
-#endif
+#endif /* row planes / glyph columns */
+#endif /* native32 */
 bool pet_p4_font_bitmap_init(void){
   if(attempted)return ready;
   attempted=true;

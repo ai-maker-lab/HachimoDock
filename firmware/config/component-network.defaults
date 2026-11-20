@@ -1,0 +1,5 @@
+# Candidate-only TLS buffers in PSRAM. No certificate bypass or partition changes.
+# CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC is not set
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+# Keep TLS buffers independent of peripheral DMA alignment constraints.
+# CONFIG_MBEDTLS_HARDWARE_AES is not set

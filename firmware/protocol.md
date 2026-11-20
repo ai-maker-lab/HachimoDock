@@ -2671,3 +2671,12 @@ LAN 扩展状态使用 `pf` 表示同一存储状态。
 用户名长度、凭证长度（大端 u16）及五个字段。操作 0 查询、1 设置、2 清除；
 非设置操作不带用户名或凭证。响应是单字节状态，从 0 开始分别为拒绝、
 已配置、未配置、设备安全存储不可用、存储错误、写入忙。响应没有凭证数据。
+
+## Experimental component network capability
+
+Only the default-off component-network candidate advertises `widgetWasmNetwork`
+and `widgetComponentCredentials` as `component-network-v1`. Existing public targets
+remain unchanged. The component manifest uses `hachiNetwork`; policy/import matching
+and negotiated capabilities are required. This is not a serial credential-export
+API. See `../pc/skills/petui/references/component-network.md` for the asynchronous
+WASM contract and `../docs/rfcs/component-network-host.md` for outstanding gates.

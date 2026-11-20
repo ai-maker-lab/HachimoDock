@@ -1,3 +1,4 @@
+#include "pet_component_network_device.h"
 /*
  * [Input] JSON-line control/state envelopes from USB-UART and native USB.
  * [Output] validated runtime updates, ACK/NACK responses, persisted input
@@ -3161,6 +3162,10 @@ __attribute__((optimize("Oz"))) void pet_p4_send_hello_for_board(const char *boa
   cJSON_AddNumberToObject(capabilities, "widgetWasmMemoryPages", HACHI_MAX_MEMORY_PAGES);
   cJSON_AddStringToObject(capabilities, "widgetWasmCanvas", "640x480-v1");
   cJSON_AddStringToObject(capabilities, "widgetWasmHost", HACHI_HOST_PROFILE);
+#if PET_COMPONENT_NETWORK_ENABLED
+  cJSON_AddStringToObject(capabilities,"widgetWasmNetwork",PET_NETWORK_PROFILE);
+  cJSON_AddStringToObject(capabilities,"widgetComponentCredentials",PET_NETWORK_PROFILE);
+#endif
 #if PET_P4_WASM_AUDIO
   cJSON_AddStringToObject(capabilities, "widgetWasmAudio", HACHI_AUDIO_PROFILE);
 #endif
@@ -4638,6 +4643,17 @@ bool pet_p4_handle_line_with_reply(
       pet_p4_keyboard_config(payload, state->board_device_id));
   } else if (strcmp(topic, "wifi/query") == 0) {
     send_wifi_status(payload, send_line, ctx);
+#if PET_COMPONENT_NETWORK_ENABLED
+  } else if ((strcmp(topic,"component/credential-set")==0||strcmp(topic,"component/network-status-query")==0)&&pet_p4_lan_trust_wired(send_line,ctx)) {
+    bool setting=strcmp(topic,"component/credential-set")==0;
+    cJSON *result=setting?cJSON_CreateObject():pet_net_device_status();
+    if(result){
+      const char *request=json_string(payload,"requestId");if(request)cJSON_AddStringToObject(result,"requestId",request);
+      if(setting){int id=pet_net_device_provision(json_string(payload,"widgetId"),json_string(payload,"key"),json_string(payload,"value"));cJSON_AddBoolToObject(result,"ok",id>0);cJSON_AddBoolToObject(result,"queued",id>0);cJSON_AddNumberToObject(result,"request",id);}
+      send_topic_payload(send_line,ctx,setting?"component/credential-result":"component/network-status",result);
+    }
+#endif
+
   } else if (strcmp(topic, "lan/trust") == 0) {
     send_topic_payload(send_line, ctx, "lan/trust-status", pet_p4_lan_trust_usb(payload, send_line, ctx));
 #endif

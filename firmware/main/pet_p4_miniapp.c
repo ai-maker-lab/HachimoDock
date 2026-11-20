@@ -1,3 +1,4 @@
+#include "pet_component_network_device.h"
 #include "pet_p4_wasm_trial.h"
 #include "hachi_runtime.h"
 #include "mbedtls/sha256.h"
@@ -396,6 +397,9 @@ typedef enum {
 typedef struct {
   bool active;
   char widget_id[PET_P4_MINIAPP_WIDGET_ID_MAX];
+#if PET_COMPONENT_NETWORK_ENABLED
+  char wasm_network[PET_NETWORK_POLICY_BYTES];
+#endif
   bool resource_incomplete;
   uint8_t var_count;
   miniapp_var_t vars[MINIAPP_MAX_VARS];
@@ -3249,8 +3253,17 @@ static bool wasm_declaration_valid(const cJSON *root, const pet_p4_miniapp_sprit
   const cJSON *host=cJSON_GetObjectItemCaseSensitive(root,"hachiHost");
   const cJSON *audio=cJSON_GetObjectItemCaseSensitive(root,"hachiAudio");
   const cJSON *audio_hash=cJSON_GetObjectItemCaseSensitive(root,"hachiAudioSha256");
+  const cJSON *network=cJSON_GetObjectItemCaseSensitive(root,"hachiNetwork");
+  if(network){
+#if PET_COMPONENT_NETWORK_ENABLED
+    pet_net_policy_t *policy=pet_net_alloc(sizeof *policy);
+    bool ok=policy&&pet_net_policy_parse(network,policy);free(policy);if(!ok)return false;
+#else
+    return false;
+#endif
+  }
   if(!decl){
-    return !canvas && !host && !audio && !audio_hash && bytes==0;
+    return !canvas && !host && !audio && !audio_hash && !network && bytes==0;
   }
   if(!cJSON_IsString(decl)||strlen(decl->valuestring)!=64||!bytes||bytes>HACHI_MAX_MODULE
       ||pack->data_length>sizeof(pack->pixels)-bytes)return false;
@@ -3258,6 +3271,7 @@ static bool wasm_declaration_valid(const cJSON *root, const pet_p4_miniapp_sprit
   unsigned char hash[32];
   bool native, services, uses_audio;
   if (!hachi_module_host_profile(module, bytes, &native, &services, &uses_audio)) return false;
+  bool net=false;if(!hachi_module_network_profile(module,bytes,&net)||net!=(network!=NULL))return false;
   if (uses_audio) {
     if (!cJSON_IsString(audio) || strcmp(audio->valuestring, HACHI_AUDIO_PROFILE) ||
         !cJSON_IsString(audio_hash) || strlen(audio_hash->valuestring) != 64 ||
@@ -3286,7 +3300,7 @@ static bool __attribute__((optimize("Oz"))) parse_runtime_impl(
 ) {
   PET_WIDGET_TRACE_SCOPE(trace_parse, PET_WTRACE_PARSE);
   static const char *const allowed[] = {
-    "schema_version", "vars", "states", "initial_state", "pages", "initial_page", "hachiWasm", "hachiCanvas", "hachiHost",
+    "schema_version", "vars", "states", "initial_state", "pages", "initial_page", "hachiWasm", "hachiCanvas", "hachiHost", "hachiNetwork",
 #if PET_P4_WASM_AUDIO
     "hachiAudio", "hachiAudioSha256",
 #endif
@@ -3342,6 +3356,11 @@ static bool __attribute__((optimize("Oz"))) parse_runtime_impl(
     return false;
   }
   copy_utf8(parsed->widget_id, sizeof(parsed->widget_id), widget_id);
+#if PET_COMPONENT_NETWORK_ENABLED
+  const cJSON *network=cJSON_GetObjectItemCaseSensitive(root,"hachiNetwork");
+  if(network){char *serialized=cJSON_PrintUnformatted(network);bool ok=serialized&&strlen(serialized)<sizeof parsed->wasm_network;if(ok)memcpy(parsed->wasm_network,serialized,strlen(serialized)+1);free(serialized);if(!ok){set_error(error,error_size,"network policy size limit");goto fail;}}
+#endif
+
   schema = cJSON_GetObjectItemCaseSensitive(root, "schema_version");
   fetchers = cJSON_GetObjectItemCaseSensitive(root, "fetchers");
   readers = cJSON_GetObjectItemCaseSensitive(root, "readers");
@@ -5211,6 +5230,14 @@ unsigned pet_p4_wasm_package(void *bytes, size_t capacity, size_t *size,
   }
   miniapp_runtime_unlock();
   return revision;
+}
+
+cJSON *pet_p4_wasm_network_policy(unsigned revision){
+#if PET_COMPONENT_NETWORK_ENABLED
+ miniapp_runtime_lock();cJSON *result=revision&&g_runtime.active&&revision==g_image_revision+1&&g_runtime.wasm_network[0]?cJSON_Parse(g_runtime.wasm_network):NULL;miniapp_runtime_unlock();return result;
+#else
+ (void)revision;return NULL;
+#endif
 }
 
 #if PET_P4_WASM_AUDIO
@@ -10217,6 +10244,7 @@ static bool remove_component(const char *widget_id, char *error, size_t error_si
   next_selected = g_catalog_selected;
   miniapp_runtime_unlock();
 
+  if(!preserve_save&&!pet_net_device_forget(widget_id)){set_error(error,error_size,"component credential removal failed");return false;}
   catalog_index = catalog_find(next_catalog, next_count, widget_id);
   if (catalog_index < 0) {
     widget_install_stage_reset();

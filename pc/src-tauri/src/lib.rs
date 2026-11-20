@@ -62,6 +62,7 @@ mod dsh_desktop;
 mod dsh_paths;
 mod dsh_windows_acl;
 mod clawpkg;
+mod component_network;
 mod wasm_audio;
 mod json_canonical;
 mod app_shell;
