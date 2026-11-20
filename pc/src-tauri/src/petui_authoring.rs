@@ -528,6 +528,7 @@ fn pack_with_trace(
     if let Some(module) = module {
         let (canvas, host, _, _, audio) =
             clawpkg::wasm_profile_details(&module).ok_or("WASM 格式、宿主导入或固定内存无效")?;
+        clawpkg::validate_network_declaration(&Value::Object(widget.clone()), Some(&module))?;
         let buttons = parse("buttons.json")?;
         let bindings = crate::wasm_input_contract::bindings(id, &buttons)?;
         let require_touch = compiled_source && component["wasmTouch"] == true;

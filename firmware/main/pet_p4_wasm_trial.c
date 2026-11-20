@@ -1,3 +1,4 @@
+#include "pet_component_network_device.h"
 #include "pet_p4_wasm_trial.h"
 
 #include <pthread.h>
@@ -288,6 +289,7 @@ static void *worker(void *arg) {
   atomic_store(&worker_failed,false);
 
   hachi_runtime_t runtime = {0};
+  pet_net_lease_t network_lease={0};
   hachi_saves_t saves={0}, persisted={0};
   char active_id[48]="", active_hash[65]="";
   unsigned session=0, loaded_revision=0;
@@ -306,6 +308,7 @@ static void *worker(void *arg) {
         }
         persisted=saves;
       }
+      pet_net_device_activate(NULL,NULL,&network_lease);
       hachi_close(&runtime);
       session=target;
       loaded_revision=revision;
@@ -321,12 +324,20 @@ static void *worker(void *arg) {
         }
         char error[128]="invalid WASM";
         host_session = session;
-        if(hachi_open_host(&runtime,binary,bytes,drawing,FRAME_PIXELS,&saves,
-                          read_host,esp_random,error,sizeof(error))){
+        cJSON *policy=pet_p4_wasm_network_policy(revision);
+        bool service_ready=!policy||pet_net_device_activate(id,policy,&network_lease);
+        cJSON_Delete(policy);
+        hachi_service_fn service=NULL;
+#if PET_COMPONENT_NETWORK_ENABLED
+        if(network_lease.generation)service=pet_net_call;
+#endif
+        if(service_ready&&hachi_open_services(&runtime,binary,bytes,drawing,FRAME_PIXELS,&saves,
+                          read_host,esp_random,service,&network_lease,error,sizeof(error))){
           atomic_store(&failed_session,0);
           runtime.media_allowed=radio;
           ESP_LOGI(TAG,"opened %s",id);
         }else{
+          pet_net_device_activate(NULL,NULL,&network_lease);
           ESP_LOGE(TAG,"%s: %s",id,error);
           remember_failure(id, active_hash, error);
           atomic_store(&failed_session, session);
@@ -396,6 +407,7 @@ static void *worker(void *arg) {
         shown_session = 0;
         atomic_store(&failed_session, session);
         xSemaphoreGive(frame_lock);
+        pet_net_device_activate(NULL,NULL,&network_lease);
         hachi_close(&runtime);
       }
     }

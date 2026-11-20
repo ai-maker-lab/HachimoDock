@@ -5828,6 +5828,8 @@ impl UsbSerialManager {
             .map(|(_, bytes)| bytes.as_slice())
             .ok_or_else(|| "component package is missing runtime/widget.json".to_string())?;
         let widget_definition: serde_json::Value = serde_json::from_slice(widget_source).map_err(|e| e.to_string())?;
+        crate::clawpkg::validate_network_declaration(&widget_definition,
+            entries.iter().find(|(path, _)| path == "runtime/app.wasm").map(|(_, bytes)| bytes.as_slice()))?;
         crate::app_component_program::validate(&widget_definition)?;
         if let Some(capabilities) = capabilities {
             crate::clawpkg::ComponentSyncRequirements::from_runtime(&widget_definition)

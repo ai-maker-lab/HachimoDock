@@ -12,6 +12,7 @@ env.Replace(COMPILATIONDB_INCLUDE_TOOLCHAIN=False,
             COMPILATIONDB_PATH=os.path.join(env.subst("$BUILD_DIR"), "platformio_compile_commands.json"))
 env["ENV"]["PET_P4_PROJECT_DIR"] = project_dir
 env["ENV"]["PET_P4_SYSTEM_WIFI"] = env.GetProjectOption("custom_p4_system_wifi", "0")
+env["ENV"]["PET_P4_COMPONENT_NETWORK"] = env.GetProjectOption("custom_p4_component_network", "0")
 env["ENV"]["PET_P4_CHIP_FAMILY"] = env.GetProjectOption("custom_p4_chip_family", "v1")
 env["ENV"]["PET_P4_PROJECT_VER_OVERRIDE"] = env.GetProjectOption(
     "custom_p4_project_version", "0.7.57-p4"

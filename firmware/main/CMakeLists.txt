@@ -4,7 +4,7 @@
 # [Sync] If this file changes, update `firmware/.folder.md` and `protocol.md`.
 
 if("$ENV{PET_P4_SYSTEM_WIFI}" STREQUAL "1")
-  set(settings_requires esp_wifi esp_event esp_netif esp-tls protocomm efuse esp_hw_support bootloader_support)
+  set(settings_requires esp_wifi esp_event esp_netif esp-tls protocomm efuse esp_hw_support bootloader_support mqtt esp_http_client)
   set(settings_sources
     "pet_p4_system_settings.c"
     "pet_p4_device_wifi.c"
@@ -27,6 +27,8 @@ endif()
 idf_component_register(
   SRCS
     "pet_p4_main.c"
+    "pet_component_network.c"
+    "pet_component_network_device.c"
     ${settings_sources}
     "pet_p4_wasm_trial.c"
     "pet_p4_lcd.c"
@@ -540,4 +542,12 @@ if("$ENV{PET_P4_SYSTEM_WIFI}" STREQUAL "1" AND "$ENV{PET_P4_CHIP_FAMILY}" STREQU
     TARGET_DIRECTORY ${pet_volume_codec_lib} APPEND PROPERTY COMPILE_OPTIONS "-Oz")
   set_property(SOURCE "pet_p4_touch.c" "pet_p4_usb_native.c"
     APPEND PROPERTY COMPILE_DEFINITIONS PET_P4_COLD_INIT_SIZE=1)
+endif()
+
+# Candidate-only font row planes are discarded by the linker on unchanged profiles.
+target_add_binary_data(${COMPONENT_LIB} "${CMAKE_CURRENT_LIST_DIR}/../assets/fonts/pet_cn_16_row_planes.deflate" BINARY)
+execute_process(COMMAND "${PYTHON}" "${CMAKE_CURRENT_LIST_DIR}/../tools/compress_font_row_planes.py" "--check"
+  RESULT_VARIABLE font_planes_check)
+if(NOT font_planes_check EQUAL 0)
+  message(FATAL_ERROR "Stale lossless font row planes")
 endif()

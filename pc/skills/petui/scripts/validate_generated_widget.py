@@ -2085,7 +2085,12 @@ def validate_widget(
         try:
             with (widget_dir / "runtime/app.wasm").open("rb") as file:
                 module = file.read(MAX_WASM_BYTES + 1)
-            canvas, host, audio = wasm_profile(module)
+            canvas, host, audio, network = wasm_profile(module, include_network=True)
+            from component_network import validate as validate_network
+            if network:
+                validate_network(runtime.get("hachiNetwork"))
+            elif "hachiNetwork" in runtime:
+                raise ValueError("Unused component network declaration")
             if (hashlib.sha256(module).hexdigest() != runtime["hachiWasm"]
                     or canvas != runtime.get("hachiCanvas") or host != runtime.get("hachiHost")
                     or audio != runtime.get("hachiAudio")):

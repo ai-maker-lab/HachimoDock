@@ -1,15 +1,39 @@
 # RFC: provider-independent network services for components
 
-Status: interface proposal; not an implemented or advertised device capability.
+Status: local implementation candidate, default off; **not release ready**.
 
-Reviewed against main `165401b3e2b1333022e8f0fdddcbebc14d669dba` (R287 public source).
+The candidate is implemented on the R292 source below, with portable policy/queue,
+ESP HTTPS/MQTTS/NVS backend, WASM ABI, package/client capability checks and matching
+SDK/preview validation. Existing release targets do not advertise this capability.
+The dedicated `esp32_p4_component_network_candidate_v3` target advertises it for
+local development only. No application-specific endpoints, account state, parser,
+renderer, component identity branch or built-in application is included.
+
+Local host tests cover policy contracts in C/Python/Rust, ASan/UBSan ownership and
+quota checks, mocked TLS/DNS/storage/MQTT fragmentation, and a real WASM module in
+WAMR and the browser preview. The default Wi-Fi v3 target builds within budget.
+The enabled candidate now passes the unchanged 128 KiB OTA-headroom gate:
+3,005,408 application bytes and 140,320 bytes headroom. A full desktop development
+build passed. Preserving OTA on one ESP32-P4 rev302 device booted a valid image;
+all 30 installed components remained. A separately distributed WASM component
+confirmed real HTTPS connectivity (an expected HTTP 401 without credentials).
+Authenticated MQTT and broader hardware acceptance remain pending; this is not a
+validated general firmware release. See the validation record for exact limits.
+
+The executable contract is documented in
+`pc/skills/petui/references/component-network.md`.
+
+Reviewed against main `e40c4854275cf0add975f152aefe6f22e99fb638` (R292 public source).
 
 ## Problem and ownership
 
-An installed component can draw a bounded WASM interface and consume public HTTPS
-feeds, but cannot implement an authenticated cloud client or a persistent TLS
-subscription through the published component ABI. Copying an application into
-firmware is not an acceptable way to provide this functionality.
+R292 already supports public HTTPS feeds, bounded private bearer GET feeds,
+a single MQTT feed and hardware-backed credentials for that existing feed path.
+This proposal adds a separate asynchronous WASM request API: GET/POST and raw
+response reads, component-owned dynamic MQTT subscriptions/publications, and
+explicit credential lifecycle operations. It does not replace or weaken the
+existing private-feed credential service. Copying an application into firmware
+is not an acceptable way to provide these additional capabilities.
 
 The host should own transport, certificate validation, bounded asynchronous jobs,
 component identity and credential persistence. A separately distributed component
@@ -25,13 +49,13 @@ another firmware branch or a component-ID dispatch in the renderer or input path
 
 | Layer | Existing behavior | Required extension |
 |---|---|---|
-| HTTPS feeds | Public GET, fixed Accept choices and bounded JSON feed mappings | Separate authenticated request service with GET/POST, bounded body and explicitly scoped headers |
+| HTTPS feeds | Public and private bearer GET feeds with bounded mappings | Separate authenticated request service with GET/POST, bounded body and explicitly scoped headers |
 | WASM host | Clock, random, UV, graphics, sound and eight integer save slots | Versioned asynchronous service ABI and bounded byte reads |
-| MQTT | No public component transport | Generic MQTT-over-TLS session with bounded subscriptions, messages and publish requests |
-| Persistence | Small integer WASM save slots | Component-scoped credential records, explicit erase and lifecycle rules |
+| MQTT | Existing single MQTT feed | Generic MQTT-over-TLS session with bounded subscriptions, messages and publish requests |
+| Persistence | Integer WASM save slots and existing hardware-backed feed credentials | Component-scoped credential records, explicit erase and lifecycle rules |
 | Installation | Import and manifest allowlists, capability checks | Matching firmware, SDK, packager, preview and client checks for the new profiles |
 
-This is an additive API. Existing feed profiles keep their public-GET restrictions.
+This is an additive API. Existing public and private feed profiles keep their existing restrictions.
 An implementation must not silently turn a feed URL into an authenticated request.
 
 ## Proposed contract
@@ -194,4 +218,6 @@ First agree the contract and quotas in this RFC. Then implement the complete
 transport/credential/ABI path with installation checks and deterministic tests in
 one reviewable feature series. Enable advertised profiles only after device HIL
 passes. Independently distributed components can then migrate to the public ABI.
-This RFC itself changes no executable behavior or advertised capabilities.
+This branch now contains an experimental implementation in addition to this RFC.
+The existing public targets remain default off. The candidate must pass every
+resource and device gate before promotion to a release profile.
