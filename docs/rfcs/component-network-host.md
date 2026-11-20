@@ -13,17 +13,18 @@ Local host tests cover policy contracts in C/Python/Rust, ASan/UBSan ownership a
 quota checks, mocked TLS/DNS/storage/MQTT fragmentation, and a real WASM module in
 WAMR and the browser preview. The default Wi-Fi v3 target builds within budget.
 The enabled candidate now passes the unchanged 128 KiB OTA-headroom gate:
-3,005,408 application bytes and 140,320 bytes headroom. A full desktop development
+3,005,168 application bytes and 140,560 bytes headroom. A full desktop development
 build passed. Preserving OTA on one ESP32-P4 rev302 device booted a valid image;
 all 30 installed components remained. A separately distributed WASM component
 confirmed real HTTPS connectivity (an expected HTTP 401 without credentials).
-Authenticated MQTT and broader hardware acceptance remain pending; this is not a
+Authenticated MQTT and live telemetry were observed on one board; broader
+hardware acceptance remains pending. This is not a
 validated general firmware release. See the validation record for exact limits.
 
 The executable contract is documented in
 `pc/skills/petui/references/component-network.md`.
 
-Reviewed against main `e40c4854275cf0add975f152aefe6f22e99fb638` (R292 public source).
+Reviewed against main `139c99302aed65fc6804d31af9a56cfcbc58d184` (R292 public source).
 
 ## Problem and ownership
 

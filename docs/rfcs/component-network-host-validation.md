@@ -1,9 +1,18 @@
 # Local validation: generic component network candidate
 
-Base: upstream main `e40c4854275cf0add975f152aefe6f22e99fb638` (R292).
+Base: upstream main `139c99302aed65fc6804d31af9a56cfcbc58d184` (R292).
 Feature target: `esp32_p4_component_network_candidate_v3`, default off elsewhere.
 
 ## Results
+
+Latest-main revalidation: 23 portable/policy/font/WAMR ABI/trusted-service tests
+passed, source-publication checks passed, and desktop source tests passed
+(1943 passed, 1 skipped). Desktop tests require staging the official release
+firmware resources first, as in upstream CI. A fresh enabled-candidate firmware
+build passed the existing resource gates below. The application-only OTA of
+that build booted `valid` on the same rev302 board, preserving all 30 components
+and the previous fault-reset count of 11. These observations do not replace the
+outstanding acceptance matrix below.
 
 - Portable core and backend fakes pass ASan/UBSan; shared C/Python policy fixtures,
   real metered WAMR ABI and browser tests passed. An earlier selected regression
@@ -11,8 +20,8 @@ Feature target: `esp32_p4_component_network_candidate_v3`, default off elsewhere
 - Full Tauri development build passed with the actual Rust integration. Its
   `component_network` library test passed (1 test; 1697 unrelated tests filtered).
   This is not a complete desktop test-suite run or an installer release build.
-- R292 enabled candidate passes the original resource gates: application 3,005,408
-  bytes; OTA slot 3,145,728; headroom 140,320 (minimum 131,072); internal static
+- Latest-main R292 enabled candidate passes the original resource gates: application 3,005,168
+  bytes; OTA slot 3,145,728; headroom 140,560 (minimum 131,072); internal static
   278,712 bytes; external static 10,103,900 bytes. Partition layout is unchanged.
 - Candidate-only font row-plane compression reconstructs all 554,086 original
   bitmap bytes exactly (SHA256
