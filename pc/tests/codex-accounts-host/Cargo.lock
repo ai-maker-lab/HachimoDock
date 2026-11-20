@@ -385,6 +385,7 @@ dependencies = [
  "base64",
  "chrono",
  "libc",
+ "memchr",
  "reqwest",
  "serde",
  "serde_json",

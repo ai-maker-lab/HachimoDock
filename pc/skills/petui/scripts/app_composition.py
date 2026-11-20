@@ -8,7 +8,8 @@ ENGINE = 'pc-app-composition-v1'
 ENGINE_V2 = 'pc-app-composition-v2'
 ENGINE_V3 = 'pc-app-composition-v3'
 OPERATIONS = {'constant': set(), 'clock': set(), 'counter': {'increment', 'decrement', 'reset'},
-              'timer': {'start', 'pause', 'reset'}, 'json-get': {'refresh'}, 'local-telemetry': {'refresh','previous','next'},
+              'timer': {'start', 'pause', 'reset'}, 'json-get': {'refresh'}, 'local-telemetry': {
+                  'refresh','previous','next','page_up','page_down','quota','overview','detail','cycle_period','hour','today','day','week','month'},
               'ledger': {'append','remove_latest','previous','next'},'computed':set(),'document':{'set','append','remove'},
               'workflow': {'start', 'resume', 'cancel'},
               'collection': {'page_next','page_previous','up','down','clear_selection'} | {'row_'+str(i) for i in range(8)}}
@@ -105,7 +106,7 @@ def composition_errors(value, runtime):
         assert isinstance(variables, dict) and 1 <= len(variables) <= 8
         assert isinstance(value['content'], list) and len(value['content']) == 1
         plan = value['content'][0]
-        assert isinstance(plan, dict) and {'sources','bindings'}<=set(plan) and set(plan)<={'sources','bindings','workflows','asyncWorkflows'} and (v2 or 'workflows' not in plan) and (v3 or 'asyncWorkflows' not in plan)
+        assert isinstance(plan, dict) and {'sources','bindings'}<=set(plan) and set(plan)<={'sources','bindings','workflows','asyncWorkflows','display'} and (v2 or not {'workflows','display'} & set(plan)) and (v3 or 'asyncWorkflows' not in plan)
         sources, bindings = plan['sources'], plan['bindings']
         assert isinstance(sources, dict) and 1 <= len(sources) <= (8 if v2 else 4)
         assert not v2 or 'flow' not in sources
@@ -114,6 +115,21 @@ def composition_errors(value, runtime):
         assert isinstance(workflows,dict) and len(workflows)<=8
         dependencies={}
         assert isinstance(bindings, dict) and set(bindings) == writers['host']
+        if 'display' in plan:
+            projection = plan['display']
+            assert isinstance(projection, dict) and {'mode','values'} <= set(projection) <= {'mode','values','retainOnPending'}
+            assert type(projection.get('retainOnPending',False)) is bool
+            fields = {'eyebrow':95,'headline':159,'metricValue':63,'metricLabel':95,'metricUnit':31,'badge':15,'note':159,'footer':159}
+            assert isinstance(projection['values'], dict) and set(projection['values']) <= set(fields)
+            for field, binding in [('mode',projection['mode']), *projection['values'].items()]:
+                assert isinstance(binding, dict) and set(binding) == {'source','pointer','fallback'}
+                assert binding['source'] in sources and json_pointer(binding['pointer'])
+                fallback = binding['fallback']
+                if field == 'mode':
+                    assert type(fallback) is int and 0 <= fallback <= 7
+                else:
+                    assert isinstance(fallback, str) and len(fallback.encode()) <= fields[field]
+                    assert not any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in fallback)
         if 'collection_view' in runtime.get('surface',{}):
             from host_collection import config
             c=config(runtime['surface']['collection_view'],runtime['surface'],runtime)

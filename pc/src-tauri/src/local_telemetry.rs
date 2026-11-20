@@ -13,7 +13,7 @@ pub fn registered(source: &str) -> bool {
     source == "codex.accounts"
 }
 pub fn operations(_: &str) -> &'static [&'static str] {
-    &["refresh", "previous", "next"]
+    accounts::token_panel::OPERATIONS
 }
 fn directory(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())

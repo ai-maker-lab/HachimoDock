@@ -15,6 +15,10 @@ mod app_server;
 pub mod manager;
 #[path = "account_settings.rs"]
 pub mod settings;
+#[path = "token_history.rs"]
+mod token_history;
+#[path = "token_panel.rs"]
+pub mod token_panel;
 static AUTH_WRITE: Mutex<()> = Mutex::new(());
 
 pub fn root() -> Option<PathBuf> {
@@ -30,6 +34,7 @@ struct Identity {
     id: String,
     email: String,
     key: String,
+    user: Option<String>,
 }
 fn identity(home: &Path) -> Option<Identity> {
     if !directory(home) {
@@ -62,7 +67,11 @@ fn identity(home: &Path) -> Option<Identity> {
         "{:x}",
         Sha256::digest(serde_json::to_vec(&auth["tokens"]).ok()?)
     );
-    Some(Identity { id, email, key })
+    let user = claims["https://api.openai.com/auth"]["chatgpt_user_id"]
+        .as_str()
+        .filter(|id| !id.is_empty() && id.len() <= 128)
+        .map(str::to_owned);
+    Some(Identity { id, email, key, user })
 }
 struct Entry {
     attempt: Instant,
@@ -274,19 +283,30 @@ fn snapshot_with<F>(slot: u8, now: i64, refresh: bool, fetcher: F) -> Value
 where
     F: FnOnce(&Path, &str) -> Result<(Value, String), String> + Send + 'static,
 {
+    snapshot_with_owner(slot, now, refresh, fetcher).0
+}
+
+fn snapshot_with_owner<F>(slot: u8, now: i64, refresh: bool, fetcher: F) -> (Value, Option<token_history::Owner>)
+where
+    F: FnOnce(&Path, &str) -> Result<(Value, String), String> + Send + 'static,
+{
     #[cfg(windows)]
     {
         let _ = (slot, refresh);
-        return render(1, None, None, now);
+        return (render(1, None, None, now), None);
     }
     let slot = slot.clamp(1, settings::MAX_ACCOUNTS);
     let Some(root) = root() else {
-        return render(slot, None, None, now);
+        return (render(slot, None, None, now), None);
     };
     let home = root.join(slot.to_string());
     let Some(account) = identity(&home) else {
-        return render(slot, None, None, now);
+        return (render(slot, None, None, now), None);
     };
+    let owner = account.user.as_ref().map(|user| token_history::Owner {
+        account: account.id.clone(),
+        user: user.clone(),
+    });
     let key = cache_key(&home, &account);
     let mut entries = cache().lock().unwrap_or_else(|p| p.into_inner());
     if !entries.contains_key(&key) && entries.len() >= 8 {
@@ -298,7 +318,7 @@ where
         if let Some(old) = removable {
             entries.remove(&old);
         } else {
-            return render(slot, Some(&account), None, now);
+            return (render(slot, Some(&account), None, now), owner);
         }
     }
     let e = entries
@@ -340,10 +360,16 @@ where
             }
         });
     }
-    render(slot, Some(&account), Some(e), now)
+    (render(slot, Some(&account), Some(e), now), owner)
 }
 /// Display-only selection is shared by the PC manager and the device feed.
 pub fn managed_snapshot(slot: &mut u8, now: i64, operation: Option<&str>) -> Result<Value, String> {
+    managed_snapshot_with_owner(slot, now, operation).map(|(quota, _)| quota)
+}
+
+fn managed_snapshot_with_owner(
+    slot: &mut u8, now: i64, operation: Option<&str>,
+) -> Result<(Value, Option<token_history::Owner>), String> {
     let root = root().ok_or("账号目录不可用")?;
     let settings = settings::load(&root)?;
     let direction = match operation {
@@ -358,10 +384,10 @@ pub fn managed_snapshot(slot: &mut u8, now: i64, operation: Option<&str>) -> Res
         out["accountCount"] = 0.into();
         out["identity"] = "0/0 · 未登录".into();
         out["message"] = "没有勾选要显示的账号，请在 PC 组件详情中选择".into();
-        return Ok(out);
+        return Ok((out, None));
     };
     *slot = next;
-    let mut out = snapshot(next, now, operation == Some("refresh"));
+    let (mut out, owner) = snapshot_with_owner(next, now, operation == Some("refresh"), fetch);
     let index = shown.iter().position(|s| *s == next).unwrap() as u8 + 1;
     out["accountIndex"] = index.into();
     out["accountCount"] = (shown.len() as u8).into();
@@ -372,6 +398,35 @@ pub fn managed_snapshot(slot: &mut u8, now: i64, operation: Option<&str>) -> Res
         .map(|(_, v)| v)
         .unwrap_or("未登录");
     out["identity"] = format!("{index}/{} · {identity}", shown.len()).into();
+    Ok((out, owner))
+}
+
+pub fn panel_snapshot(
+    slot: &mut u8,
+    view: &mut token_panel::View,
+    now: i64,
+    operation: Option<&str>,
+    include_today: bool,
+) -> Result<Value, String> {
+    let (mut out, owner) = managed_snapshot_with_owner(slot, now, operation)?;
+    view.apply(operation, include_today);
+    let should_read = view.page() != 0 && out["accountIndex"] != 0;
+    let (usage, busy) = if should_read {
+        owner.map(|id| token_history::read(&id, now, operation == Some("refresh"))).unwrap_or_default()
+    } else {
+        (None, false)
+    };
+    let email = out["email"].as_str().filter(|email| *email != "未登录").unwrap_or("");
+    let identity = out["identity"].as_str().unwrap_or("");
+    let aligned_email = token_panel::aligned_text(email, 127);
+    let aligned_identity = token_panel::aligned_text(identity, 127);
+    let screen_email = token_panel::screen_text(email, 127);
+    let screen_identity = token_panel::screen_text(identity, 127);
+    out["alignedEmail"] = aligned_email.into();
+    out["alignedIdentity"] = aligned_identity.into();
+    out["screenEmail"] = screen_email.into();
+    out["screenIdentity"] = screen_identity.into();
+    out["panel"] = view.project(&out, usage.as_ref(), busy, now);
     Ok(out)
 }
 /// Read existing cache without starting network work or returning credentials.
@@ -453,11 +508,13 @@ mod tests {
             id: "first".into(),
             email: "one@example.com".into(),
             key: "a".into(),
+            user: None,
         };
         let second = Identity {
             id: "second".into(),
             email: "two@example.com".into(),
             key: "b".into(),
+            user: None,
         };
         let entry = |plan| Entry {
             attempt: Instant::now(),
@@ -495,6 +552,7 @@ mod tests {
             id: "ok".into(),
             email: "member@example.com".into(),
             key: "k".into(),
+            user: None,
         };
         for (raw, display) in [
             ("prolite", "Pro"),

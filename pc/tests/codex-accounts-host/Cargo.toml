@@ -8,6 +8,7 @@ path = "lib.rs"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+memchr = "2.8"
 sha2 = "0.10"
 chrono = "0.4"
 tempfile = "3.27.0"

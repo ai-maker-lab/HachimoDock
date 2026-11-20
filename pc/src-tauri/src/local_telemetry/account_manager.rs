@@ -586,16 +586,24 @@ mod tests {
         bytes
     }
     struct Env {
+        _exclusive: std::sync::MutexGuard<'static, ()>,
         previous: Option<std::ffi::OsString>,
         dir: tempfile::TempDir,
     }
     impl Env {
         fn new() -> Self {
+            // These fixtures both replace the process-wide accounts path and reset login state.
+            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let exclusive = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let dir = tempfile::tempdir().unwrap();
             let previous = std::env::var_os("HACHIMO_CODEX_ACCOUNTS_HOME");
             std::env::set_var("HACHIMO_CODEX_ACCOUNTS_HOME", dir.path());
             *login().lock().unwrap() = None;
-            Self { previous, dir }
+            Self {
+                _exclusive: exclusive,
+                previous,
+                dir,
+            }
         }
         fn root(&self) -> &Path {
             self.dir.path()

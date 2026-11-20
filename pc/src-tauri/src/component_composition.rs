@@ -24,10 +24,33 @@ pub fn is_engine(engine: &str) -> bool {
 struct Plan {
     sources: BTreeMap<String, Source>,
     bindings: BTreeMap<String, Binding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display: Option<Display>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     workflows: BTreeMap<String, Vec<Step>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     async_workflows: BTreeMap<String, Vec<AsyncStep>>,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Display {
+    mode: Binding,
+    values: BTreeMap<String, Binding>,
+    #[serde(default, rename = "retainOnPending", skip_serializing_if = "std::ops::Not::not")]
+    retain_on_pending: bool,
+}
+
+const DISPLAY_FIELDS: [(&str, usize); 8] = [
+    ("eyebrow", 95), ("headline", 159), ("metricValue", 63), ("metricLabel", 95),
+    ("metricUnit", 31), ("badge", 15), ("note", 159), ("footer", 159),
+];
+
+fn display_text(value: &Value, max: usize) -> bool {
+    value.as_str().is_some_and(|s| s.len() <= max && !s.chars().any(char::is_control))
+}
+
+fn display_mode(value: &Value) -> Option<i64> {
+    value.as_i64().filter(|&mode| (0..=7).contains(&mode))
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -163,7 +186,11 @@ struct Receipt {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 enum Model {
-    AccountView { slot: u8 },
+    AccountView {
+        slot: u8,
+        #[serde(default)]
+        view: crate::local_telemetry::accounts::token_panel::View,
+    },
     Counter {
         value: i32,
     },
@@ -435,6 +462,18 @@ pub fn validate(d: &Declaration, r: &Value) -> Result<(), String> {
                 vars.get(key).and_then(|v| v["type"].as_str()).unwrap_or(""),
             )
             || !within_limits(r, key, &b.fallback)
+        {
+            return Err(bad());
+        }
+    }
+    if let Some(display) = &p.display {
+        let valid = |binding: &Binding| p.sources.contains_key(&binding.source) && pointer(&binding.pointer);
+        if !v2 || !valid(&display.mode) || display_mode(&display.mode.fallback).is_none()
+            || display.values.iter().any(|(key, binding)| {
+                !DISPLAY_FIELDS.iter().any(|(field, bound)| {
+                    key == field && valid(binding) && display_text(&binding.fallback, *bound)
+                })
+            })
         {
             return Err(bad());
         }
@@ -1489,6 +1528,29 @@ fn load(path: &Path, maximum: usize) -> Result<Saved, String> {
         _ => Err("无法读取组合应用存档，原数据未覆盖".into()),
     }
 }
+fn codex_account_value(
+    alias: &str,
+    state: &mut Saved,
+    now: i64,
+    op: Option<&str>,
+    include_today: bool,
+) -> Result<Value, String> {
+    if !state.models.contains_key(alias) && state.models.len() >= 64 {
+        return Err("组合存档达到配额，既有数据未覆盖".into());
+    }
+    let model = state.models.entry(alias.into()).or_insert(Model::AccountView {
+        slot: 1,
+        view: Default::default(),
+    });
+    let Model::AccountView { slot, view } = model else {
+        return Err("组合服务配置与既有存档不兼容，未覆盖数据".into());
+    };
+    if !(1..=crate::local_telemetry::accounts::settings::MAX_ACCOUNTS).contains(slot) {
+        return Err("组合服务配置与既有存档不兼容，未覆盖数据".into());
+    }
+    crate::local_telemetry::accounts::panel_snapshot(slot, view, now, op, include_today)
+}
+
 fn source_value(
     alias: &str,
     source: &Source,
@@ -1536,11 +1598,8 @@ fn source_value(
             Ok(value.clone())
         }
         Source::LocalTelemetry { source } if source == "codex.accounts" => {
-            let model=s.models.entry(alias.into()).or_insert(Model::AccountView{slot:1});
-            let Model::AccountView{slot}=model else{return Err(bad());};
-            if !(1..=crate::local_telemetry::accounts::settings::MAX_ACCOUNTS).contains(slot){return Err(bad());}
-            crate::local_telemetry::accounts::managed_snapshot(slot,now,op)
-        },
+            codex_account_value(alias, s, now, op, false)
+        }
         Source::LocalTelemetry { source } => crate::local_telemetry::snapshot(source, now, op == Some("refresh")),
         Source::Constant { value } => Ok(value.clone()),
         Source::Clock {} => {
@@ -1704,6 +1763,7 @@ fn snapshot_sources(
     now: i64,
     selected: Option<(&str, &str)>,
     event: &Value,
+    today_source: Option<&str>,
 ) -> Result<(BTreeMap<String, Value>, BTreeMap<String, &'static str>), String> {
     let known = p.sources.keys().cloned().collect();
     let mut values = BTreeMap::new();
@@ -1727,16 +1787,28 @@ fn snapshot_sources(
                 &json!({"sources":values,"event":event}),
                 &known,
             )
+        } else if today_source == Some(alias.as_str()) {
+            codex_account_value(&alias, state, now, op, true)
         } else {
             source_value(&alias, source, state, now, op)
         };
         if matches!(source,Source::LocalTelemetry{source} if source=="codex.accounts") {
             if let Ok(snapshot)=&value {
-                // An email must identify the displayed quota. Do not send an
-                // unreadable new identity through an older package's glyph bank.
+                // Check the address glyphs the package will actually render.
+                // The new caption's Chinese status uses the built-in face.
                 if let Some(fonts)=runtime["surface"]["fonts"].as_array().filter(|v|!v.is_empty()) {
                     let chars:String=fonts.iter().filter_map(|font|font["chars"].as_str()).collect();
-                    if snapshot["identity"].as_str().is_some_and(|text|text.chars().any(|c|!chars.contains(c))) {
+                    let uses = |path| p.bindings.values()
+                        .chain(p.display.iter().flat_map(|display| display.values.values()))
+                        .any(|binding| binding.source == alias && binding.pointer == path);
+                    let checked_field = if uses("/alignedIdentity") {
+                        "alignedEmail"
+                    } else if uses("/screenIdentity") {
+                        "screenEmail"
+                    } else {
+                        "identity"
+                    };
+                    if snapshot[checked_field].as_str().is_some_and(|text|text.chars().any(|c|!chars.contains(c))) {
                         value=Err("当前额度看板无法显示此账号邮箱，请先更新文字资源".into());
                     }
                 }
@@ -1986,11 +2058,17 @@ fn request_with_dispatch(
             }
         }
     }
+    let today_source = d.actions.values().find_map(|target| {
+        let (alias, operation) = route(&p, target)?;
+        (operation == "today"
+            && matches!(p.sources.get(alias), Some(Source::LocalTelemetry { source }) if source == "codex.accounts"))
+            .then_some(alias)
+    });
     let mut trace = Vec::new();
     if let Some(("flow", flow)) = effective {
         let known = p.sources.keys().cloned().collect();
         for step in &p.workflows[flow] {
-            let (values, _) = snapshot_sources(id, &p, r, &mut state, now, None, &event)?;
+            let (values, _) = snapshot_sources(id, &p, r, &mut state, now, None, &event, today_source)?;
             let ctx = json!({"sources":values,"event":event});
             if let Some(condition) = &step.when {
                 let allowed = crate::component_expr::eval(condition, &ctx, &known)?
@@ -2038,6 +2116,7 @@ fn request_with_dispatch(
             *alias != "flow" && !matches!(p.sources.get(*alias), Some(Source::Workflow { .. }))
         }),
         &event,
+        today_source,
     )?;
     if let Some(id) = receipt_id.filter(|_| !duplicate) {
         state.receipts.push(Receipt {
@@ -2113,6 +2192,18 @@ fn request_with_dispatch(
     if !errors.is_empty() || status.values().any(|v| *v != "ready") {
         values["note"] = "部分数据等待更新或暂不可用；已有记录保留，未自动重置".into();
     }
+    let mut mode = 0;
+    if let Some(display) = &p.display {
+        let read = |binding: &Binding| sources.get(&binding.source).and_then(|s| s.pointer(&binding.pointer));
+        mode = read(&display.mode).and_then(display_mode)
+            .or_else(|| display_mode(&display.mode.fallback)).unwrap_or_default();
+        for (field, max) in DISPLAY_FIELDS {
+            if let Some(binding) = display.values.get(field) {
+                values[field] = read(binding).filter(|v| display_text(v, max))
+                    .unwrap_or(&binding.fallback).clone();
+            }
+        }
+    }
     let actions: Vec<_> = d
         .actions
         .iter()
@@ -2144,6 +2235,17 @@ fn request_with_dispatch(
                 if matches!(p.sources.get(alias),Some(Source::Collection{..})){
                     return status.get(alias)==Some(&"ready")&&sources.get(alias)
                         .is_some_and(|value|crate::component_collection::enabled(value,op));
+                }
+                let period_action = crate::local_telemetry::accounts::token_panel::PERIOD_ACTIONS.contains(&op);
+                if matches!(p.sources.get(alias), Some(Source::LocalTelemetry { source }) if source == "codex.accounts") {
+                    if mode < 2 && (op == "cycle_period" || period_action) {
+                        return false;
+                    }
+                    if period_action && today_source == Some(alias)
+                        && sources.get(alias).and_then(|source| source["panel"]["period"].as_str()) == Some(op)
+                    {
+                        return false;
+                    }
                 }
                 if alias == "flow" {
                     return p.workflows[op].iter().all(|s| {
@@ -2184,7 +2286,10 @@ fn request_with_dispatch(
         })
         .map(|(action, _)| action)
         .collect();
-    let mut response=json!({"enabled":true,"service":"composition","variables":variables,"values":values,"ui":{"mode":0,"actions":actions,"context":context(&state)},"permissions":permissions(d),"sources":status,"bindingErrors":errors,"workflowSteps":trace,"workflows":state.runs.iter().map(|(name, run)| (name.clone(),json!({"state":workflow_value(Some(run)),"steps":run.steps}))).collect::<BTreeMap<_,_>>(),"duplicate":duplicate});
+    let mut response=json!({"enabled":true,"service":"composition","variables":variables,"values":values,"ui":{"mode":mode,"actions":actions,"context":context(&state)},"permissions":permissions(d),"sources":status,"bindingErrors":errors,"workflowSteps":trace,"workflows":state.runs.iter().map(|(name, run)| (name.clone(),json!({"state":workflow_value(Some(run)),"steps":run.steps}))).collect::<BTreeMap<_,_>>(),"duplicate":duplicate});
+    if p.display.as_ref().is_some_and(|display| display.retain_on_pending) {
+        response["ui"]["retainFrame"] = Value::Bool(true);
+    }
     if let Some(collection)=r["surface"].get("collection_view"){
         let config=crate::app_host_collection::Config::parse(collection)?;
         if status.get(&config.source)==Some(&"ready") {
