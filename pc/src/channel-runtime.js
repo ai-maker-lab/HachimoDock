@@ -43,7 +43,7 @@ function safeWriteStorage(channels) {
 }
 
 function mapAgentToChannelType(agentId) {
-  return agentId === "codex" ? "jsonl-poller" : "local-agent";
+  return (agentId === "codex" || agentId === "antigravity") ? "jsonl-poller" : "local-agent";
 }
 
 function buildChannelSummary(agent) {

@@ -46,13 +46,14 @@ test("the fixed Agent order starts with WorkBuddy and ends with Devin", () => {
       "openclaw",
       "hermes",
       "devin",
+      "antigravity",
     ],
   );
   assert.deepEqual(
     FIXED_AGENT_OPTIONS.map((agent) => agent.label),
     [
       "WorkBuddy", "ChatGPT（Codex）", "DeepSeek Harness", "MiMo Desktop / MiMoCode",
-      "Claude", "OpenClaw", "Hermes Agent", "Devin",
+      "Claude", "OpenClaw", "Hermes Agent", "Devin", "Antigravity",
     ],
   );
   assert.equal(

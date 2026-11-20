@@ -70,7 +70,7 @@ HachimoDock（哈基米机）是一台与电脑协作的桌面小伙伴：让 AI
 
 设备用宠物动画和任务气泡显示思考、执行、等待、完成及错误状态。选择正在跟随的 Agent 或会话，就能在电脑之外保留一个简洁的工作状态窗口。
 
-当前适配 **ChatGPT（Codex）、Claude、OpenClaw、MiMo Desktop / MiMoCode、WorkBuddy 和 DeepSeek Harness**。不同适配器提供的状态和操作能力不同；状态跟随不代表支持所有应用的语音输入或对话切换。
+当前适配 **ChatGPT（Codex）、Claude、OpenClaw、MiMo Desktop / MiMoCode、WorkBuddy、DeepSeek Harness 和 Antigravity**。不同适配器提供的状态和操作能力不同；状态跟随不代表支持所有应用的语音输入或对话切换。
 
 跟随 WorkBuddy 或 DeepSeek Harness 时，可以在设备上看到当前会话标题和任务状态。无论通过 USB 还是 Wi-Fi 连接，任务气泡都使用 MiSans Medium，标题 32px、正文 24px。
 
@@ -85,7 +85,7 @@ HachimoDock（哈基米机）是一台与电脑协作的桌面小伙伴：让 AI
 
 实时对话还可以配合本机待办、电脑状态等工具使用。连接米家账号后，可控制账号授权且开放相应能力的设备与场景；目前使用中国大陆服务，具体支持范围见[智能家居说明](pc/docs/smart-home.md)。这些能力需要电脑客户端运行，并按功能连接相应服务。
 
-**语音草稿不会自动发送。** ChatGPT（Codex）、Claude、WorkBuddy 和 DeepSeek Harness 的桌面输入依赖系统辅助功能与可访问的输入框。WorkBuddy 和 DeepSeek 的目标对话需先在对应应用中打开，选择设备气泡不会自动切换它们的桌面对话。MiMoCode 的语音支持与平台相关，OpenClaw 使用自己的会话路由。目标不明确或输入框不可用时会停止操作，不会猜选历史会话或重复发送。
+**语音草稿不会自动发送。** ChatGPT（Codex）、Claude、WorkBuddy 和 DeepSeek Harness 的桌面输入依赖系统辅助功能与可访问的输入框。WorkBuddy 和 DeepSeek 的目标对话需先在对应应用中打开，选择设备气泡不会自动切换它们的桌面对话。MiMoCode 的语音支持与平台相关，OpenClaw 使用自己的会话路由。Antigravity 目前只跟随状态与气泡，不提供语音输入；它的 transcript 会随上下文裁剪被整体重写，监控器重新对齐后继续追尾。目标不明确或输入框不可用时会停止操作，不会猜选历史会话或重复发送。
 
 详见[客户端兼容说明](pc/README.md)、[WorkBuddy 使用说明](pc/docs/workbuddy.md)和[实时对话](pc/docs/realtime-chat.md)。确认语音发送也不等于批准 Agent 的工具权限请求。
 
