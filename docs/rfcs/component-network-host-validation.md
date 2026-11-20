@@ -74,4 +74,3 @@ persistence/removal and broader Wi-Fi/BLE/audio regressions still require device
 acceptance. Fake-backend tests cannot prove radio interoperability or storage
 durability. New profile credential storage uses ordinary NVS, not the existing
 hardware-backed private-feed credential service. No eFuse changes were performed.
-No PR has been uploaded yet.
