@@ -41,6 +41,7 @@ import DevinConfigurationButton from "./DevinConfigurationButton.jsx";
 
 const AGENT_ICONS = {
   "claude-code": Code,
+  "cursor-agent": Terminal,
   codex: Terminal,
   openclaw: Zap,
   mimocode: Braces,

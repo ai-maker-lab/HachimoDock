@@ -80,6 +80,12 @@ function isNewTurnStartSignal(payload) {
 function shouldPreserveTerminalState(payload, incomingState, previousState) {
   if (!TERMINAL_TURN_STATES.has(previousState)) return false;
   if (TERMINAL_TURN_STATES.has(incomingState)) return false;
+  // Cursor keeps calling tools after a tool failure. A later working event is
+  // the same turn, so the device must leave "执行失败" instead of waiting for
+  // the next user prompt.
+  if (normalizeLower(payload?.source) === "cursor-agent" && ACTIVE_TURN_STATES.has(incomingState)) {
+    return false;
+  }
   return !isNewTurnStartSignal(payload);
 }
 

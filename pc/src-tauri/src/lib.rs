@@ -4051,7 +4051,7 @@ const BRIDGE_LAUNCH_AGENT_LABEL: &str = "com.petmanager.status-bridge";
 const BRIDGE_WINDOWS_STARTUP_SCRIPT_NAME: &str = "Pet Manager Status Bridge.cmd";
 const USB_STATE_MAX_AGE_MS: u64 = 10 * 60 * 1000;
 const USB_BRIDGE_SCAN_MAX_FILES: usize = 64;
-const KNOWN_USB_STATE_SOURCES: [&str; 8] = [
+const KNOWN_USB_STATE_SOURCES: [&str; 9] = [
     "claude-code",
     "codex",
     "openclaw",
@@ -4060,6 +4060,7 @@ const KNOWN_USB_STATE_SOURCES: [&str; 8] = [
     "workbuddy",
     "devin",
     "hermes",
+    "cursor-agent",
 ];
 #[cfg(windows)]
 const CREATE_NO_WINDOW_FLAG: u32 = 0x08000000;
@@ -7892,6 +7893,87 @@ fn detect_dsh_with_home(home: Option<&Path>) -> DetectedAgent {
     }
 }
 
+fn classify_cursor_detection(
+    cli_path: Option<&str>,
+    has_config_dir: bool,
+    hooks_registered: bool,
+) -> (bool, bool, &'static str, String) {
+    if cli_path.is_none() && !has_config_dir {
+        return (
+            false,
+            false,
+            "not_found",
+            "当前没有发现 Cursor hooks.json 或可识别的本地配置。".to_string(),
+        );
+    }
+    if let Some(path) = cli_path {
+        return (
+            true,
+            true,
+            "ready",
+            format!("已检测到 Cursor Agent CLI: {path}"),
+        );
+    }
+    (
+        true,
+        false,
+        "needs_hook",
+        if hooks_registered {
+            "已检测到 Cursor hooks，设备指令还需要本机 agent CLI。".to_string()
+        } else {
+            "已检测到 Cursor 本地配置，但还没有注册状态 hook，也没有 agent CLI。".to_string()
+        },
+    )
+}
+
+fn find_cursor_cli(home: Option<&Path>) -> Option<String> {
+    if let Some(path) = find_agent_executable(
+        "cursor-agent",
+        home,
+        &[".local/bin/cursor-agent", ".cursor/bin/cursor-agent"],
+        "cursor-agent.exe",
+    ) {
+        return Some(path);
+    }
+    let home = home?;
+    for relative in [".local/bin/agent", ".local/bin/agent.exe", ".cursor/bin/agent"] {
+        let candidate = home.join(relative);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+fn detect_cursor() -> DetectedAgent {
+    let home = get_home_dir().ok();
+    let cursor_dir = home.as_ref().map(|path| path.join(".cursor"));
+    let has_config_dir = cursor_dir.as_ref().is_some_and(|path| path.is_dir());
+    let hooks_path = cursor_dir.as_ref().map(|path| path.join("hooks.json"));
+    let hooks_registered = hooks_path.as_ref().is_some_and(|path| {
+        fs::read_to_string(path).is_ok_and(|text| text.contains("cursor-hook.js"))
+    });
+    let cli = find_cursor_cli(home.as_deref());
+    let (detected, ready, status, detail) =
+        classify_cursor_detection(cli.as_deref(), has_config_dir, hooks_registered);
+    DetectedAgent {
+        id: "cursor-agent".to_string(),
+        label: "Cursor".to_string(),
+        detected,
+        ready,
+        status: status.to_string(),
+        detail,
+        command_path: cli.unwrap_or_default(),
+        config_path: hooks_path
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        activity_path: cursor_dir
+            .map(|path| path.join("projects").to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        can_sync_hook: has_config_dir,
+    }
+}
+
 fn detect_hermes() -> DetectedAgent {
     let path = std::env::var_os("HERMES_HOME").map(PathBuf::from)
         .or_else(|| get_home_dir().ok().map(|home| home.join(".hermes")))
@@ -7993,6 +8075,7 @@ fn detect_local_agents_inner(devin_cloud_enabled: bool) -> Result<AgentDiscovery
         detect_devin(devin_cloud_enabled),
         detect_hermes(),
         detect_antigravity(),
+        detect_cursor(),
     ];
 
     Ok(AgentDiscoveryResponse {
@@ -11213,7 +11296,7 @@ fn normalize_agent_id(value: &str) -> Option<String> {
         "devin" | "devin-desktop" | "devin desktop" => Some("devin".to_string()),
         "copilot" | "copilot-cli" => Some("copilot-cli".to_string()),
         "gemini" | "gemini-cli" => Some("gemini-cli".to_string()),
-        "cursor" => Some("cursor".to_string()),
+        "cursor" | "cursor-agent" | "cursor agent" => Some("cursor-agent".to_string()),
         _ => {
             if normalized.is_empty() {
                 None
@@ -11695,6 +11778,7 @@ fn score_usb_source(source: &str) -> i32 {
         "codex" => 30,
         "deepseek-harness" => 25,
         "claude-code" => 20,
+        "cursor-agent" => 18,
         "mimocode" => 15,
         "workbuddy" => 15,
         "openclaw" => 10,
@@ -11715,6 +11799,45 @@ fn should_replace_usb_source_state(
         }
         None => true,
     }
+}
+
+fn usb_state_is_live(state: &str) -> bool {
+    matches!(state, "working" | "tool_running" | "thinking" | "speaking")
+}
+
+fn usb_state_is_terminal(state: &str) -> bool {
+    matches!(state, "error" | "done" | "reply_complete")
+}
+
+/// A newer live turn follows the agent. An older failure must not stay on the
+/// device while another session of the same agent is still working.
+fn usb_snapshot_is_better(
+    best_state: &str,
+    best_state_score: i32,
+    best_ts_ms: u64,
+    best_source_score: i32,
+    candidate_state: &str,
+    candidate_state_score: i32,
+    candidate_ts_ms: u64,
+    candidate_source_score: i32,
+) -> bool {
+    if usb_state_is_live(candidate_state)
+        && usb_state_is_terminal(best_state)
+        && candidate_ts_ms >= best_ts_ms
+    {
+        return true;
+    }
+    if usb_state_is_terminal(candidate_state)
+        && usb_state_is_live(best_state)
+        && candidate_ts_ms <= best_ts_ms
+    {
+        return false;
+    }
+    candidate_state_score > best_state_score
+        || (candidate_state_score == best_state_score && candidate_ts_ms > best_ts_ms)
+        || (candidate_state_score == best_state_score
+            && candidate_ts_ms == best_ts_ms
+            && candidate_source_score > best_source_score)
 }
 
 fn usb_active_state_cache() -> &'static Mutex<Option<(String, serde_json::Value)>> {
@@ -11754,6 +11877,7 @@ fn usb_source_display_name(source: &str) -> String {
         "devin" | "devin-desktop" | "devin desktop" => "Devin".to_string(),
         "hermes" => "Hermes Agent".to_string(),
         "antigravity" => "Antigravity".to_string(),
+        "cursor" | "cursor-agent" | "cursor agent" => "Cursor".to_string(),
         other if !other.is_empty() => other.to_string(),
         _ => "桌宠".to_string(),
     }
@@ -11879,11 +12003,21 @@ fn pick_best_bridge_state(exclude_speaking:bool, allows:impl Fn(&str,&serde_json
         let current_state_score = score_usb_state(&state);
         let current_source_score = score_usb_source(&source);
 
-        let is_better = current_state_score > best_state_score
-            || (current_state_score == best_state_score && ts_ms > best_ts_ms)
-            || (current_state_score == best_state_score
-                && ts_ms == best_ts_ms
-                && current_source_score > best_source_score);
+        let best_state_name = best_payload
+            .as_ref()
+            .and_then(|value| value.get("state"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let is_better = usb_snapshot_is_better(
+            best_state_name,
+            best_state_score,
+            best_ts_ms,
+            best_source_score,
+            &state,
+            current_state_score,
+            ts_ms,
+            current_source_score,
+        );
         if is_better {
             best_source = source.clone();
             best_payload = Some(compact_usb_state_payload(&source, &payload));
@@ -12366,14 +12500,32 @@ fn start_usb_state_forwarder(usb_manager: usb_serial::UsbSerialManager) {
 
                     let current_state_score = score_usb_state(&state);
                     let current_source_score = score_usb_source(&source);
-                    let existing_source_score = best_payload_by_source
-                        .get(&source)
-                        .map(|(_, _, state_score, state_ts_ms)| (*state_score, *state_ts_ms));
-                    let replace_source_payload = should_replace_usb_source_state(
-                        existing_source_score,
-                        current_state_score,
-                        ts_ms,
+                    let existing_source = best_payload_by_source.get(&source).map(
+                        |(payload, _, state_score, state_ts_ms)| {
+                            (
+                                payload
+                                    .get("state")
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                *state_score,
+                                *state_ts_ms,
+                            )
+                        },
                     );
+                    let replace_source_payload = match existing_source {
+                        Some((best_state_name, state_score, state_ts_ms)) => usb_snapshot_is_better(
+                            &best_state_name,
+                            state_score,
+                            state_ts_ms,
+                            current_source_score,
+                            &state,
+                            current_state_score,
+                            ts_ms,
+                            current_source_score,
+                        ),
+                        None => true,
+                    };
                     if replace_source_payload {
                         best_payload_by_source.insert(
                             source.clone(),
@@ -12386,11 +12538,21 @@ fn start_usb_state_forwarder(usb_manager: usb_serial::UsbSerialManager) {
                         );
                     }
 
-                    let is_better = current_state_score > best_state_score
-                        || (current_state_score == best_state_score && ts_ms > best_ts_ms)
-                        || (current_state_score == best_state_score
-                            && ts_ms == best_ts_ms
-                            && current_source_score > best_source_score);
+                    let best_state_name = best_payload
+                        .as_ref()
+                        .and_then(|value| value.get("state"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    let is_better = usb_snapshot_is_better(
+                        best_state_name,
+                        best_state_score,
+                        best_ts_ms,
+                        best_source_score,
+                        &state,
+                        current_state_score,
+                        ts_ms,
+                        current_source_score,
+                    );
                     if is_better {
                         best_source = source.clone();
                         best_payload = Some(compact_payload);
@@ -13275,6 +13437,7 @@ fn selected_agent_to_channel_id(value: &str) -> String {
         "devin" => "devin".to_string(),
         "hermes" => "hermes".to_string(),
         "antigravity" => "antigravity".to_string(),
+        "cursor-agent" => "cursor-agent".to_string(),
         _ => DEFAULT_PET_CHANNEL_ID.to_string(),
     }
 }
@@ -13290,7 +13453,7 @@ fn normalize_pet_channel_id(value: String) -> String {
         "devin" | "devin-desktop" | "devin desktop" => "devin".to_string(),
         "hermes" => "hermes".to_string(),
         "antigravity" => "antigravity".to_string(),
-        "cursor" => "cursor".to_string(),
+        "cursor" | "cursor-agent" | "cursor agent" => "cursor-agent".to_string(),
         _ => DEFAULT_PET_CHANNEL_ID.to_string(),
     }
 }
@@ -15221,6 +15384,35 @@ mod tests {
     }
 
     #[test]
+    fn cursor_agent_uses_the_hook_id_and_cli_inject_path() {
+        assert_eq!(normalize_agent_id("Cursor").as_deref(), Some("cursor-agent"));
+        assert_eq!(normalize_agent_id("cursor-agent").as_deref(), Some("cursor-agent"));
+        assert_eq!(normalize_agent_id("Cursor Agent").as_deref(), Some("cursor-agent"));
+        assert_eq!(selected_agent_to_channel_id("cursor-agent"), "cursor-agent");
+        assert_eq!(normalize_pet_channel_id("cursor".into()), "cursor-agent");
+        assert_eq!(usb_source_display_name("cursor-agent"), "Cursor");
+        assert!(KNOWN_USB_STATE_SOURCES.contains(&"cursor-agent"));
+        assert!(!agent_uses_visible_composer("cursor-agent"));
+        let (detected, ready, status, detail) = classify_cursor_detection(None, false, false);
+        assert!(!detected);
+        assert!(!ready);
+        assert_eq!(status, "not_found");
+        assert!(detail.contains("hooks.json"));
+        let (detected, ready, status, detail) = classify_cursor_detection(Some("/usr/local/bin/cursor-agent"), true, true);
+        assert!(detected);
+        assert!(ready);
+        assert_eq!(status, "ready");
+        assert!(detail.contains("CLI"));
+        let (detected, ready, status, _) = classify_cursor_detection(None, true, true);
+        assert!(detected);
+        assert!(!ready);
+        assert_eq!(status, "needs_hook");
+        let detected = detect_cursor();
+        assert_eq!(detected.id, "cursor-agent");
+        assert_eq!(detected.label, "Cursor");
+    }
+
+    #[test]
     fn devin_channel_uses_current_visible_composer_and_cloud_source_identity() {
         assert_eq!(normalize_agent_id("Devin").as_deref(), Some("devin"));
         assert_eq!(normalize_agent_id("Devin Desktop").as_deref(), Some("devin"));
@@ -16375,6 +16567,9 @@ mod tests {
         assert!(should_replace_usb_source_state(Some((10, 100)), 10, 101));
         assert!(!should_replace_usb_source_state(Some((15, 100)), 10, 200));
         assert!(!should_replace_usb_source_state(Some((10, 100)), 10, 99));
+        assert!(usb_snapshot_is_better("error", 60, 100, 18, "working", 50, 200, 18));
+        assert!(!usb_snapshot_is_better("working", 50, 200, 18, "error", 60, 100, 18));
+        assert!(usb_snapshot_is_better("working", 50, 100, 18, "error", 60, 200, 18));
     }
 
     #[test]
@@ -16689,6 +16884,7 @@ mod tests {
             disabled,
             vec![
                 "codex".to_string(),
+                "cursor-agent".to_string(),
                 "deepseek-harness".to_string(),
                 "devin".to_string(),
                 "hermes".to_string(),

@@ -11,8 +11,10 @@
 //! install rather than executing arbitrary shell text. Import resolution accepts
 //! pet.json ids and relative `spritesheetPath` values instead of assuming the
 //! directory name always equals the public pet id.
-//! FFmpeg discovery prefers the packaged LGPL-only runtime and falls back to
-//! the desktop host PATH resolver/current-user Windows package-manager roots.
+//! FFmpeg discovery prefers the packaged LGPL-only runtime, then the
+//! `generated-runtime` binary prepared beside this crate for `tauri dev`,
+//! and falls back to the desktop host PATH resolver/current-user Windows
+//! package-manager roots.
 //! H.264 output is restricted to the operating system encoder
 //! (VideoToolbox/Media Foundation); GPL/nonfree external encoders are never
 //! selected by Pet Manager.
@@ -478,19 +480,26 @@ fn bundled_ffmpeg_candidates() -> Vec<PathBuf> {
         out.push(PathBuf::from(configured));
     }
 
-    let Ok(executable) = std::env::current_exe() else {
-        return out;
-    };
+    if let Ok(executable) = std::env::current_exe() {
+        #[cfg(target_os = "macos")]
+        if let Some(contents_dir) = executable.parent().and_then(Path::parent) {
+            out.push(contents_dir.join("Resources").join("tools").join("ffmpeg"));
+        }
 
-    #[cfg(target_os = "macos")]
-    if let Some(contents_dir) = executable.parent().and_then(Path::parent) {
-        out.push(contents_dir.join("Resources").join("tools").join("ffmpeg"));
+        #[cfg(windows)]
+        if let Some(install_dir) = executable.parent() {
+            out.push(install_dir.join("tools").join("ffmpeg.exe"));
+        }
     }
 
-    #[cfg(windows)]
-    if let Some(install_dir) = executable.parent() {
-        out.push(install_dir.join("tools").join("ffmpeg.exe"));
-    }
+    // `tauri dev` runs the bare target binary. The audited LGPL runtime is
+    // prepared next to this crate and is not copied into Contents/Resources.
+    let dev_name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+    out.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("generated-runtime")
+            .join(dev_name),
+    );
 
     out
 }
@@ -1106,6 +1115,17 @@ pub fn import_codex_pet(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn dev_build_looks_for_the_prepared_lgpl_ffmpeg() {
+        let expected = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("generated-runtime")
+            .join(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" });
+        assert!(bundled_ffmpeg_candidates().iter().any(|path| path == &expected));
+        if expected.is_file() {
+            assert!(platform_h264_encoder(&expected.to_string_lossy()).is_ok());
+        }
+    }
 
     #[test]
     fn platform_profiles_match_native_ffmpeg_option_types() {

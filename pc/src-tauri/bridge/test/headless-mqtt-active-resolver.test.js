@@ -139,6 +139,34 @@ test("Claude hook-only sessions keep their first inferred navigation title", () 
   assert.equal(session.displayTitle, "后续追问");
 });
 
+test("Cursor tool failure does not freeze later work in the same turn", () => {
+  const tracker = new SessionMetricsTracker();
+  const now = Date.now();
+  const base = {
+    source: "cursor-agent",
+    sessionId: "cursor-session",
+    sessionTitle: "Cursor · HachimoDock",
+  };
+  tracker.apply({
+    ...base,
+    event: "PostToolUseFailure",
+    state: "error",
+    display: { title: "Cursor · HachimoDock", content: "执行失败" },
+  }, now);
+  const resumed = tracker.apply({
+    ...base,
+    event: "PostToolUse",
+    state: "working",
+    display: { title: "Cursor · HachimoDock", content: "正在执行 Read" },
+  }, now + 10);
+
+  assert.equal(resumed.state, "working");
+  assert.equal(resumed.display.content, "正在执行 Read");
+  const [session] = tracker.sessionStatuses("cursor-agent", now + 10);
+  assert.equal(session.state, "working");
+  assert.equal(session.displayContent, "正在执行 Read");
+});
+
 test("Claude terminal state ignores delayed trailing lifecycle events until a new prompt", () => {
   const tracker = new SessionMetricsTracker();
   const now = Date.now();

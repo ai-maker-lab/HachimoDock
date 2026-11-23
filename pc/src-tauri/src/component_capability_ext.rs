@@ -423,22 +423,7 @@ fn run_media_process(command: &mut std::process::Command, limit: usize, timeout:
     result
 }
 fn bounded_ffmpeg_path() -> Option<String> {
-    if let Some(path) = std::env::var_os("PET_MANAGER_BUNDLED_FFMPEG") {
-        if Path::new(&path).is_file() { return Some(path.to_string_lossy().into_owned()); }
-    }
-    if let Ok(executable) = std::env::current_exe() {
-        #[cfg(target_os = "macos")]
-        if let Some(contents) = executable.parent().and_then(Path::parent) {
-            let path = contents.join("Resources/tools/ffmpeg");
-            if path.is_file() { return Some(path.to_string_lossy().into_owned()); }
-        }
-        #[cfg(windows)]
-        if let Some(dir) = executable.parent() {
-            let path = dir.join("tools/ffmpeg.exe");
-            if path.is_file() { return Some(path.to_string_lossy().into_owned()); }
-        }
-    }
-    crate::find_executable("ffmpeg", &[])
+    crate::codex_import::resolve_ffmpeg().ok().or_else(|| crate::find_executable("ffmpeg", &[]))
 }
 fn ffmpeg_wav_to_pcm(ffmpeg: &str, input: &Path) -> Result<Vec<i16>, String> {
     let mut command = crate::command_for_host(ffmpeg);

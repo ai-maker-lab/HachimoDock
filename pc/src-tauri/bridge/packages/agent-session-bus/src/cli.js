@@ -20,6 +20,7 @@ const {
   WorkBuddyAdapter,
   DevinAdapter,
   DshAdapter,
+  CursorAgentAdapter,
 } = require("./index");
 const { defaultLog, withScope } = require("./log");
 const { readBool } = require("./env");
@@ -43,6 +44,7 @@ async function main() {
   adapters.push(new WorkBuddyAdapter({ log: withScope(defaultLog, "workbuddy") }));
   adapters.push(new DevinAdapter({ log: withScope(defaultLog, "devin") }));
   adapters.push(new DshAdapter({ log: withScope(defaultLog, "dsh") }));
+  adapters.push(new CursorAgentAdapter({ log: withScope(defaultLog, "cursor-agent") }));
 
   const bus = createAgentSessionBus({ adapters, log: withScope(defaultLog, "bus") });
   const port = await bus.start();

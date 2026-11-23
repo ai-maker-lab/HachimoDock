@@ -16,10 +16,25 @@ const { once } = require("node:events");
 const { Readable } = require("node:stream");
 const { test } = require("node:test");
 
-const { startParentProcessWatchdog } = require(
+const { shouldPublishHookState, startParentProcessWatchdog } = require(
   "../packages/clawd-backend-service/src/headless-mqtt",
 );
 const { readManagedBootstrap } = require("../packages/agent-session-bus/src/local-capability");
+
+test("cursor hook state is published while claude hook sync is off", () => {
+  const config = {
+    http: { syncHooks: false },
+    mimocode: { enabled: false },
+    workbuddy: { enabled: false },
+  };
+  assert.equal(shouldPublishHookState(config, "cursor-agent"), true);
+  assert.equal(shouldPublishHookState(config, "cursor"), true);
+  assert.equal(shouldPublishHookState(config, "claude-code"), false);
+  assert.equal(shouldPublishHookState({
+    ...config,
+    http: { syncHooks: true },
+  }, "claude-code"), true);
+});
 
 test("managed bridge notices when its desktop parent no longer exists", async () => {
   const previous = process.env.PET_MANAGER_PARENT_PID;
