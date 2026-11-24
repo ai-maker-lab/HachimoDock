@@ -31,6 +31,7 @@ typedef enum {
   PET_LAN_PANEL_DISABLE_MICROPHONE = 10,
   PET_LAN_PANEL_TEXT_PIXELS = 11,
   PET_LAN_PANEL_BUBBLE_FONT = 12,
+  PET_LAN_PANEL_TEST_MESSAGE = 13,
 } pet_lan_panel_op_t;
 #include "pet_p4_font_delivery.h"
 cJSON *pet_p4_keyboard_config(const cJSON *request, const char *board);

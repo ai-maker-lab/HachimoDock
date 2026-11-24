@@ -5,6 +5,7 @@
  * [Sync] If this file changes, update `pc/src/shell/.folder.md`.
  */
 
+import {wifiComponentTarget} from "../lib/wifi-device-control.js";
 import {
   activeDesktopAssignment,
   appearanceById,
@@ -133,6 +134,9 @@ export function pairedWifiTarget(status) {
     wirelessRealtime: status.wirelessRealtime === true,
     wirelessVoiceInput: status.wirelessVoiceInput === true,
     componentDelivery: status.componentDelivery === true,
+    componentBundle: status.componentBundle === true,
+    componentTarget: wifiComponentTarget(status),
+    componentTargetError: status.componentTargetError || null,
     centerThumb: status.centerThumb === true && status.componentBundle === true,
     appearanceCapacity: Number.isSafeInteger(status.appearanceCapacity) && status.appearanceCapacity > 0
       ? status.appearanceCapacity : 0,
@@ -144,7 +148,8 @@ export function pairedWifiTarget(status) {
 
 export function pairedWifiTargetsEqual(left, right) {
   if (left === right) return true;
-  return Boolean(left && right && Object.entries(right).every(([key, value]) => left[key] === value));
+  return Boolean(left && right && Object.entries(right).every(([key, value]) =>
+    key === "componentTarget" ? JSON.stringify(left[key]) === JSON.stringify(value) : left[key] === value));
 }
 
 export function deriveDeviceReachability({ usb, wifi }) {

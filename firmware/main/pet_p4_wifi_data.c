@@ -86,7 +86,7 @@ bool pet_wifi_data_feed_init(pet_wifi_data_feed_t *out, const char *component_id
   if (!out || !component_id || !*component_id ||
       (connection ? (http || !pet_private_feed_parse(&feed.private, &feed.endpoint, component_id, url, connection))
                   : !pet_wifi_endpoint_parse(url, &feed.endpoint)) ||
-      ((pet_feed_is_write(feed.private.kind) || feed.private.kind == PET_GITHUB_ACCOUNT) && response_map) ||
+      (pet_feed_is_write(feed.private.kind) && response_map) ||
       !pet_wifi_feed_map_parse(response_map, &feed.response_map) ||
       !pet_wifi_feed_http_parse(http, &feed.http)) return false;
   char identity[sizeof(feed.source) + sizeof(feed.endpoint) + 6 +
@@ -289,8 +289,7 @@ static bool fetch_feed(feed_run_t *run, char *body, size_t *length, const char *
   reader.tls = pet_live_tls_connect_public(feed->endpoint.host, &config,
     (int64_t)reader.deadline, reader.current, reader.context);
   return read_response(&reader, feed->endpoint.host, feed->endpoint.path, body,
-    PET_WIFI_DATA_BODY_MAX, length, feed->private.kind == PET_GITHUB_ACCOUNT ? "application/vnd.github+json" :
-      pet_wifi_feed_media_types[feed->http.accept], etag, metadata, bearer);
+    PET_WIFI_DATA_BODY_MAX, length, pet_wifi_feed_media_types[feed->http.accept], etag, metadata, bearer);
 }
 
 static bool still_visible(source_t source) {
@@ -472,14 +471,9 @@ static void wifi_data_worker(void *unused) {
               feed_current, accept_mqtt_value, &run)) job->failures = 0;
           pet_p4_widget_data_clear_feed(feed.source);
         } else {
-          const bool bearer = feed.private.kind == PET_PRIVATE_BEARER || feed.private.kind == PET_GITHUB_ACCOUNT;
+          const bool bearer = feed.private.kind == PET_PRIVATE_BEARER;
           feed_response = fetch_feed(&run, body, &length, feed_etag[0] ? feed_etag : NULL,
             &metadata, bearer ? secret.token : NULL);
-#if PET_P4_SCOPED_WRITE
-          if (feed_response && length && feed.private.kind == PET_GITHUB_ACCOUNT)
-            snapshot = pet_wifi_github_account(feed.source, body, length, utc);
-          else
-#endif
           if (feed_response && length)
             snapshot = pet_wifi_feed_snapshot(feed.source, body, length, &feed.response_map);
           unchanged = feed_response && !length;

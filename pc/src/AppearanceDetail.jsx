@@ -2,7 +2,7 @@
  * [Input] An appearanceId persisted by `lib/appearance-store.js` plus centralized API-settings navigation.
  * [Output] Preview-first wide appearance workspace, unified sticky current-state inspector, full-width state rail, contextual details drawer,
  *          global WAV cue controls shared by every appearance, persisted video generation parameters and direct per-state MP4 replacement,
- *          Ark-background single-state image+prompt regeneration with read-only provider credential readiness, inline progress, cancellable exact-board USB appearance transfer, and full known-state rail.
+ *          Ark-background single-state image+prompt regeneration with read-only provider credential readiness, inline progress, cancellable exact-board USB/Wi-Fi appearance transfer, and full known-state rail.
  * [Pos] component node in pc/src
  * [Sync] If this file changes, update this header and `pc/src/.folder.md`.
  */
@@ -11,7 +11,6 @@ import { formatModelIssue } from "./lib/model-issue.js";
 import { normalizeGenerationErrorMessage } from "./lib/generation-issue.js";
 import { appearanceStateLabel } from "./lib/appearance-state-label.js";
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { setExitReason, useExitProtection } from "./lib/exit-protection.js";
 import {
   ArrowLeft,
@@ -30,6 +29,7 @@ import {
   readAppearanceSourceImage,
 } from "./lib/appearance-store.js";
 import { DeviceContext } from "./shell/DeviceContext.jsx";
+import { useAppearanceDelivery } from "./lib/use-appearance-delivery.js";
 import GlobalAudioCuesPanel from "./GlobalAudioCuesPanel.jsx";
 import AppearancePreview from "./AppearancePreview.jsx";
 import { mediaFromFamily, mediaFromSourceImage, mediaFromSourcePreview } from "./lib/appearance-preview.js";
@@ -129,6 +129,9 @@ function singleStateProgressFromPipeline(progress, fallbackFamily) {
 
 export default function AppearanceDetail({ appearanceId, boardDeviceId = "", wifiConnected = false, onBack, onOpenApiSettings }) {
   const device = useContext(DeviceContext);
+  const { available: canDeliver, send: sendAppearance, cancel: cancelAppearance } = useAppearanceDelivery(
+    device?.usb, device?.wifi, device?.binding?.boardDeviceId || boardDeviceId, appearanceId,
+  );
   const [record, setRecord] = useState(null);
   const [error, setError] = useState("");
   const [activeFamily, setActiveFamily] = useState("");
@@ -142,6 +145,7 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", wif
   const [singleStatePrompt, setSingleStatePrompt] = useState("");
   const [singleStateStatus, setSingleStateStatus] = useState("idle"); // idle | generating | success | error | syncing | synced | cancelled
   const singleSubmitting = useRef(false);
+  const deliveryPending = useRef(false);
   useExitProtection(singleStateStatus === "generating" ? "形象动作仍在生成" : singleStateStatus === "syncing" ? "形象资源仍在同步" : stateVideoState === "saving" ? "形象视频仍在保存" : "");
   const [singleStateMessage, setSingleStateMessage] = useState("");
   const [singleStateProgress, setSingleStateProgress] = useState(null);
@@ -546,7 +550,8 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", wif
       setSingleStateMessage("当前不是桌面客户端运行环境，无法替换到板端。");
       return;
     }
-    if (!boardDeviceId) return;
+    if (!canDeliver || deliveryPending.current) return;
+    deliveryPending.current = true;
 
     setSingleStateStatus("syncing");
     setSingleStateMessage("正在通过素材 OTA 通道替换到板端…");
@@ -554,15 +559,15 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", wif
     setStateVideoMessage("正在通过素材 OTA 通道替换到板端…");
     setSingleStateProgress(null);
     try {
-      const result = await invoke("usb_sync_appearance", {
-        appearanceId: record.id,
-        boardDeviceId,
-      });
-      if (!result?.ok) {
-        throw new Error(result?.error || "设备未确认素材替换");
+      const message = await sendAppearance();
+      if (message === null) {
+        setSingleStateStatus("idle");
+        setStateVideoState("idle");
+        setSingleStateMessage("");
+        setStateVideoMessage("");
+        return;
       }
       setSingleStateStatus("synced");
-      const message = `已替换到板端（${result.fileCount || 0} 个素材，${result.byteCount || 0} bytes）。`;
       setSingleStateMessage(message);
       setStateVideoState("success");
       setStateVideoMessage(message);
@@ -579,15 +584,16 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", wif
         cancelled ? "传输已中断；客户端素材仍已保存，可再次替换到板端。" : message,
       );
     } finally {
+      deliveryPending.current = false;
       setAppearanceCancelPending(false);
     }
-  }, [boardDeviceId, record, singleStateStatus]);
+  }, [canDeliver, record, sendAppearance, singleStateStatus]);
 
   const handleCancelAppearanceSync = useCallback(async () => {
     if (appearanceCancelPending) return;
     setAppearanceCancelPending(true);
     try {
-      const result = await invoke("usb_cancel_appearance_sync");
+      const result = await cancelAppearance();
       if (!result?.requested) {
         setAppearanceCancelPending(false);
       }
@@ -599,7 +605,7 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", wif
         setSingleStateMessage(`无法中断传输：${message}`);
       }
     }
-  }, [appearanceCancelPending, singleStateStatus]);
+  }, [appearanceCancelPending, cancelAppearance, singleStateStatus]);
 
   if (error) {
     return (
@@ -638,7 +644,7 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", wif
   const isBuiltin = record.type === "builtin";
   const stateVideoInputId = `state-video-${record.id}-${activeFamily || "none"}`;
   const singleStateBusy = singleStateStatus === "generating" || singleStateStatus === "syncing";
-  const usbAppearanceSyncing =
+  const appearanceSyncing =
     singleStateStatus === "syncing";
   const stateVideoBusy = stateVideoState === "saving";
   const canUploadStateVideo = Boolean(activeRecord) && !isBuiltin && !singleStateBusy && !stateVideoBusy;
@@ -669,14 +675,14 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", wif
           </p>
         </div>
         <div className="detail-page-header__actions">
-          {usbAppearanceSyncing ? (
+          {appearanceSyncing ? (
             <Button
               className="detail-audio-sync-btn"
               variant="danger"
               loading={appearanceCancelPending}
               loadingLabel="正在中断…"
               onClick={handleCancelAppearanceSync}
-              aria-label="中断 USB 形象传输"
+              aria-label="中断形象传输"
             >
               <X size={14} />
               中断传输
@@ -845,8 +851,8 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", wif
                       className="btn-primary"
                       type="button"
                       onClick={handleSyncSingleStateToDevice}
-                      disabled={singleStateBusy || !boardDeviceId}
-                      title={!boardDeviceId ? "替换板端素材需要 USB" : undefined}
+                      disabled={singleStateBusy || !canDeliver}
+                      title={!canDeliver ? "请连接 USB，或连接支持形象同步的受信 Wi-Fi 设备" : undefined}
                     >
                       {singleStateStatus === "syncing" ? <Loader size={14} className="spin" /> : <UploadCloud size={14} />}
                       替换到板端
@@ -892,8 +898,8 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", wif
                       className="btn-primary"
                       type="button"
                       onClick={handleSyncSingleStateToDevice}
-                      disabled={singleStateBusy || !boardDeviceId}
-                      title={!boardDeviceId ? "替换板端素材需要 USB" : undefined}
+                      disabled={singleStateBusy || !canDeliver}
+                      title={!canDeliver ? "请连接 USB，或连接支持形象同步的受信 Wi-Fi 设备" : undefined}
                     >
                       {singleStateStatus === "syncing" ? <Loader size={14} className="spin" /> : <UploadCloud size={14} />}
                       替换到板端
@@ -1098,7 +1104,7 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", wif
                   loading={appearanceCancelPending}
                   loadingLabel="正在中断…"
                   onClick={handleCancelAppearanceSync}
-                  aria-label="中断 USB 形象传输"
+                  aria-label="中断形象传输"
                 >
                   <X size={14} />
                   中断传输
@@ -1107,8 +1113,8 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", wif
                 <Button
                   variant="primary"
                   onClick={handleSyncSingleStateToDevice}
-                  disabled={!canSyncSingleState || singleStateBusy || !boardDeviceId}
-                  title={!boardDeviceId ? "替换板端素材需要 USB" : undefined}
+                  disabled={!canSyncSingleState || singleStateBusy || !canDeliver}
+                  title={!canDeliver ? "请连接 USB，或连接支持形象同步的受信 Wi-Fi 设备" : undefined}
                 >
                   <UploadCloud size={14} />
                   替换到板端

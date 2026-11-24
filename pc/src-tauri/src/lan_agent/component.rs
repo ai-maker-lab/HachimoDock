@@ -31,6 +31,7 @@ struct Package {
     preview: ComponentPreview,
     stage: tempfile::TempDir,
     version_hash: String,
+    requirements: crate::clawpkg::ComponentSyncRequirements,
     name: String,
     source: std::path::PathBuf,
 }
@@ -81,9 +82,38 @@ impl Package {
             preview: ComponentPreview { id, digest, version: manifest.version },
             stage,
             version_hash,
+            requirements: manifest.sync_requirements,
             name: manifest.name,
             source: path.to_owned(),
         })
+    }
+
+    fn files_for_device(&self, status: &super::LanDeviceStatus, bindings: &HashMap<String, String>,
+                        center_title: Option<&ComponentCenterTitle>) -> Result<Vec<(String, Vec<u8>)>, String> {
+        if !status.wifi_connected { return Err("无线设备已离线，请恢复 Wi-Fi 连接。".into()); }
+        if !status.control_trusted { return Err("无线设备尚未授权控制，请确认配对信任。".into()); }
+        if !status.component_delivery { return Err("当前固件不支持无线组件传输。".into()); }
+        if let Some(error) = &status.component_target_error { return Err(error.clone()); }
+        if self.requirements.requires_usb_capabilities() && !status.component_bundle {
+            return Err("当前固件不支持无线分段传输，请升级或使用 USB。".into());
+        }
+        let files = self.prepare(bindings, center_title.filter(|_| status.panel_control && status.component_bundle),
+            status.component_bundle && status.center_thumb, status.component_target.as_ref().map(|target| &target.capabilities))?;
+        if !status.input_double_press {
+            if let Some((_, bytes)) = files.iter().find(|(path, _)| path == "buttons.json") {
+                let buttons: Vec<serde_json::Value> = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+                if buttons.iter().any(|button| button["event"].as_str()
+                    .is_some_and(|event| event.ends_with(".double_press")))
+                {
+                    return Err("组件使用实体键双击，请先升级设备固件。".into());
+                }
+            }
+        }
+        let boot = &status.boot_id;
+        if boot.len() != 16 || !boot.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("无法确认目标设备的本次启动身份。".into());
+        }
+        Ok(files)
     }
 
     fn prepare(
@@ -91,21 +121,56 @@ impl Package {
         binding_overrides: &HashMap<String, String>,
         center_title: Option<&ComponentCenterTitle>,
         include_thumb: bool,
+        capabilities: Option<&serde_json::Value>,
     ) -> Result<Vec<(String, Vec<u8>)>, String> {
         // USB and Wi-Fi use the same native package compiler.
         let package = self.stage.path().join("package");
+        if self.requirements.requires_usb_capabilities() && capabilities.is_none() {
+            return Err("当前固件未通过受信 Wi-Fi 报告组件能力，请更新固件或连接 USB。".into());
+        }
+        if let Some(caps) = capabilities {
+            self.requirements.check_usb(caps)?;
+            if package.join("runtime/app.wasm").is_file() {
+                for field in ["widgetWasmMaxBytes", "widgetWasmMemoryPages"] {
+                    if caps[field].as_u64().unwrap_or(0) == 0 {
+                        return Err(format!("无线设备未报告有效的 {field}，请刷新能力或更新固件。"));
+                    }
+                }
+            }
+        }
         let mut files = crate::usb_serial::UsbSerialManager::prepare_widget_delivery(
             &self.preview.id,
             &package,
             binding_overrides,
             center_title,
-            None, // LAN negotiates its own capabilities before sending.
+            capabilities,
         )?;
-        if include_thumb { crate::usb_serial::center_thumb::append_source(&package,&self.source,&self.preview.id,&mut files)?; }
+        use crate::usb_serial::center_thumb;
+        if include_thumb {
+            if !files.iter().any(|(path, _)| path == center_thumb::PATH) {
+                center_thumb::append_source(&package, &self.source, &self.preview.id, &mut files)?;
+            }
+        } else {
+            files.retain(|(path, _)| path != center_thumb::PATH);
+        }
         files.retain(|(_, bytes)| !bytes.is_empty());
         files.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         if files.iter().any(|(path, _)| !valid_wire_path(path)) {
             return Err("组件含有设备安装器不支持的文件。".into());
+        }
+        if let Some(caps) = capabilities {
+            let total: usize = files.iter().map(|(_, bytes)| bytes.len()).sum();
+            // Early negotiated v2 peers used the fixed v2 wire limits. Honor
+            // every explicit limit, including zero or a malformed value.
+            for (field, needed) in [("widgetTransferMaxBytes", total), ("widgetTransferMaxFiles", files.len())] {
+                if caps.get(field).is_some_and(|limit| limit.as_u64().unwrap_or(0) < needed as u64) {
+                    return Err(format!("组件超出当前无线设备的 {field} 限制，需要 {needed}。"));
+                }
+            }
+            if caps.get("widgetTransferChunkBytes").is_some_and(|limit| limit.as_u64() != Some(CHUNK as u64)) {
+                return Err("设备声明的无线分块长度与当前传输协议不兼容。".into());
+            }
+
         }
         Ok(files)
     }
@@ -182,6 +247,15 @@ fn legacy_body(id: &str, boot: &str, files: &[(String, Vec<u8>)]) -> Result<Vec<
     Ok(body)
 }
 
+// Mode 9 sends and commits the entire package in one request.
+fn install_legacy(peer: &Peer, id: &str, body: &[u8]) -> Result<(), String> {
+    match exchange_response_with_timeout(peer, LEGACY_MODE, body, Some(1), Duration::from_secs(90)).as_deref() {
+        Ok([1]) => Ok(()),
+        Ok([0]) => Err(format!("设备拒绝旧版无线组件「{id}」的一次性安装请求，固件未返回具体原因。")),
+        _ => Err(format!("旧版无线组件「{id}」安装结果未确认。请查看设备组件列表，再决定是否重试。")),
+    }
+}
+
 fn offer(id: &str, files: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
     let (digest, size) = crate::usb_serial::widget_package_digest(files)?;
     let repair = files.first().is_some_and(|(p,_)|p==crate::usb_serial::center_thumb::MATCH);
@@ -215,6 +289,66 @@ fn record_nonce(direction: u8, sequence: u32) -> aead::Nonce {
     aead::Nonce::assume_unique_for_key(bytes)
 }
 
+#[derive(Clone, Copy)]
+enum CommitReply {
+    Legacy,
+    ReasonV1,
+}
+
+impl CommitReply {
+    fn for_target(target: Option<&super::ComponentTarget>) -> Self {
+        match target.and_then(|t| t.capabilities["widgetLanCommitReason"].as_str()) {
+            Some("commit-reason-v1") => Self::ReasonV1,
+            _ => Self::Legacy,
+        }
+    }
+
+    fn record(self) -> Vec<u8> {
+        match self {
+            Self::Legacy => vec![3],
+            Self::ReasonV1 => vec![3, 1],
+        }
+    }
+}
+
+// Only authenticated, opted-in final replies use these fixed wire values.
+fn commit_reason(status: u8) -> Option<&'static str> {
+    Some(match status {
+        16 => "组件存储正忙，提交尚未开始", // commit_storage_deferred
+        17 => "设备音频正忙，目录尚未提交", // commit_audio_busy
+        18 => "组件存储操作中断，目录尚未提交", // commit_storage_interrupted
+        19 => "设备组件目录需要恢复",
+        20 => "组件中心没有空闲槽位",
+        21 => "组件清单不完整或摘要不匹配",
+        22 => "图片或精灵资源与组件声明不符",
+        23 => "组件资源超过设备存储预算",
+        24 => "设备可用内存不足",
+        25 => "设备 WASM 校验器当前不可用或正忙",
+        26 => "WASM 首帧校验未通过",
+        27 => "设备写入或校验组件存储失败",
+        28 => "更新与已有存档结构不兼容",
+        _ => return None,
+    })
+}
+
+enum TransferStep<'a> {
+    Offer,
+    Chunk { path: &'a str, offset: usize, total: usize },
+    Commit(CommitReply),
+}
+
+impl std::fmt::Display for TransferStep<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Offer => f.write_str("申请"),
+            Self::Chunk { path, offset, total } => write!(
+                f, "写入 {path} 第 {} 块（字节偏移 {offset}，共 {total} 字节）", offset / CHUNK + 1
+            ),
+            Self::Commit(_) => f.write_str("最终提交"),
+        }
+    }
+}
+
 struct Link {
     stream: TcpStream,
     key: aead::LessSafeKey,
@@ -222,17 +356,21 @@ struct Link {
 }
 
 impl Link {
-    fn request(&mut self, mut record: Vec<u8>, committing: bool) -> Result<(), String> {
+    fn request(
+        &mut self, mut record: Vec<u8>, operation: &str, step: TransferStep<'_>,
+    ) -> Result<(), String> {
         if self.sequence >= MAX_RECORDS {
-            return Err("组件分块数量超出无线安装上限。".into());
+            return Err(format!("{operation}{step}未发送：分块数量超出上限。"));
         }
         let sequence = self.sequence;
         self.sequence += 1;
+        let committing = matches!(step, TransferStep::Commit(_));
         let uncertain = || {
             if committing {
-                "无线安装提交结果未确认，请查看设备组件列表。".to_owned()
+                // Component Center recognizes this phrase and checks the inventory before retry.
+                format!("{operation}：无线安装提交结果未确认，请查看设备组件列表。")
             } else {
-                "无线组件传输已中断，请检查连接。".to_owned()
+                format!("{operation}{step}已中断，未收到有效确认，请检查连接。")
             }
         };
         let mut length = (record.len() as u16).to_be_bytes();
@@ -269,7 +407,14 @@ impl Link {
             .map_err(|_| uncertain())?
         {
             [1] => Ok(()),
-            [0] => Err("设备拒绝组件安装。请检查空闲状态、槽位和组件资源。".into()),
+            // The authenticated status byte carries no device-side reason.
+            [0] => Err(format!("设备拒绝{operation}{step}，固件未返回具体原因。")),
+            [status] if matches!(step, TransferStep::Commit(CommitReply::ReasonV1)) => {
+                match commit_reason(*status) {
+                    Some(reason) => Err(format!("设备拒绝{operation}{step}：{reason}。")),
+                    None => Err(uncertain()),
+                }
+            }
             _ => Err(uncertain()),
         }
     }
@@ -294,7 +439,9 @@ pub(super) fn send_font(peer: &Peer, boot: &str, transfer: &str, bytes: &[u8],
             record.extend_from_slice(transfer.as_bytes());
             record.extend_from_slice(&(offset as u32).to_be_bytes());
             record.extend_from_slice(chunk);
-            link.request(record, false)?;
+            link.request(record, "无线字库传输", TransferStep::Chunk {
+                path: "字库", offset, total: bytes.len(),
+            })?;
             offset += chunk.len();
         }
     }
@@ -335,10 +482,11 @@ fn require_thumbnail_target(status: &super::LanDeviceStatus, board: &str, boot: 
 
 fn install_bundle(
     peer: &Peer,
-    boot: &str,
+    target: &[u8],
     id: &str,
     files: &[(String, Vec<u8>)],
     expected_installed_version: Option<&str>,
+    commit_reply: CommitReply,
     require_lan: impl Fn() -> Result<(), String>,
 ) -> Result<(), String> {
     let mut begin = offer(id, files)?;
@@ -349,21 +497,43 @@ fn install_bundle(
         begin[0] = 4;
         begin.extend_from_slice(version.as_bytes());
     }
+    let action = if expected_installed_version.is_some() {
+        "更新"
+    } else if begin[0] == 6 {
+        "封面修复"
+    } else {
+        "安装"
+    };
+    let operation = format!("无线组件「{id}」{action}");
+    stream_bundle(peer, MODE, target, files, begin, &operation, commit_reply, require_lan)
+}
+
+pub(super) fn repair_bundle(peer: &Peer,target: &[u8],id: &str,files: &[(String,Vec<u8>)],
+                            current: impl Fn() -> Result<(),String>) -> Result<(),String> {
+    let mut begin = offer(id,files)?;
+    if begin[0] != 1 { return Err("无线资源修复来源无效".into()); }
+    begin[0] = 7;
+    let operation = format!("无线组件「{id}」资源修复");
+    stream_bundle(peer, super::maintenance::MODE, target, files, begin, &operation, CommitReply::Legacy, current)
+}
+
+fn stream_bundle(peer: &Peer,mode: u8,target: &[u8],files: &[(String,Vec<u8>)],begin: Vec<u8>,
+                 operation: &str, commit_reply: CommitReply, require_lan: impl Fn() -> Result<(),String>) -> Result<(),String> {
     require_lan()?;
     let (stream, key, ack) = super::retry_uncommitted_offer(|| {
         require_lan()
             .map_err(|message| std::io::Error::new(std::io::ErrorKind::Interrupted, message))?;
-        exchange_connection(peer, MODE, boot.as_bytes(), Some(1), IO_TIMEOUT)
+        exchange_connection(peer, mode, target, Some(1), IO_TIMEOUT)
     })
     .map_err(|error| {
         if error.kind() == std::io::ErrorKind::Interrupted {
             error.to_string()
         } else {
-            "无法建立无线组件传输。".into()
+            format!("{operation}连接未建立：{error}。")
         }
     })?;
     if ack != [1] {
-        return Err("设备未接受当前启动身份或无线控制信任。".into());
+        return Err(format!("{operation}连接未获确认，请核对当前启动身份、Wi-Fi 关联和控制信任。"));
     }
     let mut link = Link {
         stream,
@@ -371,18 +541,20 @@ fn install_bundle(
         sequence: 0,
     };
     require_lan()?;
-    link.request(begin, false)?;
+    link.request(begin, operation, TransferStep::Offer)?;
     for (index, (path, data)) in files.iter().enumerate() {
         for (part, chunk) in data.chunks(CHUNK).enumerate() {
             require_lan()?;
+            let offset = part * CHUNK;
             link.request(
-                chunk_record(index as u8, path, part * CHUNK, data.len(), chunk),
-                false,
+                chunk_record(index as u8, path, offset, data.len(), chunk),
+                operation,
+                TransferStep::Chunk { path, offset, total: data.len() },
             )?;
         }
     }
     require_lan()?;
-    link.request(vec![3], true)
+    link.request(commit_reply.record(), operation, TransferStep::Commit(commit_reply))
 }
 
 #[tauri::command]
@@ -405,13 +577,27 @@ pub(crate) async fn repair_component_thumbnail(
                 let (peer,status)=read_with_recovery(query_status,"设备不可达，封面未发送")?;
                 require_thumbnail_target(&status, &expected_board_device_id, &boot)?;
                 let pairing = ComponentPairing::for_peer(&peer)?;
-                install_bundle(&peer, &boot, &id, &files, None, || {
+                install_bundle(&peer, boot.as_bytes(), &id, &files, None, CommitReply::Legacy, || {
                     require_lan()?;
                     pairing.current(super::component_events::pairing_revision())
                 })
             }
         }
     }).await.map_err(|_|"封面传输结果待核对".to_string())?
+}
+
+/// Project authoring can preflight the same package and authenticated target without writing to the device.
+pub(crate) fn check_petui_delivery(path: &Path) -> Result<Option<()>, String> {
+    let Some(peer) = super::read_peer()? else { return Ok(None); };
+    let (_, status) = super::read_peer_with_recovery(peer, super::query_component_status, "无线设备当前不可达。")?;
+    let package = Package::read(path)?;
+    let files = package.files_for_device(&status, &HashMap::new(), None)?;
+    if status.component_bundle {
+        offer(&package.preview.id, &files)?;
+    } else {
+        legacy_body(&package.preview.id, &status.boot_id, &files)?;
+    }
+    Ok(Some(()))
 }
 
 #[tauri::command]
@@ -428,6 +614,7 @@ pub(crate) async fn lan_component_install(
     digest: String,
     expected_board_device_id: String,
     expected_boot_id: String,
+    expected_association: Option<u32>,
     expected_installed_version: Option<String>,
     expected_version_hash: Option<String>,
     binding_overrides: Option<HashMap<String, String>>,
@@ -444,7 +631,7 @@ pub(crate) async fn lan_component_install(
         {
             return Err("组件内容在预览后变化，请重新选择文件。".into());
         }
-        let (peer, status) = read_with_recovery(query_status, "设备当前不可达，安装请求未发送。")?;
+        let (peer, status) = read_with_recovery(super::query_component_status, "设备当前不可达，安装请求未发送。")?;
         let pairing = ComponentPairing::for_peer(&peer)?;
         let require_lan = || {
             super::require_no_usb(&usb)?;
@@ -453,48 +640,28 @@ pub(crate) async fn lan_component_install(
         if status.board_device_id != expected_board_device_id || status.boot_id != expected_boot_id {
             return Err("设备身份已变化，请重新确认组件同步目标。".into());
         }
-        let center_title = center_title.as_ref().filter(|_| status.panel_control && status.component_bundle);
-        let files = package.prepare(&binding_overrides.unwrap_or_default(), center_title,status.component_bundle && status.center_thumb)?;
-        if !status.input_double_press {
-            if let Some((_, bytes)) = files.iter().find(|(path, _)| path == "buttons.json") {
-                let buttons: Vec<serde_json::Value> = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-                if buttons.iter().any(|button| button["event"].as_str()
-                    .is_some_and(|event| event.ends_with(".double_press")))
-                {
-                    return Err("组件使用实体键双击，请先升级设备固件。".into());
-                }
-            }
+        if let Some(error) = &status.component_target_error { return Err(error.clone()); }
+        let snapshot = status.component_target.as_ref();
+        if snapshot.map(|target| target.association) != expected_association {
+            return Err("Wi-Fi 网络连接已变化，请重新选择设备。".into());
         }
+        let files = package.files_for_device(&status, &binding_overrides.unwrap_or_default(), center_title.as_ref())?;
         let boot = &status.boot_id;
-        if !status.component_delivery || !status.wifi_connected || !status.control_trusted {
-            return Err("无线安装需要通过 USB 授权当前已配对的设备。".into());
-        }
-        if boot.len() != 16 || !boot.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err("无法确认目标设备的本次启动身份。".into());
-        }
         let result = serde_json::json!({"ok": true, "manifest": {"name": package.name}});
         if expected_installed_version.is_some() && (!status.component_bundle || !status.panel_control) {
             return Err("当前固件未开放 Wi-Fi 组件更新。".into());
         }
         if status.component_bundle {
-            install_bundle(&peer, boot, &id, &files, expected_installed_version.as_deref(), require_lan)?;
+            let mut target = boot.as_bytes().to_vec();
+            if let Some(s) = snapshot { target.extend_from_slice(&s.association.to_be_bytes()); }
+            install_bundle(&peer, &target, &id, &files, expected_installed_version.as_deref(),
+                CommitReply::for_target(snapshot), require_lan)?;
             return Ok(result);
         }
         let body = legacy_body(&id, boot, &files)?;
         require_lan()?;
-        match exchange_response_with_timeout(
-            &peer,
-            LEGACY_MODE,
-            &body,
-            Some(1),
-            Duration::from_secs(90),
-        )
-        .as_deref()
-        {
-            Ok([1]) => Ok(result),
-            Ok([0]) => Err("设备拒绝旧版无线组件安装。".into()),
-            _ => Err("安装结果未确认。请查看设备组件列表，再决定是否重试。".into()),
-        }
+        install_legacy(&peer, &id, &body)?;
+        Ok(result)
     })
     .await
     .map_err(|_| "无线安装任务未完成，请查看设备组件列表。")?
@@ -522,11 +689,8 @@ mod tests {
         let path = std::env::var_os("HACHIMO_LAN_HIL_PACKAGE")
             .expect("set HACHIMO_LAN_HIL_PACKAGE to the exact .hachiapp file to install");
         let package = Package::read(Path::new(&path)).expect("validate the selected archive");
-        let files = package
-            .prepare(&HashMap::new(), None, false)
-            .expect("prepare device payload via USB's package compiler");
         let (peer, status) =
-            read_with_recovery(query_status, "authenticate live status over Wi-Fi")
+            read_with_recovery(crate::lan_agent::query_component_status, "authenticate live status over Wi-Fi")
                 .expect("desktop must already be paired and USB-trusted");
         assert!(
             status.board_device_id == approved_board,
@@ -541,6 +705,10 @@ mod tests {
             "target must supply a valid boot ID"
         );
 
+        let snapshot = status.component_target.as_ref().expect("association-bound capability report");
+        let files = package.prepare(&HashMap::new(), None, false, Some(&snapshot.capabilities)).unwrap();
+        let mut target = status.boot_id.as_bytes().to_vec();
+        target.extend_from_slice(&snapshot.association.to_be_bytes());
         let total_bytes: usize = files.iter().map(|(_, bytes)| bytes.len()).sum();
         eprintln!(
             "Installing {} via mode 14: {} device files, {} bytes",
@@ -553,7 +721,7 @@ mod tests {
         }
         // The explicitly selected HIL test exercises LAN, independent of the
         // desktop command's transport selection.
-        install_bundle(&peer, &status.boot_id, &package.preview.id, &files, None, || {
+        install_bundle(&peer, &target, &package.preview.id, &files, None, CommitReply::for_target(Some(snapshot)), || {
             Ok(())
         })
         .expect("mode 14 must return an authenticated commit success");
@@ -585,8 +753,8 @@ mod tests {
         use crate::usb_serial::center_thumb;
         let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../builtin-clawpkgs/block-combo");
         let pkg=Package::read(&root).unwrap();
-        let normal=pkg.prepare(&HashMap::new(),None,true).unwrap();
-        let old=pkg.prepare(&HashMap::new(),None,false).unwrap();
+        let normal=pkg.prepare(&HashMap::new(),None,true,None).unwrap();
+        let old=pkg.prepare(&HashMap::new(),None,false,None).unwrap();
         assert!(!old.iter().any(|(p,_)|p==center_thumb::PATH));
         assert!(valid_wire_path(center_thumb::PATH));
         let backfill=center_thumb::repair_files(&pkg.stage.path().join("package"),&pkg.source,&pkg.preview.id).unwrap();
@@ -745,7 +913,7 @@ mod tests {
                 Ok(())
             }
         };
-        let failure = install_bundle(&peer, boot, "demo", &files, None, require_lan).unwrap_err();
+        let failure = install_bundle(&peer, boot.as_bytes(), "demo", &files, None, CommitReply::Legacy, require_lan).unwrap_err();
         if usb_connects {
             assert_eq!(failure, "USB connected");
         } else {

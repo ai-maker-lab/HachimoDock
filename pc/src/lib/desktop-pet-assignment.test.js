@@ -207,6 +207,7 @@ test("named storage preparation follows confirmation without inventing byte prog
     listen: async (_event, callback) => {
       callback({ payload: { stage: "preparing_storage" } });
       callback({ payload: { stage: "unknown_future_stage" } });
+      callback({ payload: { currentFile: 0, totalFiles: 4, bytesSent: 0, bytesTotal: 2048 } });
       return () => {};
     },
   });

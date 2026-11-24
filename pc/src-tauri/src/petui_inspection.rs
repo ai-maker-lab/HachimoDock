@@ -19,7 +19,7 @@ fn compatibility(entry: &Entry, runtime: &Value, diagnostics: Option<&Value>) ->
     let app = entry.pc_application.as_ref();
     let private_account = matches!(
         data["connection"]["type"].as_str(),
-        Some("bearer" | "mqtt" | "github-account" | "https-submit" | "mqtt-publish")
+        Some("bearer" | "mqtt" | "https-submit" | "mqtt-publish")
     );
     let profile = super::features::manifest(&entry.id, runtime, app, entry.pc_extension.is_some());
     let feature_status = super::features::evaluate(&profile, diagnostics);

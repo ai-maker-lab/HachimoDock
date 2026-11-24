@@ -156,7 +156,10 @@ static void exercise_scoped_writes(void) {
   assert(pet_private_secret_read(&attendance, &secret) == PET_PRIVATE_ABSENT);
   assert(pet_private_secret_read(&active, &secret) == PET_PRIVATE_SET);
   assert(!pet_private_secret_schedule_at(&attendance, &bearer, false, old_epoch));
-  activate("github-card", "https://api.github.com/user", "{\"type\":\"github-account\"}");
+  cJSON *retired = cJSON_Parse("{\"type\":\"github-account\"}");
+  assert(!pet_private_feed_parse(&active, &address, "github-card", "https://api.github.com/user", retired));
+  cJSON_Delete(retired);
+  activate("private-feed", "https://api.example.org/list", "{\"type\":\"bearer\"}");
   assert(!pet_device_write_start(&active));
   assert(pet_private_secret_schedule(&active, &bearer, false));
   assert(pet_private_secret_read(&active, &secret) == PET_PRIVATE_SET);

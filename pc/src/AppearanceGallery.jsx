@@ -494,7 +494,10 @@ export default function AppearanceGallery({ binding, onEnterWizard, onOpenDetail
           {historyError && <p role="alert">{historyError}</p>}
           {generationHistory.map(row => <div key={row.key} className="inline-row">
             <span>{row.appearanceName || "未命名形象"} · {row.createdAt ? new Date(row.createdAt).toLocaleString("zh-CN", { dateStyle: "medium", timeStyle: "short" }) : "时间未知"} · {row.label} · 已保存 {row.completed}/{row.total} 段 · {String(row.id || row.key).slice(0, 8)}</span>
-            {!row.finished && !row.dismissed && <button type="button" disabled={task?.status === "running"}
+            {row.manualNotice && <span className="muted small">{row.manualNotice}</span>}
+            {!row.dismissed && !row.finished && <RedrawFramesButton job={row} recordKey={row.key} disabled={task?.status === "running"} onError={setHistoryError}/>}
+            {row.manualNotice && row.appearanceId && <button type="button" onClick={() => onOpenDetail?.(row.appearanceId)}>查看形象</button>}
+            {!row.finished && !row.dismissed && !row.manualNotice && <button type="button" disabled={task?.status === "running"}
               onClick={() => { setHistoryError(""); void resumeGenerationTask(row.key).catch(error => setHistoryError(error.message)); }}>恢复此任务</button>}
           </div>)}
         </details>
@@ -1339,6 +1342,16 @@ function CommunityImportModal({ importingId, importError, onClose, onImport }) {
   );
 }
 
+function RedrawFramesButton({ job, recordKey = "current", disabled = false, onError }) {
+  const count = job?.rejectedFrames?.length;
+  if (!count) return null;
+  return <button type="button" className="btn-secondary btn-sm" disabled={disabled} onClick={() => {
+    if (!window.confirm(`重新生成 ${count} 个未通过的首帧？每个动作重画一次，通过检查后继续生成视频。图片、检查和视频按服务商计费。`)) return;
+    onError("");
+    void resumeGenerationTask(recordKey, { regenerateRejected: true, expectedId: job.sessionId }).catch(error => onError(error.message));
+  }}>重做 {count} 个未通过的首帧</button>;
+}
+
 /**
  * Live progress card for the background generation task. Reads from the global
  * generation-task subscription (handed in via props from the gallery), shows
@@ -1410,13 +1423,14 @@ export function RunningTaskCard({ task, onAbort, onDismiss, onOpenDetail, onConf
             <button className="btn-primary" onClick={onConfirm}>
               {task.awaiting.kind === "reference" ? "参考图正确，生成一段试片" : "试片满意，生成剩余动作"}
             </button>
-            <span className="muted small">不满意可取消；不会自动继续付费生成。</span>
+            <span className="muted small">点击确认后将提交新的生成请求，可能产生费用。取消可保留已有结果。</span>
           </div>
         )}
         {!isRunning && task.resumable && <button className="btn-primary btn-sm" onClick={() => {
           setResumeError(""); void resumeGenerationTask().catch(error => setResumeError(error.message));
         }}>恢复已有任务</button>}
         {!isRunning && task.resumable && <span className="muted small">复用已有成果；必要时补做检查或提示词，再继续未提交动作，会产生相应费用，不重做已有视频。</span>}
+        {!isRunning && task.resumable && <RedrawFramesButton job={progress} onError={setResumeError}/>}
         {resumeError && <span role="alert">{resumeError}</span>}
         {!isRunning && task.resumable && <button className="btn-ghost btn-sm" onClick={() => {
           if (window.confirm("放弃继续此任务？已保存的形象保留；云端已提交任务不会取消，也不会自动重新生成。")) {

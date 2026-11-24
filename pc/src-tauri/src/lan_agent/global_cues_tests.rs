@@ -256,6 +256,7 @@ fn run(scenario: Scenario) {
         (listener, phases, received, max_chunk)
     });
     let transfer = Transfer {
+        pairing: crate::lan_agent::component_events::pairing_revision(),
         peer: &peer,
         board: BOARD,
         boot: BOOT,
@@ -263,7 +264,7 @@ fn run(scenario: Scenario) {
         id: "fixture".into(),
         usb: &usb,
     };
-    let result = transfer.global_cues(&dir, crate::lan_agent::component_events::pairing_revision());
+    let result = transfer.global_cues(&dir);
     usb.finish_appearance_sync();
     let (listener, phases, received, max_chunk) = worker.join().unwrap();
     crate::lan_agent::confirmation_tests::assert_no_replay(listener);

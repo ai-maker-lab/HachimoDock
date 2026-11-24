@@ -61,6 +61,14 @@ static pet_wifi_profiles_t saved, pending_profiles;
 static pet_wifi_ap_t legacy_network;
 static bool profiles_on_flash, storage_read_failed;
 static uint8_t connected_security;
+// A boot-local identifier for an association whose SSID and security matched
+// the requested station. Never expose the network name in LAN status.
+static atomic_uint association_revision = 1, verified_association;
+
+uint32_t pet_device_wifi_association(void) {
+  uint32_t current = atomic_load(&association_revision);
+  return pet_device_wifi_online() && current == atomic_load(&verified_association) ? current : 0;
+}
 
 static void clear_memory(void *memory, size_t size) {
   volatile unsigned char *p = memory;
@@ -270,10 +278,12 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     xEventGroupSetBits(events, WIFI_GOT_IP);
   }
   if (base == IP_EVENT && id == IP_EVENT_STA_LOST_IP) {
+    atomic_fetch_add(&association_revision, 1);
     xEventGroupClearBits(events, WIFI_GOT_IP);
     xEventGroupSetBits(events, WIFI_LOST_IP);
   }
   if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+    atomic_fetch_add(&association_revision, 1);
     const wifi_event_sta_disconnected_t *disconnected = data;
     if (disconnected) {
       portENTER_CRITICAL(&link_lock);
@@ -285,6 +295,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     xEventGroupSetBits(events, WIFI_DISCONNECTED);
   }
   if (base == ESP_HOSTED_EVENT && id == ESP_HOSTED_EVENT_TRANSPORT_FAILURE) {
+    atomic_fetch_add(&association_revision, 1);
     atomic_fetch_add(&transport_failures, 1);
     xEventGroupSetBits(events, WIFI_TRANSPORT_FAILURE);
   }
@@ -451,6 +462,7 @@ static bool wait_for_station_address(const pet_wifi_station_t *station, bool int
     }
     if (!(bits & WIFI_GOT_IP)) continue;
 
+    const uint32_t revision = atomic_load(&association_revision);
     wifi_ap_record_t ap;
     result = esp_wifi_sta_get_ap_info(&ap);
     if (result != ESP_OK) {
@@ -467,6 +479,7 @@ static bool wait_for_station_address(const pet_wifi_station_t *station, bool int
     portENTER_CRITICAL(&link_lock);
     link_status.connected_channel = ap.primary;
     portEXIT_CRITICAL(&link_lock);
+    atomic_store(&verified_association, revision);
     connected_security = station->security;
     memcpy(view.connected, station->ssid, sizeof(view.connected));
     note_join(PET_WIFI_JOIN_OK, 0, interactive);
@@ -478,6 +491,7 @@ static bool wait_for_station_address(const pet_wifi_station_t *station, bool int
 
 static bool connect_station(const pet_wifi_station_t *station, const pet_wifi_ap_t *ap_hint,
                             bool interactive, bool legacy) {
+  atomic_fetch_add(&association_revision, 1);
   xEventGroupClearBits(events, WIFI_GOT_IP | WIFI_DISCONNECTED | WIFI_LOST_IP);
   if (esp_wifi_disconnect() == ESP_OK)
     (void)xEventGroupWaitBits(events, WIFI_DISCONNECTED, pdTRUE, pdFALSE, pdMS_TO_TICKS(800));

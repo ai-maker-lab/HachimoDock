@@ -23,7 +23,9 @@ description: Generate, validate, and publish ESP32-P4 desktop-pet games, tools, 
 - 电脑数据、桌面操作、受控 Python 以及需要 PC 处理的外部服务走 PC 提供器。分别标明数据生产端、推送链路和动作链路，按[四板自治验收](references/authoring-inspection.md#四板自治验收)记录实机结果。
 - 公开 HTTPS、带 Bearer Token 的 HTTPS JSON 和只读 MQTT TLS 使用设备 Wi-Fi 数据宿主。私有数据源需协商 `widgetPrivateFeed=p4-private-feed-v1`，组件内提示连接服务账号。匿名 MQTT 声明 `connection.type="mqtt-public"`，须协商 `widgetPublicMqtt=p4-public-mqtt-v1`，打开即订阅。参见 [设备联网约定](references/wifi-data.md#设备私有数据源)。
 
-- WiFi6 的组件可声明一次 HTTPS 提交或 MQTT 发布，要求 `widgetScopedWrite=p4-scoped-write-v1`。设备 GitHub 账号卡要求 `widgetDeviceProvider=github-account-v1`。目标板须具备安全凭证存储。写入按钮、授权范围和验收方法见[组件限域发送](references/wifi-data.md#组件限域发送)。
+- WiFi6 的组件可声明一次 HTTPS 提交或 MQTT 发布，要求 `widgetScopedWrite=p4-scoped-write-v1`。目标板须具备安全凭证存储。写入按钮、授权范围和验收方法见[组件限域发送](references/wifi-data.md#组件限域发送)。
+
+需要由 WASM 直接发起异步 HTTPS 请求或 MQTT TLS 操作时，按[组件联网 ABI](references/component-network.md)声明目标和权限。安装前核对设备握手；用户的长期凭据由受信宿主配置，组件只能查询是否存在、按绑定目标引用或删除。
 
 ## 统一组件包
 
@@ -140,6 +142,7 @@ description: Generate, validate, and publish ESP32-P4 desktop-pet games, tools, 
    普通应用自测也探索同一状态/页面内的变量变化，例如先计数再清零。探索受 512 个快照和 32 层输入深度约束，并报告是否截断；这不是无限状态空间或全部路径证明。
    实时列表自测覆盖 0/1/6/11/16/20 行的分页可达性与真实按键反馈；它不验证网络取价、时效或设备画面，这些必须另外验收，不能把结构/模拟通过写成实时链路已通过。
 11. 按 [界面验收指南](references/ui-design.md#验收) 检查运行画面。修正问题后复跑受影响的操作，用实际运行画面替换临时封面并重新打包校验。修复全部结构、素材和玩法错误。使用 PNG 时还要逐条核对没有素材缺失、格式、尺寸、帧数、总像素、文件大小或帧间闪烁风险。结构校验和适用的场景/玩法自测均通过后才可交付。自动脚本须退出码为 `0`，试玩自测须记录各项结果。
+    在最终打包和发布前完成[收尾音效](references/sound-effects.md)：适合声音配合的组件，先让用户用一句话描述风格与触发场景，再生成、绑定并验收配套音效；已说明需求时直接沿用，不需要声音时跳过。**新组件音效默认强度为 80%，用户明确指定其他音量时按用户要求执行**；设置组件参数，不修改设备系统音量。新增配套音效合计不得超过 **30,000 字节**。URL 只用于已有联网音频宿主真实支持的播放方式，不虚构任意按键 URL 音效。
 12. 原子发布到正式本地组件库：
 
    ```bash

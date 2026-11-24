@@ -466,19 +466,6 @@ static void feed_offline_cache(void) {
 }
 
 int main(void) {
-  const char profile[] = "{\"login\":\"mei\",\"public_repos\":7,\"email\":\"secret\"}";
-  cJSON *account = pet_wifi_github_account("wifi.feed.test", profile, strlen(profile), 1704067200000ULL);
-  assert(account && pet_p4_widget_data_apply_local(account, 1000, 0));
-  char *rows = cJSON_PrintUnformatted(account);
-  assert(rows && strstr(rows, "mei") && strstr(rows, "\"7\"") && !strstr(rows, "secret"));
-  cJSON_free(rows);
-  cJSON_Delete(account);
-  assert(!pet_wifi_github_account("wifi.feed.test", "{}", 2, 0));
-  const char long_login[] = "{\"login\":\"abcdefghijklmnopqrstuvwxyz1234567890123\",\"public_repos\":0}";
-  account = pet_wifi_github_account("wifi.feed.test", long_login, strlen(long_login), 1704067200000ULL);
-  assert(account && pet_p4_widget_data_apply_local(account, 1001, 0));
-  cJSON_Delete(account);
-
   symbols_and_quote_parser();
   fallback_and_settings();
   news_parser();

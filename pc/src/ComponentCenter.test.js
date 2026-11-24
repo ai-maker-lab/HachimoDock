@@ -115,7 +115,7 @@ test("direct sync preflights one component and respects board capacity", () => {
     component.indexOf("async function installSelectedComponent"),
   );
   assert.match(syncBody, /localInstallBlockedReason\(component\)/);
-  assert.match(syncBody, /componentUsbInstallBlockedReason\(component, usb\)/);
+  assert.match(syncBody, /componentInstallBlockedReason\(component, usb, wifi, liveInventoryTarget\)/);
   assert.match(syncBody, /deviceInventory\.items\.length >= maxInstalled/);
   assert.match(syncBody, /await installSelectedComponent\(component, \{freshImport\}\)/);
   assert.match(syncBody, /设备组件已满/);

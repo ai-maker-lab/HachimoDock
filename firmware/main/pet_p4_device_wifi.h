@@ -81,6 +81,7 @@ unsigned pet_device_wifi_hosted_probe_step(void);
 // ESP-Hosted INIT chip ID, independently of factory board identity.
 unsigned pet_p4_hosted_radio_chip_id(void);
 bool pet_device_wifi_online(void);
+uint32_t pet_device_wifi_association(void);
 /* Called by the sole authenticated LAN audio owner. Returns the prior policy,
  * or -1 if there is nothing to restore. */
 int pet_device_wifi_suspend_power_save(void);

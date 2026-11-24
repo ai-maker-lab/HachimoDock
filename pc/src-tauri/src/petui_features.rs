@@ -69,6 +69,9 @@ pub(crate) fn manifest(id: &str, runtime: &Value, app: Option<&Value>, extension
         if let Some(pc) = rule.get("pcRequires") {
             row["pcRequires"] = pc.clone();
         }
+        if rule["optional"] == true {
+            row["optional"] = true.into();
+        }
         if let Some(grant) = rule.get("grant") {
             row["grant"] = grant.clone();
         }

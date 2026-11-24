@@ -10,7 +10,7 @@ export function builtinFeatureManifest(id, runtime, app, extension) {
   const read = path => path.slice(1).split('/').reduce((o,k)=>o?.[k],context);
   const groups = new Set(), features = [];
   let feed;
-  for (const {id,group,when,label,paths,requires,pcRequires,grant,capsGroup,deviceBoards} of contract.rules) {
+  for (const {id,group,when,label,paths,requires,pcRequires,grant,capsGroup,deviceBoards,optional} of contract.rules) {
     if (groups.has(group) || (group === 'fallback' && features.length)) continue;
     if (!Object.entries(when).every(([key,want])=>want === '*' ? read(key) != null : (read(key) ?? null) === want)) continue;
     groups.add(group);
@@ -25,6 +25,7 @@ export function builtinFeatureManifest(id, runtime, app, extension) {
     if (deviceBoards) row.deviceBoards = deviceBoards;
     if (pcRequires) row.pcRequires = pcRequires;
     if (grant) row.grant = grant;
+    if (optional) row.optional = true;
     features.push(row);
   }
   return {schemaVersion:1,runtime:runtime.engine,features};

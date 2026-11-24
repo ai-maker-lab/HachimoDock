@@ -509,6 +509,15 @@ export async function runAvatarPipeline({
 
   let sharedImageError = "";
   async function runOne(entry) {
+    const repair = session?.frameRepair;
+    if (repair && !repair.families.includes(entry.family)) {
+      const saved = session.actions?.[entry.family];
+      const ok = Boolean(saved?.videoBytes?.byteLength && !saved.failed);
+      setStatus(progress, entry.family, { status: ok ? "done" : "failed" });
+      progress.completed++;
+      emit();
+      return { family: entry.family, ok, skipped: !ok };
+    }
     setStatus(progress, entry.family, { status: "submitting" });
     emit();
 
@@ -518,6 +527,18 @@ export async function runAvatarPipeline({
         emit();
       };
 
+      if (repair && !repair.started[entry.family]) {
+        const previous = session.actions[entry.family];
+        if (previous?.startFrameQuality?.pass !== false || previous.startFrameApproved ||
+            previous.intent || previous.taskId || previous.videoBytes?.byteLength) {
+          throw new Error("动作记录已变化，请刷新后重新选择。");
+        }
+        // Reserve this one paid replacement before the first network operation.
+        // Recovery can reuse its receipt, but cannot clear its submission intent twice.
+        repair.started[entry.family] = true;
+        session.actions[entry.family] = { frameRedrawUsed: true, correctionIssues: previous.startFrameQuality.issues };
+        await commit({});
+      }
       const prior = session?.actions?.[entry.family];
       assertResumableAction(prior, effectiveProviderConfig.provider);
       let actionImage=imagePayload;
@@ -526,7 +547,9 @@ export async function runAvatarPipeline({
         session.actions ||= {};session.actions[entry.family] ||= {};
         setStatus(progress,entry.family,{status:'checking'});progress.message=`正在生成并检查 ${entry.family} 的独立起始姿势…`;emit();
         actionImage=await ensureActionStartFrame({owner:session.actions[entry.family],actions:session.actions,family:entry.family,reference:imagePayload,
-          cloudBackground:resolveArkBackgroundConfig(effectiveProviderConfig),maxDimension:runtimeConfig.imageMaxDimension,thinking,signal,commit,retryReview});
+          cloudBackground:resolveArkBackgroundConfig(effectiveProviderConfig),maxDimension:runtimeConfig.imageMaxDimension,thinking,signal,commit,retryReview,
+          allowCorrection:session.autoCorrectStartFrames === true,
+          onCorrection:()=>{progress.message=`${entry.family} 首帧未通过，正在按检查意见重新生成…`;emit();}});
       }
       let result;
       if (prior?.videoBytes) {

@@ -40,7 +40,7 @@ pub(crate) fn parse(data: &Value) -> Result<Feed<'_>, &'static str> {
     }
     let kind = auth.get("type").and_then(Value::as_str);
     let write = matches!(kind, Some("https-submit" | "mqtt-publish"));
-    if (write || kind == Some("github-account")) && data.get("response_map").is_some() {
+    if write && data.get("response_map").is_some() {
         return Err(INVALID);
     }
     if write {
@@ -62,7 +62,6 @@ pub(crate) fn parse(data: &Value) -> Result<Feed<'_>, &'static str> {
         }
     }
     let topic = match kind {
-        Some("github-account") if auth.len() == 1 && url == "https://api.github.com/user" => None,
         Some("https-submit")
             if auth.len() == 2 && !url.contains('?') && wifi_endpoint::valid(url) =>
         {
@@ -112,13 +111,6 @@ mod tests {
                 "widgetScopedWrite",
                 "p4-scoped-write-v1",
             ),
-            (
-                "github-account",
-                "https://api.github.com/user",
-                json!({"type":"github-account"}),
-                "widgetDeviceProvider",
-                "github-account-v1",
-            ),
         ] {
             let mut data =
                 json!({"source":"wifi.feed","page_var":"page","url":url,"connection":connection});
@@ -134,7 +126,7 @@ mod tests {
                     data["url"] = json!("https://checkin.example.org/visits?secret=x")
                 }
                 "mqtt-publish" => data["connection"]["topic"] = json!("room/#"),
-                _ => data["url"] = json!("https://other.example.org/user"),
+                _ => unreachable!(),
             }
             assert!(parse(&data).is_err());
         }
@@ -144,6 +136,11 @@ mod tests {
     fn declarations_cannot_carry_credentials_or_wildcard_subscriptions() {
         let mut feed = json!({"source":"wifi.feed","url":"https://api.example.org/data",
             "connection":{"type":"bearer"}});
+        assert!(parse(&feed).is_ok());
+        feed["connection"] = json!({"type":"github-account"});
+        feed["url"] = json!("https://api.github.com/user");
+        assert!(parse(&feed).is_err());
+        feed["connection"] = json!({"type":"bearer"});
         assert!(parse(&feed).is_ok());
         feed["connection"]["token"] = json!("package-secret");
         assert!(parse(&feed).is_err());

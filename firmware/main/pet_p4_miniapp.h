@@ -82,6 +82,8 @@ bool pet_p4_miniapp_program_peak_context(pet_p4_query_observation_t *query,pet_w
  * navigate, pin storage, load files or grant a resource. */
 bool pet_p4_miniapp_background_content(const char *id,uint32_t content[3]);
 size_t pet_p4_miniapp_background_list(pet_p4_miniapp_background_status_t out[PET_P4_MINIAPP_BACKGROUND_MAX]);
+bool pet_p4_miniapp_background_start_paired(const char *id,const uint32_t content[3],uint64_t *registration,
+    char *error,size_t size,bool (*pin)(void),void (*unpin)(void));
 bool pet_p4_miniapp_background_start(const char *id,const uint32_t content[3],uint64_t *registration,char *error,size_t error_size);
 bool pet_p4_miniapp_background_stop(const char *id,uint64_t registration,char *error,size_t error_size);
 /* Resource pack capacity. p4-graphics-v2 (PET_P4_GRAPHICS_V2, declared by a
@@ -368,6 +370,8 @@ bool pet_p4_miniapp_dispatch_input(
 
 #define PET_P4_WIDGET_TRANSFER_PROTOCOL "p4-widget-files-v2"
 #define PET_P4_WIDGET_CHUNK_BYTES 4096
+#define WIDGET_TRANSFER_FILES_MAX 128
+#define WIDGET_TRANSFER_BYTES_MAX (16U * 1024U * 1024U)
 bool pet_p4_miniapp_transfer_begin(const cJSON *payload, char *error, size_t error_size);
 bool pet_p4_miniapp_transfer_chunk(const cJSON *payload, char *error, size_t error_size);
 #define PET_P4_WIDGET_COMMIT_STORAGE_DEFERRED "component storage is busy; commit has not started; staged package preserved"

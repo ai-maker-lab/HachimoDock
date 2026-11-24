@@ -64,10 +64,10 @@ void pet_app_host_render_capture_observed(const char *id,pet_host_render_t *snap
  * payload is never retained and a failed send is not replayed. */
 bool pet_app_host_emit(const char *topic,const cJSON *payload);
 
+bool pet_app_host_instance_matches(const char*id,const char*token);
 #if PET_SERVICE_BRIDGE_ENABLED
 void pet_app_host_tick_bound(const char*id,uint32_t revision,uint8_t page,bool visible,uint64_t now,const char*binding);
 bool pet_app_host_observed_value_action(const char*id,uint32_t revision,uint8_t page,const char*action,const char*parameter,int32_t value,const pet_host_observation_t*observed,uint64_t now);
-bool pet_app_host_instance_matches(const char*id,const char*token);
 bool pet_app_host_image_ready(const cJSON*p,uint64_t now);
 bool pet_app_host_image_apply(const cJSON*p,uint64_t now);
 bool pet_app_host_image_borrow(const char*id,const char*alias,uint64_t now,pet_bridge_image_lease_t*out);

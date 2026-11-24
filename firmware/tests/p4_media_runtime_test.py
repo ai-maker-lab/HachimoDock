@@ -85,6 +85,12 @@ static int g_stream_lock=1, stream_lock_depth;
 #define xSemaphoreTakeRecursive(m,t) do { assert((m) && !(t) && !stream_lock_depth); ++stream_lock_depth; } while(0)
 #define xSemaphoreGiveRecursive(m) do { assert((m) && stream_lock_depth==1); --stream_lock_depth; } while(0)
 #include "pet_p4_radio_audio.inc"
+#if PET_P4_SYSTEM_WIFI
+#include "pet_p4_component_av.h"
+bool pet_app_host_instance_matches(const char *id,const char *run){
+  return !strcmp(id,"test") && !strcmp(run,"a-1");
+}
+#endif
 bool pet_p4_miniapp_host_source(const char *source){return source&&!strcmp(source,"app.test");}
 int64_t esp_timer_get_time(void){return clock_us;}
 bool pet_p4_audio_music_active(void){return active;}
@@ -238,6 +244,27 @@ int main(void){
   char *app_begin_json=cJSON_PrintUnformatted(app_begin);cJSON_Delete(app_begin);
   assert(!call("media/begin",app_begin_json));
   pet_p4_media_visibility("app.test",true,5004);
+#if PET_P4_SYSTEM_WIFI
+  // A wireless request never steals the persistent USB status callback.
+  unsigned before_lan=sends;
+  cJSON *p=cJSON_Parse(app_begin_json);
+  assert(!pet_p4_media_lan("media/begin",p,"app.test","old",false));
+  cJSON *ack=pet_p4_media_lan("media/begin",p,"app.test","a-1",false);
+  assert(ack && cJSON_IsTrue(cJSON_GetObjectItem(ack,"ok")));cJSON_Delete(ack);cJSON_Delete(p);
+  p=cJSON_Parse("{\"sessionId\":\"music-new\",\"seq\":0,\"data\":\"AAAoAAEA\"}");
+  ack=pet_p4_media_lan("media/chunk",p,"app.test","a-1",false);
+  assert(ack && cJSON_IsTrue(cJSON_GetObjectItem(ack,"ok")) && cJSON_GetObjectItem(ack,"nextSeq")->valueint==1);cJSON_Delete(ack);
+  ack=pet_p4_media_lan("media/chunk",p,"app.test","a-1",false);
+  assert(ack && cJSON_IsFalse(cJSON_GetObjectItem(ack,"ok")));cJSON_Delete(ack);
+  strcpy(current_owner,"music-successor");
+  cJSON_ReplaceItemInObject(p,"seq",cJSON_CreateNumber(1));
+  ack=pet_p4_media_lan("media/chunk",p,"app.test","a-1",false);
+  assert(ack && cJSON_IsFalse(cJSON_GetObjectItem(ack,"ok")));cJSON_Delete(ack);
+  ack=pet_p4_media_lan("media/stop",p,"app.test","a-1",true);
+  assert(ack && active && !strcmp(current_owner,"music-successor"));cJSON_Delete(ack);cJSON_Delete(p);
+  assert(before_lan==sends);
+  pet_p4_audio_stream_flush();
+#endif
   assert(call("media/begin",app_begin_json));
   pet_p4_media_visibility("",false,5005);
   assert(!active&&!call("media/begin",app_begin_json));
@@ -534,7 +561,7 @@ int main(void){
     exe = tmp_path / "media-test"
     results = []
     for deferred in (0, 1):
-        subprocess.run(["cc", "-std=c11", "-fsanitize=address,undefined", f"-DTEST_DEFERRED={deferred}", f"-DPET_P4_SYSTEM_WIFI={wifi}", "-Wall", "-Wextra", "-Werror", "-Wno-misleading-indentation", "-Wno-deprecated-declarations", "-include", str(cjson / "cJSON.h"), "-I", str(tmp_path), "-I", str(ROOT / "main"), "-I", str(cjson), str(ROOT / "main/pet_p4_media.c"), str(ROOT / "main/pet_p4_media_codec.c"), str(cjson / "cJSON.c"), str(harness), "-lm", "-o", str(exe)], check=True)
+        subprocess.run(["cc", "-std=c11", "-fsanitize=address,undefined", f"-DTEST_DEFERRED={deferred}", f"-DPET_P4_SYSTEM_WIFI={wifi}", "-Wall", "-Wextra", "-Werror", *([] if wifi else ["-Wno-unused-parameter"]), "-Wno-misleading-indentation", "-Wno-deprecated-declarations", "-include", str(cjson / "cJSON.h"), "-I", str(tmp_path), "-I", str(ROOT / "main"), "-I", str(cjson), str(ROOT / "main/pet_p4_media.c"), str(ROOT / "main/pet_p4_media_codec.c"), str(cjson / "cJSON.c"), str(harness), "-lm", "-o", str(exe)], check=True)
         results.append(subprocess.run([str(exe)], check=True, capture_output=True, text=True, timeout=20).stdout)
     # Every chunk status must match the legacy path byte-for-byte, including
     # failed/stale/duplicate chunks, while the full navigation/lease suite runs.

@@ -243,7 +243,7 @@ static bool background_other_program_busy(const char *id){
   return false;
 }
 static bool background_start_installed(const char *id,const uint32_t content[3],uint64_t *registration,
-                                       char *error,size_t size,bool local){
+                                       char *error,size_t size,bool local,bool (*pin)(void),void (*unpin)(void)){
   if(!pet_p4_miniapp_background_available()||!safe_widget_id(id)||!content||!registration||*registration){set_error(error,size,"background program unavailable or invalid request");return false;}
   /* The caller holds the model lane. A suspended catalog mutation can
    * still replace the entry; only inspect stable, authoritative metadata. */
@@ -270,7 +270,7 @@ static bool background_start_installed(const char *id,const uint32_t content[3],
   if(!save_app_runtime()){set_error(error,size,"current foreground checkpoint unavailable");return false;}
   if(!pet_storage_scope_advance(&storage,PET_STORAGE_PREPARE)||!pet_storage_scope_unlock(&storage))return false;
   miniapp_runtime_t *next=calloc(1,sizeof(*next));if(!next){set_error(error,size,"component staging memory unavailable");return false;}
-  bool ok=false;miniapp_catalog_item_t staged=item;
+  bool ok=false,pinned=false;miniapp_catalog_item_t staged=item;
   if(!storage_work_current()||!load_catalog_runtime_item(&staged,next,false,error,size)||!next->program.enabled)goto done;
   if(next->program.local_background!=local){set_error(error,size,"local device consent required");goto done;}
   pet_program_save_result_t loaded=pet_program_persistence_load_with_lease(id,&next->program.image,&next->program_seed,g_storage_resource_lease);
@@ -281,6 +281,9 @@ static bool background_start_installed(const char *id,const uint32_t content[3],
 #if PET_P4_EVENTS
   if(local && !local_program_authorized(item.slot,id,content))goto done;
 #endif
+  /* Storage preparation releases the model mutex. Acquire the transport fence
+   * only after reacquiring it, before retiring or registering any owner. */
+  if(pin){if(!unpin||!pin())goto done;pinned=true;}
   if(found&&!background_prepare_remove(id)){set_error(error,size,"prior owner could not retire/checkpoint");goto done;}
   /* RAM-only reread at publication, never stale preparation data or Flash IO. */
   loaded=pet_program_persistence_load_cached(id,&next->program.image,&next->program_seed);
@@ -321,10 +324,11 @@ static bool background_start_installed(const char *id,const uint32_t content[3],
   }
   if(!ok)set_error(error,size,"background admission refused; existing owners/data retained");
 done:
+  if(pinned)unpin();
   free(next);return ok;
 }
 bool pet_p4_miniapp_background_start(const char *id,const uint32_t content[3],uint64_t *registration,char *error,size_t size){
-  return background_start_installed(id,content,registration,error,size,false);
+  return background_start_installed(id,content,registration,error,size,false,NULL,NULL);
 }
 #else
 bool pet_p4_miniapp_background_available(void){return false;}
@@ -332,4 +336,16 @@ bool pet_p4_miniapp_background_content(const char *id,uint32_t content[3]){(void
 size_t pet_p4_miniapp_background_list(pet_p4_miniapp_background_status_t out[PET_P4_MINIAPP_BACKGROUND_MAX]){(void)out;return 0;}
 bool pet_p4_miniapp_background_start(const char *id,const uint32_t content[3],uint64_t *registration,char *error,size_t size){(void)id;(void)content;(void)registration;set_error(error,size,"background capability unavailable");return false;}
 bool pet_p4_miniapp_background_stop(const char *id,uint64_t registration,char *error,size_t size){(void)id;(void)registration;set_error(error,size,"background capability unavailable");return false;}
+#endif
+
+#if PET_P4_SYSTEM_WIFI
+bool pet_p4_miniapp_background_start_paired(const char *id,const uint32_t content[3],uint64_t *registration,
+    char *error,size_t size,bool (*pin)(void),void (*unpin)(void)){
+#if PET_COMPONENT_BACKGROUND_ENABLED
+  return pin && unpin && background_start_installed(id,content,registration,error,size,false,pin,unpin);
+#else
+  (void)pin;(void)unpin;
+  return pet_p4_miniapp_background_start(id,content,registration,error,size);
+#endif
+}
 #endif

@@ -4069,7 +4069,7 @@ static void render_component_center_page(bool loading) {
   const size_t start = selected / per_page * per_page;
   const size_t pages = (count + per_page - 1) / per_page;
 
-  bool allow_thumbnail_load = !loading;
+  bool allow_thumbnail_storage_read = !loading;
   center_art_prepare();
   if(center_background)memcpy(g_framebuffer,center_background,640*480*2);
   else fill_rect(0, 0, PET_P4_UI_WIDTH, PET_P4_UI_HEIGHT, background);
@@ -4121,7 +4121,7 @@ static void render_component_center_page(bool loading) {
       fill_round_rect(x, y+4, PET_CENTER_CARD_W, PET_CENTER_CARD_H, 18, rgb565(187,151,114));
       fill_round_rect_outline(x, y, PET_CENTER_CARD_W, PET_CENTER_CARD_H, 18, surface, focused ? orange : outline);
       if (focused) fill_round_rect_outline(x+1, y+1, PET_CENTER_CARD_W-2, PET_CENTER_CARD_H-2, 17, surface, orange);
-      if (!center_draw_thumbnail(&item, (unsigned)slot, x+18, y+14, &allow_thumbnail_load))
+      if (center_draw_thumbnail(&item, (unsigned)slot, x+18, y+14, &allow_thumbnail_storage_read) == CENTER_THUMB_MISSING)
         draw_component_icon(item.widget_id, x+18, y+16, focused ? card_ink : orange,
           focused ? rgb565(168,100,67) : rgb565(242,224,196));
       if (item.active) {

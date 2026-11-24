@@ -77,7 +77,7 @@ import {useDialogFocus} from './component-center/use-dialog-focus.js';
 import './component-center/center-workflow.css';
 import {devicePackageState, readCenterPreference, saveCenterPreference} from './component-center/catalog-state.js';
 import { isRoutedWidgetBinding } from "./component-center/binding-labels.js";
-import { componentUsbInstallBlockedReason, isComponentVisible, legacyAudioInstallBlockedReason, mergeComponentCatalog, sortComponentsByCreatedAt } from "./component-center/library-order.js";
+import { componentInstallBlockedReason, isComponentVisible, legacyAudioInstallBlockedReason, mergeComponentCatalog, sortComponentsByCreatedAt } from "./component-center/library-order.js";
 import {
   COMPONENT_CONTROL_OPTIONS,
   componentInputEventSlots,
@@ -297,7 +297,7 @@ function inventoryFailure(error, target) {
 
 function inventoryTargetKey(target) {
   const identity = activeComponentTargetKey(target);
-  return target?.transport === "wifi" && identity ? `wifi:${identity}:${target.bootId}` : identity;
+  return target?.transport === "wifi" && identity ? `wifi:${identity}:${target.bootId}${target.association ? ":" + target.association : ""}` : identity;
 }
 
 function readSessionDeviceInventory(target) {
@@ -409,22 +409,23 @@ export default function ComponentCenter({ active = true, onOpenWirelessMaintenan
   } = useDeviceContext();
   const capabilityTarget = useMemo(()=>featureTarget(usb,wifi),[usb,wifi]);
   const configuredSshHost = readConfiguredComponentSshHost();
-  const wirelessInventoryReady = wifiDeviceControlReady(wifi) && wifi?.componentDelivery === true;
+  const wirelessInventoryReady = wifiDeviceControlReady(wifi) && wifi?.wifiConnected === true && wifi?.componentDelivery === true;
   const wifiBoardDeviceId = wifi?.boardDeviceId;
   const wifiBootId = wifi?.bootId;
+  const association = wifi?.componentTarget?.association;
   const liveInventoryTarget = useMemo(() => {
     const boardDeviceId = String(usb.boardDeviceId || "").trim();
     if (usb.connected && boardDeviceId) {
       return { transport: "usb", boardDeviceId };
     }
     if (!usb.connected && wirelessInventoryReady && wifiBoardDeviceId && wifiBootId) {
-      return { transport: "wifi", boardDeviceId: wifiBoardDeviceId, bootId: wifiBootId,
+      return { transport: "wifi", boardDeviceId: wifiBoardDeviceId, bootId: wifiBootId, association,
         controlTrusted: true, panelControl: true };
     }
     return configuredSshHost
       ? { transport: "ssh", sshHost: configuredSshHost }
       : null;
-  }, [configuredSshHost, usb.boardDeviceId, usb.connected, wirelessInventoryReady, wifiBoardDeviceId, wifiBootId]);
+  }, [configuredSshHost, usb.boardDeviceId, usb.connected, wirelessInventoryReady, wifiBoardDeviceId, wifiBootId, association]);
   const deviceConnected = Boolean(liveInventoryTarget);
   const readsGlobalButtons = liveInventoryTarget?.transport === "wifi"
     || (liveInventoryTarget?.transport === "usb" && usb.runtime === "esp-p4");
@@ -625,7 +626,7 @@ export default function ComponentCenter({ active = true, onOpenWirelessMaintenan
         push({
           tone: "warning",
           title: "尚未连接目标设备",
-          message: "连接 USB 板端或配置 SSH 主机后再同步组件。",
+          message: "请连接 USB 或已授权的在线 Wi-Fi 设备，再同步组件。",
         });
       }
       return EMPTY_DEVICE_INVENTORY;
@@ -954,7 +955,7 @@ export default function ComponentCenter({ active = true, onOpenWirelessMaintenan
       });
       return;
     }
-    const firmwareError = componentUsbInstallBlockedReason(component, usb);
+    const firmwareError = componentInstallBlockedReason(component, usb, wifi, liveInventoryTarget);
     if (firmwareError) {
       push({
         tone: "error",
@@ -967,7 +968,7 @@ export default function ComponentCenter({ active = true, onOpenWirelessMaintenan
       push({
         tone: "warning",
         title: "尚未连接目标设备",
-        message: "连接 USB 板端或配置 SSH 主机后再同步组件。",
+        message: "请连接 USB 或已授权的在线 Wi-Fi 设备，再同步组件。",
       });
       return;
     }
@@ -1429,6 +1430,7 @@ export default function ComponentCenter({ active = true, onOpenWirelessMaintenan
           path: clawpkgPath, id: preview.id, digest: preview.digest,
           expectedBoardDeviceId: installTarget.boardDeviceId,
           expectedBootId: installTarget.bootId,
+          expectedAssociation: installTarget.association,
           expectedInstalledVersion: installed?.version,
           centerTitle,
           expectedVersionHash: component?.versionHash || undefined,
@@ -1638,7 +1640,7 @@ export default function ComponentCenter({ active = true, onOpenWirelessMaintenan
   }
 
   return (
-    <ProgramBackgroundProvider usb={usb} active={active}>
+    <ProgramBackgroundProvider usb={usb} wifi={wifi} active={active}>
     <PageShell
       title="组件中心"
       subtitle="预览和管理设备组件，也可以从社区发现新玩法。"
@@ -1672,7 +1674,7 @@ export default function ComponentCenter({ active = true, onOpenWirelessMaintenan
               if (typeof path !== "string") return;
               const entry = await invoke("import_hachiapp", { path });
               await refreshComponentLibrary();
-              const unavailable = legacyAudioInstallBlockedReason(entry) || componentUsbInstallBlockedReason(entry, usb);
+              const unavailable = legacyAudioInstallBlockedReason(entry) || componentInstallBlockedReason(entry, usb, wifi, liveInventoryTarget);
               if (unavailable) push({ tone: "warning", title: `已导入「${entry.name}」，暂不可同步`, message: unavailable });
             } catch (error) {
               push({ tone: "error", title: "导入组件失败", message: String(error) });
@@ -1842,6 +1844,7 @@ export default function ComponentCenter({ active = true, onOpenWirelessMaintenan
             active={active}
             component={previewComponent}
             onSourceChange={openComponent}
+            onEditionImported={refreshComponentLibrary}
             usb={usb}
             kind={resolveComponentKind(previewComponent.kind, previewComponent.gameType)}
             isLocal={previewComponent.isLocal}
@@ -1873,7 +1876,7 @@ export default function ComponentCenter({ active = true, onOpenWirelessMaintenan
               previewComponent.isDeviceOnly
                 ? "本机没有这个组件的安装源；可以继续保留，或从当前卡片移除。"
                 : localInstallBlockedReason(previewComponent)
-                  || componentUsbInstallBlockedReason(previewComponent, usb)
+                  || componentInstallBlockedReason(previewComponent, usb, wifi, liveInventoryTarget)
             }
             onInstall={
               previewComponent.isDeviceOnly
@@ -2162,6 +2165,7 @@ function CreateComponentDrawer({
     "请使用 PetUI（支持技能指令时用 $petui）制作一个桌搭子组件：<用一句话描述用途或玩法>。",
     "先给我看 640×480 UI，确认后再实现。简单组件展示首屏和主操作，复杂组件按需补关键状态。构建后试玩主操作，按需检查实际键位、动效和依赖真机的功能。",
     "控件写动作名，键位提示跟随实际绑定。用真实运行画面做最终封面，交付 .hachiapp，用 petui publish 发布到本地组件库，并说明怎么用。",
+    "发布前检查是否需要配套音效：需要时先让我用一句话说明风格和触发场景，再生成并配上音效；内置配套音效合计不超过30KB。适合联网播放的音频也可使用URL。",
     `PetUI Skill：${authoring.skillPath || "用户目录下的 .agents/skills/petui"}`,
     `使用 Pet Manager 提供的命令构建，工具入口：${authoring.command || "用户目录下的 .claw-pet/authoring/petui（Windows 使用 petui.cmd）"}`,
   ].join("\n");

@@ -12,8 +12,6 @@ from validate_generated_widget import DEFAULT_CAPABILITIES, validate_widget, val
      {"type": "https-submit", "value": "arrived"}, "widgetScopedWrite"),
     ("desk-light", "桌灯控制", "mqtts://desk.example.org",
      {"type": "mqtt-publish", "topic": "room/light", "value": "on"}, "widgetScopedWrite"),
-    ("github-card", "GitHub 账号", "https://api.github.com/user",
-     {"type": "github-account"}, "widgetDeviceProvider"),
 ])
 def test_scoped_network_apps(tmp_path, component, title, endpoint, connection, key):
     template = Path(__file__).resolve().parents[3] / "builtin-clawpkgs" / "stock-watchlist"
@@ -38,3 +36,9 @@ def test_scoped_network_apps(tmp_path, component, title, endpoint, connection, k
         assert not valid_private_feed({**data, "refresh_action": "data.refresh"})
         for bad in ("", "x" * 25, "a b", "\\r", "动态"):
             assert not valid_private_feed({**data, "connection": {**connection, "value": bad}})
+
+
+def test_retired_github_connection_requires_explicit_new_declaration():
+    data = {"source": "wifi.feed", "url": "https://api.github.com/user"}
+    assert not valid_private_feed({**data, "connection": {"type": "github-account"}})
+    assert valid_private_feed({**data, "connection": {"type": "bearer"}})

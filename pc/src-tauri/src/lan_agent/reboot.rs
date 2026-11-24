@@ -121,6 +121,8 @@ mod tests {
             component_delivery: false,
             center_thumb: false,
             component_bundle: false,
+            component_target: None,
+            component_target_error: None,
             appearance_capacity: 0,
             widget_data_delivery: false,
             component_host_flags: 0,

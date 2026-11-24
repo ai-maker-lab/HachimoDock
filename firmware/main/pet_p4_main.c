@@ -1621,12 +1621,12 @@ static void volume_worker_lan(void) {
 }
 #endif
 
-#if PET_P4_SYSTEM_WIFI
 bool pet_p4_lan_trust_wired(pet_p4_send_line_fn send, void *route) {
   if (send == pet_p4_native_usb_send_json_line) return pet_p4_native_usb_route_current(route);
   return send == transport_send_line && (route == &g_usb_serial_jtag_route || route == &g_uart_route);
 }
 
+#if PET_P4_SYSTEM_WIFI
 bool pet_p4_lan_schedule_control(uint32_t token) {
   const pet_p4_protocol_request_t request = {.lan_control = token};
   return g_protocol_queue && xQueueSend(g_protocol_queue, &request, 0) == pdTRUE;
@@ -2654,7 +2654,15 @@ void app_main(void) {
         && now_ms - last_render_ms >= ((!strcmp(g_state.screen_page,"app") && (pet_p4_miniapp_slicing_active() || pet_p4_miniapp_media_surface_animated())) || !strcmp(g_state.screen_page, "touch_test")
           ? 33ULL : PET_P4_MAIN_RENDER_INTERVAL_MS)) {
       memcpy(g_render_state, &g_state, sizeof(*g_render_state));
+      bool test_notice = pet_p4_test_message_visible(&g_state, now_ms);
+      if (test_notice) g_render_state->session_queue_count = 0;
       pet_p4_build_view_model(g_render_state, &render_view);
+      if (test_notice) {
+        render_view.title = "";
+        render_view.body = "hello from pet-manager";
+        render_view.show_bubble = true;
+        render_view.compact_bubble = false;
+      }
       render_view.component_loading = pet_p4_miniapp_activation_pending();
 #if PET_P4_SYSTEM_WIFI
       if (!strcmp(render_view.page, PET_SETTINGS_PAGE)) {

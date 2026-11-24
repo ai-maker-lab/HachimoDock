@@ -10,6 +10,7 @@ def test_wifi_profile_persistence_and_retry(tmp_path):
     radio = (MAIN / "pet_p4_device_wifi.c").read_text()
     keys = radio[radio.index("#define WIFI_NAMESPACE"):radio.index("#define WIFI_GOT_IP")]
     storage = radio[radio.index("static esp_err_t write_profiles("):radio.index("static void wifi_event(")]
+    association = radio[radio.index("static atomic_uint association_revision"):radio.index("static void clear_memory(")]
     callback = radio[radio.index("static void wifi_event("):radio.index("static atomic_uint hosted_probe_step")]
     address = radio[radio.index("static bool join_current("):radio.index("static bool connect_station(")]
     manual = radio[radio.index("static bool rediscover_station("):radio.index("static bool connected_link_lost(")]
@@ -199,7 +200,7 @@ static EventBits_t xEventGroupWaitBits(int group, unsigned bits, int clear, int 
   return before;
 }
 static void vTaskDelay(unsigned ticks_to_wait) { assert(ticks_to_wait == 250); }
-''' + callback + r'''
+''' + association + callback + r'''
 static wifi_ap_record_t associated;
 static unsigned ap_queries;
 static int ap_result;
@@ -430,9 +431,11 @@ static void test_link_events(void) {
   lose_ip_during_query = false;
   wifi_event(NULL, IP_EVENT, IP_EVENT_STA_GOT_IP, NULL);
   assert(wait_for_station_address(&original, true) && note == PET_WIFI_JOIN_OK);
+  assert(pet_device_wifi_association() != 0);
   assert(!connected_link_lost());
 
   wifi_event(NULL, IP_EVENT, IP_EVENT_STA_LOST_IP, NULL);
+  assert(pet_device_wifi_association() == 0);
   wifi_event(NULL, IP_EVENT, IP_EVENT_STA_GOT_IP, NULL);
   assert(!connected_link_lost());
   wifi_event(NULL, IP_EVENT, IP_EVENT_STA_LOST_IP, NULL);

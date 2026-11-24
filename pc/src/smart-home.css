@@ -1,5 +1,15 @@
 .smart-home { color: var(--text-primary, #14151a); }
-.smart-home .page-shell__body { display: grid; gap: 18px; }
+.smart-home .page-shell__body { display: grid; }
+.smart-home .page-shell__header { margin-bottom: 0; padding-bottom: 0; }
+.smart-home .page-shell__subtitle { max-width: none; }
+.home-connection { display: grid; gap: 6px; }
+.home-connection-row, .home-connection-status { display: flex; align-items: center; flex-wrap: wrap; }
+.home-connection-row { justify-content: space-between; gap: 4px 16px; }
+.home-connection-status { gap: 2px 12px; }
+.home-connection-status span, .home-voice-guide { color: var(--text-muted); font-size: 13px; line-height: 1.6; }
+.home-voice-guide summary { width: fit-content; cursor: pointer; }
+.home-voice-guide summary:hover { color: var(--accent-action); }
+.home-voice-guide p { margin: 4px 0 0; }
 .smart-home button { cursor: pointer; }
 .smart-home button:disabled { cursor: not-allowed; opacity: .5; }
 .smart-home .btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; }

@@ -1264,9 +1264,8 @@ select:focus-visible {
 
 /* === API configuration =============================================== */
 
-.api-settings-page .page-shell__body { gap: 16px; }
-.api-settings-page .card__header { padding: 14px 20px; }
-.api-settings-page .card__body { padding: 12px 20px 16px; gap: 10px; }
+.api-settings-page .card__header, .api-settings-page .card__body { padding-inline: var(--space-5); }
+.api-settings-page .card__body { gap: 10px; }
 .api-settings-page .card__subtitle { max-width: none; line-height: 1.65; }
 .api-settings-page .usage-help { margin: 0; }
 .api-settings-page .usage-help > p { margin: 0 0 3px; }
@@ -1530,7 +1529,7 @@ select:focus-visible {
 
 .api-settings__provider-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(20rem, 1fr) repeat(2, minmax(0, 1fr));
   gap: var(--space-3);
 }
 
@@ -1644,7 +1643,7 @@ select:focus-visible {
 
 @media (max-width: 900px) {
   .api-settings__provider-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(20rem, 1fr) minmax(0, 1fr);
   }
 
   .api-settings__provider:last-child:nth-child(odd) {
@@ -11297,6 +11296,8 @@ select:focus-visible {
 }
 .video-model-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .video-model-row select { min-width: 0; flex: 1; }
+#model-settings-avatar .video-model-row { flex-wrap: wrap; }
+#model-settings-avatar .video-model-row select { flex-basis: max-content; max-width: 100%; }
 .video-generation-settings { margin-top: 16px; border-top: 0; padding-top: 12px; }
 .video-generation-settings summary { cursor: pointer; font-weight: 600; }
 .video-parameters-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; margin: 14px 0; }
@@ -13675,26 +13676,8 @@ select:focus-visible {
   transition: width 180ms ease;
 }
 
-/* Pre-transfer device steps have no byte count: sweep instead of a frozen 0%. */
-.channel-matrix-sync__bar.is-indeterminate > span {
-  width: 35%;
-  animation: channel-matrix-sync-sweep 1.2s ease-in-out infinite;
-}
-
-@keyframes channel-matrix-sync-sweep {
-  from { transform: translateX(-100%); }
-  to { transform: translateX(290%); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .channel-matrix-sync__bar.is-indeterminate > span {
-    width: 100%;
-    opacity: 0.45;
-    animation: none;
-  }
-}
-
 .channel-matrix-sync__cancel {
+  grid-column: -2 / -1;
   justify-self: end;
 }
 
@@ -14744,24 +14727,50 @@ select:focus-visible {
 
 .keyboard-configuration-tabs {
   display: flex;
-  gap: 26px;
-  border-bottom: 0;
-  margin-bottom: 20px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1);
 }
 
 .keyboard-configuration-tabs > button {
+  min-height: 36px;
+  padding: 6px 12px;
   border: 0;
-  border-bottom: 3px solid transparent;
-  background: none;
-  padding: 14px 0;
-  font: 600 14px var(--font-sans);
+  border-radius: var(--radius-md);
+  background: transparent;
   color: var(--text-muted);
+  font: 600 14px/1.4 var(--font-sans);
   cursor: pointer;
 }
 
 .keyboard-configuration-tabs > button[aria-selected="true"] {
+  background: var(--accent-soft);
   color: var(--text);
-  border-bottom-color: var(--accent);
+}
+
+.keyboard-configuration-panel > .card > .card__header {
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 0;
+  gap: 6px 16px;
+}
+
+.keyboard-configuration-panel > .card > .card__body:first-child {
+  padding-top: 0;
+}
+
+.keyboard-configuration-panel :is(.card__title, .board-button-panel__sync-state h2) {
+  margin: 0;
+  color: var(--text);
+  font: 600 16px/1.45 var(--font-sans);
+  letter-spacing: normal;
+}
+
+.keyboard-configuration-panel > .card > .card__body > p,
+.keyboard-configuration-panel .board-button-panel > .usage-help > p {
+  margin: 0;
+  color: var(--text-muted);
+  font: 400 13px/1.6 var(--font-sans);
 }
 
 /* Desktop workspace. Keep device content and media in their original palettes. */
@@ -14824,7 +14833,7 @@ select:focus-visible {
 .toast { overflow-wrap: anywhere; }
 .toast__title { white-space: normal; }
 @media (min-width: 1081px) {
-  .sidebar-nav { padding-block: var(--space-4); }
+  .sidebar-nav { padding-block: 0 var(--space-4); margin-top: 0; }
   .sidebar-nav > [title="键盘配置"] { margin-top: var(--space-3); }
   .app-sidebar { padding-block: var(--space-5); }
   .page-shell__header { padding-block: var(--space-2); }
@@ -14841,3 +14850,6 @@ select:focus-visible {
   .sidebar-nav-label { flex: 0 1 auto; }
   .sidebar-nav > button[aria-current="page"] { box-shadow: inset 0 -2px var(--accent-action); }
 }
+
+/* Disable the native password reveal control in the Windows WebView. */
+input[type="password"]::-ms-reveal { display: none; }

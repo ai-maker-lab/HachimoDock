@@ -16,6 +16,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub(crate) mod offline_editions;
+
 const CLAW_PET_DIR_NAME: &str = ".claw-pet";
 const LEGACY_OPENCLAW_DIR_NAME: &str = ".openclaw";
 const LEGACY_DRAFTS_DIR_NAME: &str = "component-drafts";
@@ -277,7 +279,9 @@ pub(crate) fn extract_zip_safe(source: &Path, destination: &Path) -> Result<(), 
         remaining = remaining.checked_sub(copied)
             .ok_or_else(|| "组件 zip 解压大小超过导入限制".to_string())?;
     }
-    Ok(())
+    // Canonical ZIPs store files only. Materialize the empty asset root without
+    // adding a hashed file or satisfying references to individual resources.
+    fs::create_dir_all(destination.join("assets")).map_err(|error| error.to_string())
 }
 
 fn collect_package_files(
@@ -1618,6 +1622,37 @@ mod tests {
         if path.is_dir() { return package_content_hash(path).unwrap(); }
         let mut hash = Sha256::new(); hash.update(fs::read(path).unwrap());
         hash.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+    }
+
+    #[test]
+    fn files_only_archive_import_preserves_empty_assets_and_content_hash() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../skills/petui/examples/local-notebook");
+        copy_dir_recursive_safe(&example, &source).unwrap();
+        fs::remove_file(source.join("assets/.keep")).unwrap();
+        let archive = temp.path().join("notebook.hachiapp");
+        archive_fixture(&source, &archive);
+
+        let entry = import_hachiapp(temp.path(), &archive).unwrap();
+        assert_eq!(entry.version_hash, package_content_hash(&source).unwrap());
+        let assets = Path::new(&entry.path).join("assets");
+        assert_eq!(fs::read_dir(assets).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn files_only_archive_import_rejects_missing_referenced_image() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../builtin-clawpkgs/cloud-hop");
+        copy_dir_recursive_safe(&example, &source).unwrap();
+        fs::remove_dir_all(source.join("assets")).unwrap();
+        let archive = temp.path().join("cloud-hop.hachiapp");
+        archive_fixture(&source, &archive);
+
+        let error = import_hachiapp(temp.path(), &archive).unwrap_err();
+        assert!(error.contains("通用应用图片缺失"), "{error}");
+        assert!(latest(temp.path(), "cloud-hop").unwrap().is_none());
     }
 
     fn directory_members(path: &Path) -> Vec<PathBuf> {

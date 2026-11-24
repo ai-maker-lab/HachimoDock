@@ -346,7 +346,7 @@ static void local_program_resume(unsigned slot,uint64_t now) {
   uint64_t registration = 0;
   char error[128] = {0};
   bool ok = record.program == PET_LOCAL_PROGRAM_ON &&
-      background_start_installed(record.id,content,&registration,error,sizeof(error),true);
+      background_start_installed(record.id,content,&registration,error,sizeof(error),true,NULL,NULL);
   ext_lock();
   program_loading = false;
   program_pending &= ~bit;

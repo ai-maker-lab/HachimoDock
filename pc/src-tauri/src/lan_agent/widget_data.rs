@@ -43,7 +43,7 @@ pub(super) fn foreground() -> Result<RwLockReadGuard<'static, ()>, String> {
     LAN_LANE.read().map_err(|_| "无线传输暂不可用".into())
 }
 
-fn background(usb: &UsbSerialManager) -> Option<RwLockWriteGuard<'static, ()>> {
+pub(super) fn background(usb: &UsbSerialManager) -> Option<RwLockWriteGuard<'static, ()>> {
     let lane = LAN_LANE.try_write().ok()?;
     require_no_usb(usb).ok()?;
     if usb.transfer_in_progress()
@@ -59,7 +59,7 @@ pub(super) fn same_peer(a: &Peer, b: &Peer) -> bool {
     a.address == b.address && a.key.as_ref() == b.key.as_ref()
 }
 
-fn valid_identity(board: &str, boot: &str) -> bool {
+pub(super) fn valid_identity(board: &str, boot: &str) -> bool {
     boot.len() == 16
         && boot.bytes().all(|b| b.is_ascii_hexdigit())
         && board

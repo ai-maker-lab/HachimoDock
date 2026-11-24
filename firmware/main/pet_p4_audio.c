@@ -4,6 +4,7 @@
 #include "pet_p4_conversation.h"
 #if PET_P4_SYSTEM_WIFI
 #include "pet_p4_lan.h"
+#include "pet_p4_component_av.h"
 #endif
 #include "pet_p4_wdt_deadlock.h"
 #include "pet_p4_audio_volume.h"
@@ -529,14 +530,25 @@ void pet_p4_audio_send_status(void) {
   send_topic("audio/status", payload);
 }
 
-static void send_audio_error(const char *session_id, const char *code, const char *message) {
+#if PET_P4_SYSTEM_WIFI
+#include "pet_p4_note_frames.inc"
+#endif
+static bool capture_frame(const char *owner, const char *topic, cJSON *payload, bool live) {
+#if PET_P4_SYSTEM_WIFI
+  if (owner && !strncmp(owner, PET_NOTE_PREFIX, sizeof(PET_NOTE_PREFIX)-1))
+    return note_publish(owner, topic, payload);
+#endif
+  return send_topic_to_transport(topic, payload, live);
+}
+
+static void send_audio_error(const char *owner, const char *session_id, const char *code, const char *message) {
   pet_p4_audio_diagnostic("capture_error", session_id, 0, false);
   cJSON *payload = cJSON_CreateObject();
   cJSON_AddStringToObject(payload, "sessionId", session_id ? session_id : "");
   cJSON_AddStringToObject(payload, "code", code ? code : "audio_error");
   cJSON_AddStringToObject(payload, "error", message ? message : "audio capture failed");
   add_conversation_metadata(payload);
-  send_topic("audio/error", payload);
+  capture_frame(owner, "audio/error", payload, false);
 }
 
 static void send_audio_begin(const char *session_id, bool session_queue_empty, const char *owner,
@@ -556,10 +568,11 @@ static void send_audio_begin(const char *session_id, bool session_queue_empty, c
   cJSON_AddStringToObject(payload, "transport", "usb-jsonl-pcm-v1");
   cJSON_AddBoolToObject(payload, "conversation", pet_p4_audio_conversation_active());
   add_conversation_metadata(payload);
-  send_topic("audio/begin", payload);
+  capture_frame(owner, "audio/begin", payload, false);
 }
 
 static bool send_audio_chunk(
+  const char *owner,
   const char *session_id,
   uint32_t sequence,
   const uint8_t *pcm,
@@ -589,10 +602,11 @@ static bool send_audio_chunk(
    * queued PTT/previous conversation frame with the latest control session. */
   cJSON_AddStringToObject(payload, "conversationSessionId", conversation_session);
   if (processed) cJSON_AddBoolToObject(payload, "vadSpeech", speech);
-  return send_topic_to_transport("audio/chunk", payload, processed && conversation_session[0]);
+  return capture_frame(owner, "audio/chunk", payload, processed && conversation_session[0]);
 }
 
 static void send_audio_end(
+  const char *owner,
   const char *session_id,
   const char *reason,
   uint32_t chunks,
@@ -611,7 +625,7 @@ static void send_audio_end(
   cJSON_AddNumberToObject(payload, "durationMs",
                           bytes_per_second ? (double) (total_bytes * 1000ULL / bytes_per_second) : 0);
   cJSON_AddStringToObject(payload, "checksum", checksum_hex);
-  send_topic("audio/end", payload);
+  capture_frame(owner, "audio/end", payload, false);
 }
 
 static uint16_t read_le16(const uint8_t *bytes) {
@@ -801,7 +815,7 @@ static void stream_drain_step_locked(uint8_t *pcm, size_t capacity) {
       return;
     }
 #endif
-    send_audio_error(g_stream_session, "speaker_write_failed", "speaker playback failed");
+    send_audio_error(NULL, g_stream_session, "speaker_write_failed", "speaker playback failed");
     pet_p4_audio_stream_flush();
     return;
   }
@@ -1525,7 +1539,7 @@ static void audio_task(void *arg) {
 #if PET_P4_SYSTEM_WIFI
         if (!wifi_capture)
 #endif
-        send_audio_error(session_id, "codec_read_failed", "device PCM read failed");
+        send_audio_error(capture_owner, session_id, "codec_read_failed", "device PCM read failed");
         capture_worker_cancel(capture_work);
         break;
       }
@@ -1590,14 +1604,14 @@ static void audio_task(void *arg) {
       }
 #endif
       uint64_t tx_started_us = esp_timer_get_time();
-      bool sent = send_audio_chunk(session_id, chunks, pcm, sizeof(pcm), processed, speech, conversation_session);
+      bool sent = send_audio_chunk(capture_owner, session_id, chunks, pcm, sizeof(pcm), processed, speech, conversation_session);
       uint64_t tx_elapsed = (uint64_t)esp_timer_get_time() - tx_started_us;
       unsigned tx_us = tx_elapsed > UINT32_MAX ? UINT32_MAX : (unsigned)tx_elapsed;
       atomic_store(&g_capture_tx_last_us, tx_us);
       if (tx_us > atomic_load(&g_capture_tx_max_us)) atomic_store(&g_capture_tx_max_us, tx_us);
       if (!sent) {
         reason = "capture_tx_failed";
-        send_audio_error(session_id, "capture_tx_failed", "PCM frame could not be queued for USB");
+        send_audio_error(capture_owner, session_id, "capture_tx_failed", "PCM frame could not be queued for USB");
         capture_worker_cancel(capture_work);
         break;
       }
@@ -1632,7 +1646,7 @@ static void audio_task(void *arg) {
       // Do not let the final receipt overtake queued frames, or let the next
       // capture borrow this session's transmitter.
       while (atomic_load(&g_usb_capture_tx_pending)) vTaskDelay(1);
-      send_audio_end(session_id, reason, chunks, total_bytes, stream_checksum);
+      send_audio_end(capture_owner, session_id, reason, chunks, total_bytes, stream_checksum);
     }
     capture_worker_done();
     pet_p4_audio_send_status();
@@ -2028,7 +2042,21 @@ static esp_err_t audio_capture_start_wired(bool queue_empty, const char *owner, 
   return result;
 }
 
+#if PET_P4_SYSTEM_WIFI
+esp_err_t pet_p4_note_start(const char *owner) {
+  if (!owner || strncmp(owner, PET_NOTE_PREFIX, sizeof(PET_NOTE_PREFIX)-1) ||
+      strlen(owner) >= sizeof(note_owner) || !note_reserve(owner)) return ESP_ERR_INVALID_STATE;
+  esp_err_t err = pet_p4_audio_set_enabled(true);
+  if (err == ESP_OK) err = audio_capture_start_wired(true, owner, 0);
+  if (err != ESP_OK) pet_p4_note_discard(owner);
+  return err;
+}
+#endif
+
 esp_err_t pet_p4_audio_capture_start_owned(bool queue_empty, const char *owner) {
+  #if PET_P4_SYSTEM_WIFI
+  if (owner && !strncmp(owner, PET_NOTE_PREFIX, sizeof(PET_NOTE_PREFIX)-1)) return ESP_ERR_INVALID_ARG;
+#endif
   return audio_capture_start_wired(queue_empty, owner, 0);
 }
 
@@ -2111,6 +2139,19 @@ static esp_err_t audio_conversation_set(bool enabled, bool half_duplex, const ch
   PET_AUDIO_REALTIME_SCOPE(conversation_request);
   if (pet_resources_device_realtime_begin(&conversation_request) != PET_RESOURCE_OK) return ESP_ERR_INVALID_STATE;
   if (g_stream_lock) xSemaphoreTakeRecursive(g_stream_lock, portMAX_DELAY);
+#if PET_P4_SYSTEM_WIFI
+  // A wired PTT worker can be promoted into conversation mode. A note
+  // worker has a private recipient and must drain before a new owner starts.
+  portENTER_CRITICAL(&g_capture_resource_lock);
+  bool note_worker=!strncmp(g_capture_owner,PET_NOTE_PREFIX,sizeof(PET_NOTE_PREFIX)-1) &&
+      (atomic_load(&g_capture_requested)||atomic_load(&g_capture_active));
+  portEXIT_CRITICAL(&g_capture_resource_lock);
+  if (note_worker) {
+    capture_request_cancel();
+    if (g_stream_lock) xSemaphoreGiveRecursive(g_stream_lock);
+    return ESP_ERR_INVALID_STATE;
+  }
+#endif
   if (atomic_load(&g_music)) pet_p4_audio_stream_flush();
   if (!conversation_mic_gain(!half_duplex)) {
     if (g_stream_lock) xSemaphoreGiveRecursive(g_stream_lock);

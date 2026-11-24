@@ -1,3 +1,4 @@
+import { secretInputProps } from "./lib/secret-input.js";
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { formatModelIssue } from "./lib/model-issue.js";
@@ -11,7 +12,7 @@ function isEdited(form, saved) {
   return Boolean(form) && Object.entries(speechForm(saved)).some(([key, value]) => form[key] !== value);
 }
 
-export default function CustomSpeechSettings({ active = true, showSecrets = false, presetRevision = 0, onStateChange, onSaved }) {
+export default function CustomSpeechSettings({ active = true, presetRevision = 0, onStateChange, onSaved }) {
   const [snapshot, setSnapshot] = useState(null);
   const saved = useRef(null);
   const [drafts, setDrafts] = useState({});
@@ -115,7 +116,7 @@ export default function CustomSpeechSettings({ active = true, showSecrets = fals
   }
 
   return <div hidden={!active}>
-    <p className="muted small">识别和合成可选不同服务，保存后该项立即生效。填写 OpenAI 兼容接口地址，使用 MiMo 兼容代理时填写完整的 /chat/completions 地址。测试会调用所选服务，可能产生费用。</p>
+    <p className="muted small">识别和合成可选不同服务，保存后该项立即生效。填写 OpenAI 兼容接口地址；使用 /chat/completions 接口时，请填写完整端点地址。测试会调用所选服务，可能产生费用。</p>
     {!ready && <div role="status">{readError || "正在读取语音配置…"}
       {readError && <button type="button" className="btn-secondary btn-sm" onClick={() => setRefresh(value => value + 1)}>重新读取</button>}
     </div>}
@@ -128,9 +129,9 @@ export default function CustomSpeechSettings({ active = true, showSecrets = fals
       if (status?.configured) stateLabel = status.active ? "正在使用此自定义服务" : "配置已保存，当前使用其他服务";
       const field = (key, label, placeholder) => <label className="ui-field">
         <span className="ui-field__label">{label}</span>
-        <input className="ui-control" type={key === "apiKey" && !showSecrets ? "password" : "text"}
+        <input className="ui-control" {...(key === "apiKey" ? secretInputProps : { type: "text", autoComplete: "off" })}
           value={form[key]} onChange={event => edit(stage, key, event.target.value)}
-          spellCheck={false} autoComplete={key === "apiKey" ? "new-password" : "off"} placeholder={placeholder}/>
+          spellCheck={false} placeholder={placeholder}/>
       </label>;
       return <fieldset key={stage} className="custom-speech__stage" disabled={!ready || pending[stage]}>
         <legend>{titles[stage]}</legend>

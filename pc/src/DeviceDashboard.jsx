@@ -34,7 +34,7 @@
  * [Sync] If this file changes, update this header and `pc/src/.folder.md`.
  */
 
-import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
+import React, { useLayoutEffect, useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { RefreshCw } from "lucide-react";
@@ -61,7 +61,8 @@ import VoiceAssistantPanel, { buildVoiceSummary, formatVoiceSessionOption } from
 import {voiceRuntimeTarget,createVoiceRuntimePoller} from "./dashboard/voice-runtime-target.js";
 import RealtimeChatPanel, { realtimeStateLabel } from "./dashboard/RealtimeChatPanel.jsx";
 import { isRecoveringAsr, realtimeErrorMessage } from "./lib/realtime-feedback.js";
-import { useAgentSessionFeed } from "./dashboard/useAgentSessionFeed.js";
+import { pollWhileVisible } from "./lib/visible-poll.js";
+import { agentSessionFeedFresh, P4_SESSION_EVENT_POLL_MS, useAgentSessionFeed } from "./dashboard/useAgentSessionFeed.js";
 import { useDeviceVoiceRouter } from "./dashboard/useDeviceVoiceRouter.js";
 import { subscribeAsrCredentialUpdates } from "./dashboard/voice-credential-events.js";
 import { useP4SessionSync } from "./dashboard/useP4SessionSync.js";
@@ -69,7 +70,10 @@ import DashboardActionsMenu from "./dashboard/DashboardActionsMenu.jsx";
 import FirmwareUpdateModal from "./dashboard/FirmwareUpdateModal.jsx";
 import DeviceDiagnosticsModal from "./dashboard/DeviceDiagnosticsModal.jsx";
 import { wifiDeviceControl, wifiDeviceControlReady } from "./lib/wifi-device-control.js";
-import { ACTIVE_APPEARANCE_KEY } from "./lib/desktop-pet-assignment.js";
+import { sendTestMessage, testMessageTarget } from "./lib/device-test-message.js";
+import { useAppearanceDelivery } from "./lib/use-appearance-delivery.js";
+import { readActiveAppearanceId } from "./lib/desktop-pet-assignment.js";
+import { appearanceTarget } from "./lib/appearance-delivery.js";
 import { observeAppearanceFromMenu, appearanceObservationError } from "./lib/appearance-readonly-observation.js";
 import { BUILTIN_TERRIER_APPEARANCE_ID } from "./lib/builtin-appearances.js";
 import { ensureBridgeRuntime } from "./lib/bridge-runtime.js";
@@ -858,6 +862,7 @@ export default function DeviceDashboard({ active = true, keyboardActive = false,
   const [firmwareModalOpen, setFirmwareModalOpen] = useState(false);
   useEffect(() => { if (!active) setFirmwareModalOpen(false); }, [active]);
   const [diagnosticsModalOpen, setDiagnosticsModalOpen] = useState(false);
+  const [firmwareWifiBootId, setFirmwareWifiBootId] = useState("");
   const [firmwareTargetBoardDeviceId, setFirmwareTargetBoardDeviceId] = useState("");
   const [diagnosticsTargetBoardDeviceId, setDiagnosticsTargetBoardDeviceId] = useState("");
   const [diagnosticsWifiTarget, setDiagnosticsWifiTarget] = useState(null);
@@ -880,6 +885,7 @@ export default function DeviceDashboard({ active = true, keyboardActive = false,
   wifiInputScopeRef.current = wifiInputScope;
   const voiceTarget = voiceRuntimeTarget(usb, selectedAgentId, wifi);
   const voiceOnWifi = voiceTarget.kind === "wifi";
+  const monitorVoiceRuntime = active || voiceTarget.kind === "legacy";
   const p4VoiceRuntime = isP4Runtime || voiceOnWifi;
   const voiceTargetKeyRef = useRef(voiceTarget.key);
   // Update during render: an old Promise may settle before effect cleanup.
@@ -1098,27 +1104,47 @@ export default function DeviceDashboard({ active = true, keyboardActive = false,
         inFlight = false;
       }
     };
-    run();
-    const id = setInterval(run, 5000);
+    // A live session feed already proves Bridge reachability. If the feed stalls
+    // or no Agent is followed, keep the recovery path available in the tray.
+    const check = () => {
+      if ((!active || document.hidden) && agentSessionFeedFresh(selectedAgentId, 2 * P4_SESSION_EVENT_POLL_MS)) return;
+      void run();
+    };
+    const resume = () => { if (active && !document.hidden) void run(); };
+    check();
+    const id = setInterval(check, 5000);
+    document.addEventListener("visibilitychange", resume);
     return () => {
       cancelled = true;
       ctl.abort();
       clearInterval(id);
+      document.removeEventListener("visibilitychange", resume);
     };
-  }, []);
+  }, [active, selectedAgentId]);
 
   // Poll only after reading the connected device's identity and capability.
   useEffect(() => {
     voiceDispatch({type:"set_voice_runtime",value:{mode:"waiting_device",running:false,
       message:"正在等待设备握手确认",agentId:"",targetKey:voiceTarget.key}});
     voiceDispatch({type:"set_audio_bridge_pending",value:false});
+  }, [voiceTarget.key]);
+
+  useEffect(() => {
     const poller=createVoiceRuntimePoller({target:voiceTarget,invoke,
       isCurrent:()=>voiceTargetKeyRef.current===voiceTarget.key,
       publish:value=>voiceDispatch({type:"set_voice_runtime",value})});
-    poller.poll();
-    const id=setInterval(()=>poller.poll(),5000);
-    return ()=>{poller.cancel();clearInterval(id);};
-  }, [voiceTarget.key]);
+    // Legacy ensure_voice_runtime owns a service lifecycle. P4 and Wi-Fi read
+    // configuration for the displayed panel; microphone rearm is independent.
+    if (voiceTarget.kind === "legacy") {
+      void poller.poll();
+      const timer = setInterval(poller.poll, 5000);
+      return () => { clearInterval(timer); poller.cancel(); };
+    }
+    if (!monitorVoiceRuntime || voiceTarget.kind === "waiting") return () => poller.cancel();
+    if (!document.hidden) void poller.poll();
+    const stop = pollWhileVisible(poller.poll, 5000);
+    return () => { stop(); poller.cancel(); };
+  }, [monitorVoiceRuntime, voiceTarget.key]);
 
   // ---------- Button config update + OTA dispatch ----------
   const updateVoiceConfig = useCallback((patch) => {
@@ -1535,27 +1561,26 @@ export default function DeviceDashboard({ active = true, keyboardActive = false,
 
   const [appearanceObservationBusy, setAppearanceObservationBusy] = useState(false);
   const appearanceObservationOwnerRef = useRef(null);
-  const appearanceObservationUsbRef = useRef(usb);
-  appearanceObservationUsbRef.current = usb;
-  useEffect(() => () => { appearanceObservationOwnerRef.current = null; }, []);
+  const observationTarget = appearanceTarget(usb, wifi, binding?.boardDeviceId);
+  const observationKey = JSON.stringify(observationTarget);
+  const observationScope = useRef(null);
+  useLayoutEffect(() => {
+    const scope = { key: observationKey, target: JSON.parse(observationKey) };
+    observationScope.current = scope;
+    return () => { observationScope.current = null; };
+  }, [observationKey]);
   const onReconcileAppearance = useCallback(async () => {
-    if (appearanceObservationOwnerRef.current) return;
-    const current = appearanceObservationUsbRef.current;
-    if (!current?.connected || !current.boardDeviceId || appearanceSync?.pending) return;
-    const owner = { boardDeviceId: current.boardDeviceId, connectionId: current.connectionId,
-      bootId: current.bootId || current.capabilities?.debugBootId || "" };
+    const scope = observationScope.current;
+    if (!scope?.target || appearanceObservationOwnerRef.current || appearanceSync?.pending) return;
+    const owner = scope.target;
     appearanceObservationOwnerRef.current = owner;
     setAppearanceObservationBusy(true);
-    const isCurrent = () => appearanceObservationOwnerRef.current === owner
-      && appearanceObservationUsbRef.current.connected === true
-      && appearanceObservationUsbRef.current.boardDeviceId === owner.boardDeviceId
-      && appearanceObservationUsbRef.current.connectionId === owner.connectionId
-      && (appearanceObservationUsbRef.current.bootId || appearanceObservationUsbRef.current.capabilities?.debugBootId || "") === owner.bootId;
+    const isCurrent = () => appearanceObservationOwnerRef.current === owner && observationScope.current === scope;
     try {
-      const result = await observeAppearanceFromMenu({ invoke, boardDeviceId: owner.boardDeviceId, isCurrent });
+      const result = await observeAppearanceFromMenu({ invoke, boardDeviceId: owner.boardDeviceId, wifiBootId: owner.transport === "wifi" ? owner.bootId : null, isCurrent });
       if (isCurrent()) push({ tone: "info", ...result });
     } catch (error) {
-      if (appearanceObservationOwnerRef.current === owner) push({ tone: "warning", title: "形象状态尚未确认", message: appearanceObservationError(error) });
+      if (isCurrent()) push({ tone: "warning", title: "形象状态尚未确认", message: appearanceObservationError(error) });
     } finally {
       if (appearanceObservationOwnerRef.current === owner) {
         appearanceObservationOwnerRef.current = null;
@@ -1565,16 +1590,24 @@ export default function DeviceDashboard({ active = true, keyboardActive = false,
   }, [appearanceSync?.pending, push]);
 
   // ---------- Action-menu callbacks ----------
-  const onSendTest = useCallback(() => {
-    const sendPromise = usb.connected
-      ? invoke("usb_send_speech", { text: "hello from pet-manager" }).then(() => ({ ok: true })).catch((err) => ({ ok: false, error: String(err) }))
-      : Promise.resolve({ ok: false, error: "USB 未连接" });
-    sendPromise.then((res) => {
-      push(res.ok
-        ? { tone: "success", title: "测试消息已发送" }
-        : { tone: "error", title: "测试消息发送失败", message: res.error });
-    });
-  }, [push, usb.connected]);
+  const testTarget = testMessageTarget(usb, wifi, binding?.boardDeviceId);
+  const testScope = JSON.stringify(testTarget);
+  const testOwner = useRef(null);
+  useEffect(() => {
+    const owner = { target: testTarget };
+    testOwner.current = owner;
+    return () => { testOwner.current = null; };
+  }, [testScope]);
+  const onSendTest = useCallback(async () => {
+    const owner = testOwner.current;
+    if (!owner?.target) return;
+    try {
+      const message = await sendTestMessage(invoke, owner.target);
+      if (testOwner.current === owner) push({ tone: owner.target.legacy ? "info" : "success", title: "测试消息", message });
+    } catch (error) {
+      if (testOwner.current === owner) push({ tone: "warning", title: "测试消息", message: String(error?.message || error) });
+    }
+  }, [push]);
 
   const onCopyDesktopId = useCallback(() => {
     try {
@@ -1602,31 +1635,20 @@ export default function DeviceDashboard({ active = true, keyboardActive = false,
     }
   }, [push, usb.boardDeviceId, wifi, wifiControlReady]);
 
-  /* 应急：客户端 UI 形象 vs 设备实际脱节时，绕过 desktop-pet-assignment.js 的
-   * appearanceChanged 缓存判断，直接重新推送当前 active appearance 到设备 */
+  const recoveryAppearanceId = (wifi && currentDisplay.appearance?.id)
+    || readActiveAppearanceId()
+    || BUILTIN_TERRIER_APPEARANCE_ID;
+  const { available: canDeliverAppearance, send: sendAppearance } = useAppearanceDelivery(
+    usb, wifi, binding?.boardDeviceId, recoveryAppearanceId,
+  );
   const onForceSyncAppearance = useCallback(async () => {
-    const appearanceId =
-      (typeof window !== "undefined" && window.localStorage
-        ? window.localStorage.getItem(ACTIVE_APPEARANCE_KEY)
-        : null) || BUILTIN_TERRIER_APPEARANCE_ID;
     try {
-      const result = await invoke("usb_sync_appearance", {
-        appearanceId,
-        boardDeviceId: p4TargetBoardDeviceId,
-      });
-      if (result?.ok) {
-        push({
-          tone: "success",
-          title: `已强制重推形象到设备（${appearanceId}）`,
-          message: `${result.fileCount || 0} 个素材，${result.byteCount || 0} bytes`,
-        });
-      } else {
-        push({ tone: "error", title: "强制同步失败", message: result?.error || "未知错误" });
-      }
+      const message = await sendAppearance();
+      if (message !== null) push({ tone: "success", title: "设备形象已核对", message });
     } catch (err) {
-      push({ tone: "error", title: "强制同步失败", message: typeof err === "string" ? err : String(err) });
+      push({ tone: "error", title: "重新同步形象失败", message: String(err?.message || err) });
     }
-  }, [p4TargetBoardDeviceId, push]);
+  }, [push, sendAppearance]);
 
   const onInputConfigReset = useCallback(async (wirelessReadback) => {
     const revision = ++buttonConfigRevisionRef.current;
@@ -1678,16 +1700,19 @@ export default function DeviceDashboard({ active = true, keyboardActive = false,
       help={hasKnownRuntime ? () => setGuideOpen(true) : undefined}
       actions={
         <DashboardActionsMenu
-          onSendTest={usb.connected ? onSendTest : undefined}
+          onSendTest={testTarget ? onSendTest : undefined}
           onCopyDesktopId={binding.desktopDeviceId ? onCopyDesktopId : undefined}
           onUnbind={onUnbind ? onUnbindClick : undefined}
           onDeviceReturnHome={usb.connected || wifiControlReady ? onDeviceReturnHome : undefined}
-          onForceSyncAppearance={usb.connected ? onForceSyncAppearance : undefined}
+          onForceSyncAppearance={canDeliverAppearance && !appearanceSync?.pending ? onForceSyncAppearance : undefined}
           onReconcileAppearance={onReconcileAppearance}
-          canReconcileAppearance={usb.connected === true && Boolean(usb.boardDeviceId) && !appearanceSync?.pending && !appearanceObservationBusy}
-          onUpdateFirmware={usb.connected && usb.boardDeviceId && usb.connectionId && usb.runtime === P4_RUNTIME_ID
+          canReconcileAppearance={Boolean(observationTarget) && !appearanceSync?.pending && !appearanceObservationBusy}
+          onUpdateFirmware={(usb.connected
+            ? usb.boardDeviceId && usb.connectionId && usb.runtime === P4_RUNTIME_ID
+            : wifi?.controlTrusted && wifi?.wirelessOta && wifi?.boardDeviceId && wifi?.bootId)
             ? () => {
-              setFirmwareTargetBoardDeviceId(usb.boardDeviceId || "");
+              setFirmwareWifiBootId(usb.connected ? "" : wifi.bootId);
+              setFirmwareTargetBoardDeviceId(usb.connected ? usb.boardDeviceId : wifi.boardDeviceId);
               setFirmwareModalOpen(true);
             }
             : undefined}
@@ -1718,6 +1743,7 @@ export default function DeviceDashboard({ active = true, keyboardActive = false,
         </div>
       )}
       <ChannelMatrixCard
+        onOpenPersona={setEditingPersona}
         subtitle={agentScanSummary}
         actions={(
           <Button
@@ -1787,7 +1813,11 @@ export default function DeviceDashboard({ active = true, keyboardActive = false,
       <DeviceGuideModal
         isOpen={guideOpen}
         onClose={() => setGuideOpen(false)}
-        runtime={usb.runtime}
+        runtime={buttonPanelRuntime}
+        usb={usb}
+        wifi={wifi}
+        wifiEntry={!hasKnownRuntime && !usb.connected && wifi?.wifiConnected === true}
+        setGuideOpen={setGuideOpen}
       />
       <DeviceDiagnosticsModal
         open={diagnosticsModalOpen}
@@ -1813,6 +1843,8 @@ export default function DeviceDashboard({ active = true, keyboardActive = false,
         setFirmwareTargetBoardDeviceId("");
       }}
       usb={usb}
+      wifi={wifi}
+      expectedWifiBootId={firmwareWifiBootId}
       expectedBoardDeviceId={firmwareTargetBoardDeviceId}
     />
     {editingPersona && <div hidden={!active}><PersonaVoiceModal

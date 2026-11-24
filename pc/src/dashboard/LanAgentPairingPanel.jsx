@@ -169,7 +169,8 @@ export default function LanAgentPairingPanel({ usb, active = true, maintenanceRe
       const preview = await invoke("lan_component_preview", {path});
       if (owner !== generation.current) return;
       await invoke("lan_component_install", { path, ...preview,
-        expectedBoardDeviceId: deviceStatus.boardDeviceId, expectedBootId: deviceStatus.bootId });
+        expectedBoardDeviceId: deviceStatus.boardDeviceId, expectedBootId: deviceStatus.bootId,
+        expectedAssociation: deviceStatus.componentTarget?.association });
       if (owner === generation.current) setDeliveryMessage("设备已提交安装。");
     } catch (e) {
       if (owner === generation.current) setError(e?.message || String(e));

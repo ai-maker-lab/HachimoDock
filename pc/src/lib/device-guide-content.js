@@ -103,6 +103,12 @@ export const CARDS = [
   },
 ];
 
+export const GUIDE_TEST_MESSAGE = "hello from pet-manager";
+export const GUIDE_OFFLINE_APPS = Object.freeze({
+  "wooden-fish": "静心木鱼",
+  "snake-turn": "像素贪吃蛇",
+});
+
 export const P4_CARDS = [
   {
     id: "screen-switch",

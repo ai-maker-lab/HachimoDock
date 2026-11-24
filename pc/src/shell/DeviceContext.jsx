@@ -40,6 +40,7 @@ import {
   APPEARANCE_SYNC_CANCELLED_MESSAGE,
   FOLLOW_ASSIGNMENT_BUSY_MESSAGE,
 } from "../lib/desktop-pet-assignment.js";
+import { wifiAppearanceProgress } from "../lib/appearance-delivery.js";
 import { getAppearance, listAppearances } from "../lib/appearance-store.js";
 import { buildRealtimeChatStartInput, PERSONA_VOICE_UPDATED_EVENT } from "../lib/persona-voice.js";
 import { componentPetVoice, createComponentVoiceSync } from "../lib/component-pet-voice.js";
@@ -463,29 +464,23 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
     if (!wifi.controlTrusted) throw new Error("请通过 USB 连接同一台设备一次，授权无线控制后即可通过 Wi-Fi 更换形象。");
     if (!appearance?.id) throw new Error("请选择一个形象。");
     if (appearanceAssignmentOwnerRef.current) throw new Error(FOLLOW_ASSIGNMENT_BUSY_MESSAGE);
-    const owner = { boardDeviceId: wifi.boardDeviceId, cancelRequested: false };
+    const owner = { boardDeviceId: wifi.boardDeviceId, bootId: wifi.bootId,
+      requestId: createDesktopPetIntentId(), cancelRequested: false };
     appearanceAssignmentOwnerRef.current = owner;
     setAppearanceSync({ ...EMPTY_APPEARANCE_SYNC, pending: true, agentId,
       appearanceId: appearance.id, appearanceName: appearance.name,
-      transport: "wifi", progress: { text: "正在确认设备形象…", indeterminate: true } });
+      transport: "wifi", progress: { text: "正在核对本机素材和设备形象槽位…", indeterminate: true } });
     let unlisten;
     let verified = false;
     try {
       unlisten = await listen("wifi-appearance-progress", ({ payload }) => {
         if (appearanceAssignmentOwnerRef.current !== owner || owner.cancelRequested) return;
-        const progress = payload.stage === "activating"
-          ? { text: "正在切换设备上的形象…", indeterminate: true }
-          : payload.stage === "preparing"
-            ? { text: "设备缺少目标形象，正在准备素材传输…", indeterminate: true }
-            : {
-                percent: Math.min(99, Math.floor(payload.bytesSent / payload.bytesTotal * 100)),
-                text: payload.bytesSent === payload.bytesTotal ? "正在校验并激活…" : "正在通过 Wi-Fi 传输形象…",
-              };
-        setAppearanceSync(current => ({ ...current, progress }));
+        const progress = wifiAppearanceProgress(payload, owner);
+        if (progress) setAppearanceSync(current => ({ ...current, progress }));
       });
       if (owner.cancelRequested) throw new Error(APPEARANCE_SYNC_CANCELLED_MESSAGE);
       const outcome = await invoke("lan_sync_appearance", { appearanceId: appearance.id,
-        boardDeviceId: wifi.boardDeviceId, bootId: wifi.bootId });
+        boardDeviceId: owner.boardDeviceId, bootId: owner.bootId, requestId: owner.requestId });
       if (!["alreadyActive", "activated", "uploaded"].includes(outcome)) {
         throw new Error("设备形象结果尚未确认，本次未切换 Agent。");
       }
@@ -688,24 +683,29 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
     if (!appearanceSync.pending || appearanceSync.cancelling) {
       return { requested: false };
     }
-    if (appearanceAssignmentOwnerRef.current) appearanceAssignmentOwnerRef.current.cancelRequested = true;
-    const text = appearanceSync.transport === "wifi" ? "正在中断 Wi-Fi 形象传输…" : "正在中断 USB 形象传输…";
+    const owner = appearanceAssignmentOwnerRef.current;
+    if (!owner) return { requested: false };
+    owner.cancelRequested = true;
+    const text = appearanceSync.progress?.indeterminate ? "正在取消形象切换…"
+      : appearanceSync.transport === "wifi" ? "正在中断 Wi-Fi 形象传输…" : "正在中断 USB 形象传输…";
     setAppearanceSync(current => ({
       ...current,
       cancelling: true,
       progress: { ...current.progress, text },
     }));
     try {
-      const result = await invoke("usb_cancel_appearance_sync");
-      if (!result?.requested) {
+      const result = owner.requestId
+        ? await invoke("usb_cancel_appearance_sync", { requestId: owner.requestId })
+        : await invoke("usb_cancel_appearance_sync");
+      if (!result?.requested && appearanceAssignmentOwnerRef.current === owner) {
         setAppearanceSync((current) => ({ ...current, cancelling: false }));
       }
       return result;
     } catch (error) {
-      setAppearanceSync((current) => ({ ...current, cancelling: false }));
+      if (appearanceAssignmentOwnerRef.current === owner) setAppearanceSync(current => ({ ...current, cancelling: false }));
       throw error;
     }
-  }, [appearanceSync.cancelling, appearanceSync.pending, appearanceSync.transport]);
+  }, [appearanceSync.cancelling, appearanceSync.pending, appearanceSync.progress, appearanceSync.transport]);
 
   const saveAgentAppearance = useCallback((agentId, appearanceId) => {
     const nextMap = assignAppearanceToAgent(agentAppearanceMap, agentId, appearanceId);
@@ -816,6 +816,7 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
     const lanPress = createRealtimePressHandler({
       accept: token => invoke("lan_realtime_toggle", { token, input: null }),
       configure: (token, isCurrent) => startRealtimeChat({ boardDeviceId: token.boardDeviceId, lanPress: token, isCurrent }),
+      onConfigurationFailure: token => invoke("lan_realtime_toggle", { token, input: null, configurationFailed: true }),
       onError: error => setRealtimeChat(current => ({ ...current, error: error?.message || String(error) })),
     });
     // 板端「实时对话」键：Rust 不知道设备上是哪个形象，由这里用当前形象拉起会话。
@@ -826,7 +827,7 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
         if (disposed) return;
         const message = error?.message || String(error);
         setRealtimeChat((current) => ({ ...current, active: false, state: "idle", error: message }));
-        invoke("usb_send_speech", { text: message.slice(0, 60) }).catch(() => {});
+        invoke("usb_send_speech", { text: message.slice(0, 60), expectedBoardDeviceId: boardDeviceId }).catch(() => {});
       });
     }).then(async (stop) => {
       if (disposed) { stop(); return; }

@@ -45,6 +45,11 @@ static cJSON *lan_panel_run(unsigned action, const cJSON *request, pet_p4_runtim
   char storage_error[160] = {0};
   switch (action) {
 #ifdef ESP_PLATFORM
+    case PET_LAN_PANEL_TEST_MESSAGE: {
+      uint32_t association = pet_device_wifi_association();
+      uint64_t route = ((uint64_t)generation << 32) | association;
+      return pet_p4_test_message(state, request, route, association && admitted);
+    }
     case PET_LAN_PANEL_BUBBLE_FONT: {
       return pet_p4_font_delivery(request, lan_panel_font_route(), state->board_device_id,
           admitted && !state->asset_transfer_active && !pet_p4_ota_active() && !pet_p4_audio_conversation_active());

@@ -1,3 +1,4 @@
+import { pollWhileVisible } from "../lib/visible-poll.js";
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Card from "../shell/Card.jsx";
@@ -115,8 +116,8 @@ export default function BluetoothShortcutPanel({ usb, wifi, board, active = true
       }
     }
     void read();
-    const timer = setInterval(read, 2000);
-    return () => { cancelled = true; clearInterval(timer); };
+    const stop = pollWhileVisible(read, 2000);
+    return () => { cancelled = true; stop(); };
   }, [active, board, connection, supported, pending, requestConfig]);
 
   useEffect(() => {

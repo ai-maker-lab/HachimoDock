@@ -62,6 +62,7 @@ mod dsh_desktop;
 mod dsh_paths;
 mod dsh_windows_acl;
 mod clawpkg;
+mod component_network;
 mod wasm_audio;
 mod json_canonical;
 mod app_shell;
@@ -149,6 +150,7 @@ mod web_search;
 mod miot_protocol;
 mod smart_home;
 mod smart_home_credentials;
+mod user_home;
 mod llm_network;
 mod model_issue;
 mod generation_diagnostics;
@@ -172,6 +174,7 @@ mod realtime_chat_log;
 mod usb_audio;
 mod device_voice_lifecycle;
 mod device_voice_feedback;
+mod usb_replay;
 mod usb_serial;
 mod appearance_recovery_ipc;
 mod voice_chat_settings;
@@ -8385,17 +8388,37 @@ async fn usb_send_state(
 async fn usb_send_speech(
     usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
     text: String,
+    expected_board_device_id: Option<String>,
+    expected_connection_id: Option<String>,
+    expected_boot_id: Option<String>,
+    request_receipt: Option<bool>,
 ) -> Result<(), String> {
     // Snapshot the latest known active state before injecting transient test speech.
-    let board_device_id = usb_manager.status().board_device_id;
-    if let Some((source, payload)) = load_last_usb_active_state()
-        .or_else(|| pick_best_usb_bridge_state(false, &board_device_id))
-        .or_else(|| pick_best_usb_bridge_state(true, &board_device_id))
+    let owner = usb_manager.status();
+    if !owner.connected
+        || expected_boot_id.as_ref().is_some_and(|boot| boot != &owner.boot_id)
+        || expected_board_device_id.as_ref().is_some_and(|board| board != &owner.board_device_id)
+        || expected_connection_id.as_ref().is_some_and(|id| id != &owner.connection_id)
     {
-        cache_last_usb_active_state(&source, &payload);
+        return Err("USB 设备连接已切换，请在当前设备上重试".into());
+    }
+    let generation = owner.connection_id.parse::<u64>().map_err(|_| "设备尚未完成连接")?;
+    let board_device_id = &owner.board_device_id;
+    if let Some((source, payload)) = usb_replay::load(&owner)
+        .or_else(|| pick_best_usb_bridge_state(false, board_device_id))
+        .or_else(|| pick_best_usb_bridge_state(true, board_device_id))
+    {
+        usb_replay::store(&owner, &source, &payload);
     }
 
-    usb_manager.send_speech(&text)?;
+    if request_receipt == Some(true) {
+        let manager = usb_manager.inner().clone();
+        let board = board_device_id.clone();
+        tauri::async_runtime::spawn_blocking(move || manager.send_test_speech_confirmed(&board, generation, &text))
+            .await.map_err(|_| "测试消息回执未确认。")??;
+    } else {
+        usb_manager.send_test_speech_bound(board_device_id, generation, &text)?;
+    }
 
     // Test speech is transient feedback; replay latest active state multiple times
     // so the pet reliably returns to the previous lifecycle even on transient USB jitter.
@@ -8412,7 +8435,7 @@ async fn usb_send_speech(
 
         for target_ms in [1400u64, 3200u64, 5400u64] {
             sleep_to(&mut elapsed_ms, target_ms);
-            if let Err(error) = replay_usb_active_state(&manager) {
+            if let Err(error) = replay_usb_active_state(&manager, &owner, generation) {
                 eprintln!(
                     "[usb-forwarder] replay active after speech failed(at {} ms): {}",
                     target_ms, error
@@ -8545,19 +8568,28 @@ async fn usb_activate_installed_widget(usb_manager:tauri::State<'_,usb_serial::U
 }
 
 #[tauri::command]
-async fn usb_get_background_programs(usb_manager:tauri::State<'_,usb_serial::UsbSerialManager>,expected_board_device_id:String)->Result<app_program_background::Snapshot,String>{
+async fn usb_get_background_programs(usb_manager:tauri::State<'_,usb_serial::UsbSerialManager>,expected_board_device_id:String,maintenance_target:Option<lan_agent::maintenance::Scope>)->Result<app_program_background::Snapshot,String>{
     let manager=usb_manager.inner().clone();
-    tauri::async_runtime::spawn_blocking(move||manager.query_background_programs(&expected_board_device_id)).await.map_err(|e|e.to_string())?
+    tauri::async_runtime::spawn_blocking(move||match maintenance_target {
+        Some(scope)=>lan_agent::maintenance::query(&manager,&expected_board_device_id,&scope),
+        None=>manager.query_background_programs(&expected_board_device_id),
+    }).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
-async fn usb_start_background_program(usb_manager:tauri::State<'_,usb_serial::UsbSerialManager>,expected_board_device_id:String,component_id:String)->Result<app_program_background::Outcome,String>{
+async fn usb_start_background_program(usb_manager:tauri::State<'_,usb_serial::UsbSerialManager>,expected_board_device_id:String,component_id:String,maintenance_target:Option<lan_agent::maintenance::Scope>)->Result<app_program_background::Outcome,String>{
     let manager=usb_manager.inner().clone();
-    tauri::async_runtime::spawn_blocking(move||manager.start_background_program(&expected_board_device_id,&component_id)).await.map_err(|e|e.to_string())?
+    tauri::async_runtime::spawn_blocking(move||match maintenance_target {
+        Some(scope)=>lan_agent::maintenance::start(&manager,&expected_board_device_id,&scope,&component_id),
+        None=>manager.start_background_program(&expected_board_device_id,&component_id),
+    }).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
-async fn usb_stop_background_program(usb_manager:tauri::State<'_,usb_serial::UsbSerialManager>,expected_board_device_id:String,component_id:String,boot_id:String,registration:String)->Result<app_program_background::Outcome,String>{
+async fn usb_stop_background_program(usb_manager:tauri::State<'_,usb_serial::UsbSerialManager>,expected_board_device_id:String,component_id:String,boot_id:String,registration:String,maintenance_target:Option<lan_agent::maintenance::Scope>)->Result<app_program_background::Outcome,String>{
     let manager=usb_manager.inner().clone();
-    tauri::async_runtime::spawn_blocking(move||manager.stop_background_program(&expected_board_device_id,&component_id,&boot_id,&registration)).await.map_err(|e|e.to_string())?
+    tauri::async_runtime::spawn_blocking(move||match maintenance_target {
+        Some(scope)=>lan_agent::maintenance::stop(&manager,&expected_board_device_id,&scope,&component_id,&boot_id,&registration),
+        None=>manager.stop_background_program(&expected_board_device_id,&component_id,&boot_id,&registration),
+    }).await.map_err(|e|e.to_string())?
 }
 
 #[tauri::command]
@@ -9225,9 +9257,10 @@ fn start_p4_ready_migration(app_handle: tauri::AppHandle) {
 #[tauri::command]
 fn usb_cancel_appearance_sync(
     usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
+    request_id: Option<String>,
 ) -> UsbCancelAppearanceSyncResult {
     UsbCancelAppearanceSyncResult {
-        requested: usb_manager.cancel_appearance_sync(),
+        requested: usb_manager.cancel_owned_appearance_sync(request_id.as_deref()),
     }
 }
 
@@ -9266,8 +9299,22 @@ async fn usb_sync_appearance(
     appearance_id: String,
     board_device_id: Option<String>,
     audio_only: Option<bool>,
+    expected_connection_id: Option<String>,
+    expected_boot_id: Option<String>,
+    request_id: Option<String>,
 ) -> Result<UsbSyncAppearanceResult, String> {
     let status = usb_manager.status();
+    if expected_connection_id.as_ref().is_some_and(|id| !status.connected || *id != status.connection_id)
+        || expected_boot_id.as_ref().is_some_and(|id| !status.connected || *id != status.boot_id)
+    {
+        return Err("USB 设备连接已变化，请重新确认设备。".into());
+    }
+    let serial_scope = if status.connected && !audio_only.unwrap_or(false) {
+        let generation = status.connection_id.parse::<u64>().map_err(|_| "USB 尚未确认连接")?;
+        Some((generation, status.capabilities["debugBootId"].as_str().unwrap_or_default().to_owned()))
+    } else {
+        None
+    };
     let native_usb_available = usb_serial::p4_native_usb_available();
     if !status.connected && !native_usb_available {
         return Err("USB 未连接，请先通过 USB 连接设备".to_string());
@@ -9365,13 +9412,14 @@ async fn usb_sync_appearance(
         UsbAppearanceSyncRuntime::Linux => {}
     }
 
-    usb_manager.begin_appearance_sync()?;
+    usb_manager.begin_owned_appearance_sync(request_id)?;
     let mgr = usb_manager.inner().clone();
     let worker_mgr = mgr.clone();
     let dir = appearance_dir.clone();
     let data_dir = app_local_data_dir.clone();
     let emitter = app_handle.clone();
     let worker_result = tauri::async_runtime::spawn_blocking(move || {
+        let expected_scope = serial_scope.as_ref().map(|(id, boot)| (*id, boot.as_str()));
         let sync_result = match sync_runtime {
             UsbAppearanceSyncRuntime::EspP4 => {
                 if serial_connected {
@@ -9380,6 +9428,7 @@ async fn usb_sync_appearance(
                         &dir,
                         &data_dir,
                         &expected_board_device_id,
+                        expected_scope,
                         use_device_builtin,
                         |current, total, bytes_sent, bytes_total| {
                             let _ = emitter.emit(
@@ -9424,6 +9473,8 @@ async fn usb_sync_appearance(
                 .sync_appearance(
                     &dir,
                     &data_dir,
+                    &expected_board_device_id,
+                    expected_scope,
                     |current, total, bytes_sent, bytes_total| {
                         let _ = emitter.emit(
                             "usb-sync-progress",
@@ -9804,7 +9855,12 @@ async fn build_petui_project(
         let archive = directory.path().join("component.hachiapp");
         petui_authoring::build_project(&resources, &skill, Path::new(&project), &archive)?;
         let entry = component_library::import_hachiapp(&home, &archive)?;
-        let delivery = match manager.check_petui_delivery(&entry.id, Path::new(&entry.path)) {
+        let package = Path::new(&entry.path);
+        let preflight = match manager.check_petui_delivery(&entry.id, package) {
+            Ok(None) if !manager.status().connected => lan_agent::component::check_petui_delivery(package),
+            result => result,
+        };
+        let delivery = match preflight {
             Ok(Some(())) => serde_json::json!({"state":"ready"}),
             Ok(None) => serde_json::json!({"state":"offline"}),
             Err(error) => serde_json::json!({"state":"blocked","message":error}),
@@ -11174,6 +11230,15 @@ async fn list_component_library(app: tauri::AppHandle) -> Result<component_libra
 }
 
 #[tauri::command]
+async fn import_component_edition(component: String, pet_name: Option<String>, portrait: Option<Vec<u8>>)
+    -> Result<component_library::ComponentLibraryEntry, String> {
+    let home = get_home_dir()?;
+    tauri::async_runtime::spawn_blocking(move ||
+        component_library::offline_editions::import(&home, &component, pet_name.as_deref(), portrait)
+    ).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn import_hachiapp(path: String) -> Result<component_library::ComponentLibraryEntry, String> {
     let home = get_home_dir()?;
     tauri::async_runtime::spawn_blocking(move || component_library::import_hachiapp(&home, &PathBuf::from(path)))
@@ -12096,12 +12161,12 @@ fn pick_usb_bridge_state_for_source(
     best_payload.map(|payload| (expected, payload))
 }
 
-fn replay_usb_active_state(usb_manager: &usb_serial::UsbSerialManager) -> Result<(), String> {
-    if !usb_manager.status().connected {
+fn replay_usb_active_state(usb_manager: &usb_serial::UsbSerialManager, owner: &usb_serial::UsbConnectionStatus, generation: u64) -> Result<(), String> {
+    if !usb_replay::same_connection(&usb_manager.status(), owner) {
         return Ok(());
     }
-    let board_device_id = usb_manager.status().board_device_id;
-    let cached = load_last_usb_active_state();
+    let board_device_id = &owner.board_device_id;
+    let cached = usb_replay::load(owner).filter(|(source, payload)| usb_session_binding_allows(board_device_id, source, payload));
     let same_source_non_speaking = cached
         .as_ref()
         .and_then(|(source, _)| pick_usb_bridge_state_for_source(source, true, &board_device_id));
@@ -12119,28 +12184,19 @@ fn replay_usb_active_state(usb_manager: &usb_serial::UsbSerialManager) -> Result
         None => return Ok(()),
     };
 
-    let _ = usb_manager.send_state(&source, &payload);
+    usb_manager.send_approval_bound(board_device_id, generation, &format!("state/{source}"), &payload)?;
 
     let mut active_payload = payload.clone();
     if let Some(object) = active_payload.as_object_mut() {
         object.insert("activeTopic".to_string(), serde_json::json!(true));
         object.insert("source".to_string(), serde_json::json!(source.clone()));
     }
-    usb_manager.send_state("active", &active_payload)?;
+    usb_manager.send_approval_bound(board_device_id, generation, "state/active", &active_payload)?;
     if let Some(restore_text) = build_usb_restore_speech_text(&source, &payload) {
-        if let Err(error) = usb_manager.send_speech(&restore_text) {
-            eprintln!(
-                "[usb-forwarder] restore speech after test failed(source={}): {}",
-                source, error
-            );
-        } else {
-            eprintln!(
-                "[usb-forwarder] restored speech after test(source={}): {}",
-                source, restore_text
-            );
-        }
+        let speech = serde_json::json!({"text":restore_text, "source":source, "sessionId":payload["sessionId"]});
+        usb_manager.send_approval_bound(board_device_id, generation, "speech/text", &speech)?;
     }
-    cache_last_usb_active_state(&source, &payload);
+    usb_replay::store(owner, &source, &payload);
     eprintln!(
         "[usb-forwarder] replayed state/active(source={}) after speech",
         source
@@ -12168,7 +12224,7 @@ fn forward_current_state_after_usb_connect(
         object.insert("source".to_string(), serde_json::json!(source.clone()));
     }
     usb_manager.send_state("active", &active_payload)?;
-    cache_last_usb_active_state(&source, &payload);
+    usb_replay::store(&status, &source, &payload);
     eprintln!(
         "[usb-auto] replayed current state/{} and state/active after connect",
         source
@@ -12652,7 +12708,7 @@ fn start_usb_state_forwarder(usb_manager: usb_serial::UsbSerialManager) {
             match usb_manager.send_state("active", &active_payload) {
                 Ok(_) => {
                     last_active_signature = active_signature;
-                    cache_last_usb_active_state(&best_source, &base_payload);
+                    usb_replay::store(&status, &best_source, &base_payload);
                     if let Some(speech_text) =
                         build_usb_active_speech_text(&best_source, &base_payload)
                     {
@@ -12661,8 +12717,8 @@ fn start_usb_state_forwarder(usb_manager: usb_serial::UsbSerialManager) {
                                 Ok(_) => {
                                     last_active_speech_text = speech_text.clone();
                                     eprintln!(
-                                        "[usb-forwarder] sent speech(active source={}): {}",
-                                        best_source, speech_text
+                                        "[usb-forwarder] sent speech(active source={})",
+                                        best_source
                                     );
                                 }
                                 Err(error) => {
@@ -12964,7 +13020,9 @@ pub fn run() {
             lan_agent::lan_device_status,
             lan_agent::lan_connection_snapshot,
             lan_agent::lan_follow_agent,
+            lan_agent::test_message::send_device_test_message,
             lan_agent::appearance::lan_sync_appearance,
+            lan_agent::appearance::lan_read_appearance_slot,
             lan_agent::appearance::lan_sync_global_audio_cues,
             lan_agent::lan_volume_request,
             lan_agent::lan_volume_result,
@@ -12975,6 +13033,7 @@ pub fn run() {
             lan_agent::component::lan_component_install,
             lan_agent::reboot::lan_reboot,
             lan_agent::ota::lan_update_bundled_firmware,
+            lan_agent::ota::lan_update_firmware_file,
             lan_agent::trust::lan_trust_usb,
             lan_agent::lan_agent_sessions,
             appearance_recovery_ipc::usb_reconcile_appearance_unknown,
@@ -13129,6 +13188,7 @@ pub fn run() {
             build_petui_project,
             list_component_library,
             import_hachiapp,
+            import_component_edition,
             read_component_wasm_preview,
             open_wasm_preview, tick_wasm_preview, close_wasm_preview,
             read_component_wasm_audio,
@@ -13266,9 +13326,7 @@ fn get_bridge_profile_path() -> Result<PathBuf, String> {
 }
 
 fn get_home_dir() -> Result<PathBuf, String> {
-    env::var_os("HOME")
-        .or_else(|| env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
+    user_home::current()
         .ok_or_else(|| "无法解析当前用户目录，无法写入共享 bridge 配置。".to_string())
 }
 

@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #define UNEXPECTED(name) int name(void) { abort(); }
 UNEXPECTED(hachi_module_host_profile)
+UNEXPECTED(hachi_module_network_profile)
 UNEXPECTED(pet_app_host_action)
 UNEXPECTED(pet_app_host_confirmed_action)
 UNEXPECTED(pet_app_host_context)

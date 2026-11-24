@@ -127,7 +127,8 @@ test("API settings owns voice and generation credential inputs", () => {
   assert.doesNotMatch(source, /Access Key|Secret Key/);
   assert.match(source, /KlingVideoSettings/);
   assert.match(source, /href=\{KLING_KEY_URL\}/);
-  assert.match(source, /type=\{showSecrets \? "text" : "password"\}/);
+  assert.doesNotMatch(source, /showSecrets|显示密钥|隐藏密钥/);
+  assert.match(source, /secretInputProps/);
   assert.match(source, /saveProviderConfig/);
   assert.match(source, /emitApiConfigurationUpdated/);
   assert.doesNotMatch(source, /macOS 不使用钥匙串|仅由当前用户读取，不额外加密|无需选择模型版本|火山引擎豆包语音（识别 \+ 合成）/);

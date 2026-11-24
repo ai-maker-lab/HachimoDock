@@ -5,6 +5,7 @@ import BoardButtonPanel from "../src/dashboard/BoardButtonPanel.jsx";
 import { DEFAULT_VOICE_CONFIG } from "../src/DeviceDashboard.jsx";
 import { initializeProviderConfigs } from "../src/lib/avatar-pipeline/provider-config.js";
 import "../src/styles.css";
+import "../src/companion-theme.css";
 
 export async function mountSettings() {
   await initializeProviderConfigs();

@@ -57,9 +57,11 @@ static void center_unpack_thumbnail(const uint8_t *packed, uint16_t *pixels) {
   }
 }
 
-static bool center_draw_thumbnail(const pet_p4_miniapp_catalog_entry_t *item, unsigned visible_slot,
-    int x, int y, bool *allow_load) {
-  if (!center_thumb_page) return false;
+typedef enum { CENTER_THUMB_MISSING, CENTER_THUMB_PENDING, CENTER_THUMB_DRAWN } center_thumb_state_t;
+
+static center_thumb_state_t center_draw_thumbnail(const pet_p4_miniapp_catalog_entry_t *item, unsigned visible_slot,
+    int x, int y, bool *allow_storage_read) {
+  if (!center_thumb_page) return CENTER_THUMB_MISSING;
   center_thumb_card_t *card = &center_thumb_page->cards[visible_slot];
   if (strcmp(card->id, item->widget_id) || card->checksum != item->center_thumb_checksum
       || card->generation != item->center_thumb_generation || card->slot != item->center_title_slot) {
@@ -72,35 +74,29 @@ static bool center_draw_thumbnail(const pet_p4_miniapp_catalog_entry_t *item, un
     card->ready = false;
     card->tried_builtin = false;
   }
-  if (*allow_load && card->attempts < CENTER_THUMB_MAX_ATTEMPTS && esp_timer_get_time() >= card->retry_after_us) {
-    uint8_t *packed = center_thumb_page->packed;
-    if (card->checksum && center_thumbnail_storage_busy()) {
-      /* Defer filesystem I/O while audio/storage is occupied. Mapped built-in
-       * art can still be drawn. Waiting never exhausts the file retry limit. */
-      card->retry_after_us = esp_timer_get_time() + 250000;
-    } else if (card->checksum) {
-      *allow_load = false;
-      if (pet_p4_miniapp_center_read_thumb(item, packed, CENTER_THUMB_BYTES)) {
-        center_unpack_thumbnail(packed, card->pixels);
-        card->ready = true;
-        card->attempts = CENTER_THUMB_MAX_ATTEMPTS;
-      } else {
-        ++card->attempts;
-        card->retry_after_us = esp_timer_get_time() + 1000000;
-      }
-    } else {
-      card->attempts = CENTER_THUMB_MAX_ATTEMPTS;
-    }
-    if (!card->ready && !card->tried_builtin) {
-      *allow_load = false;
-      card->tried_builtin = true;
-      if (center_read_builtin_thumbnail(card->id, packed)) {
-        center_unpack_thumbnail(packed, card->pixels);
-        card->ready = true;
-      }
+  uint8_t *packed = center_thumb_page->packed;
+  if (!card->ready && card->checksum && card->attempts < CENTER_THUMB_MAX_ATTEMPTS) {
+    if (!*allow_storage_read || esp_timer_get_time() < card->retry_after_us || center_thumbnail_storage_busy())
+      return CENTER_THUMB_PENDING;
+    *allow_storage_read = false;
+    if (pet_p4_miniapp_center_read_thumb(item, packed, CENTER_THUMB_BYTES)) {
+      center_unpack_thumbnail(packed, card->pixels);
+      card->ready = true;
+    } else if (++card->attempts < CENTER_THUMB_MAX_ATTEMPTS) {
+      card->retry_after_us = esp_timer_get_time() + 1000000;
+      return CENTER_THUMB_PENDING;
     }
   }
-  if (!card->ready) return false;
+  /* Firmware art is memory mapped. Decode all visible built-ins before the
+   * frame is submitted; only file reads share the one-per-frame budget. */
+  if (!card->ready && !card->tried_builtin) {
+    card->tried_builtin = true;
+    if (center_read_builtin_thumbnail(card->id, packed)) {
+      center_unpack_thumbnail(packed, card->pixels);
+      card->ready = true;
+    }
+  }
+  if (!card->ready) return CENTER_THUMB_MISSING;
   /* Exact row spans of the original radius-seven clip. */
   static const uint8_t insets[] = {0, 1, 1, 1, 2, 3, 4, 7};
   for (int row = 0; row < CENTER_THUMB_H; ++row) {
@@ -108,5 +104,5 @@ static bool center_draw_thumbnail(const pet_p4_miniapp_catalog_entry_t *item, un
     memcpy(g_framebuffer + (y+row)*PET_P4_UI_WIDTH + x+inset,
         card->pixels + row*CENTER_THUMB_W + inset, (CENTER_THUMB_W-2*inset)*sizeof(uint16_t));
   }
-  return true;
+  return CENTER_THUMB_DRAWN;
 }

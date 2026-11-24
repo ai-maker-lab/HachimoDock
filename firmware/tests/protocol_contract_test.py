@@ -2515,12 +2515,14 @@ def test_p4_device_ptt_stream_is_validated_and_relayed_by_pc():
     )
     assert "esp_codec_dev_read" in audio
     assert "sizeof(encoded), &encoded_len" in audio
-    assert 'send_topic("audio/begin"' in audio
+    capture = function(audio, 'capture_frame')
+    assert 'return note_publish(owner, topic, payload);' in capture
+    assert 'return send_topic_to_transport(topic, payload, live);' in capture
+    assert 'capture_frame(owner, "audio/begin", payload, false)' in audio
     assert 'cJSON_AddBoolToObject(payload, "sessionQueueEmpty", session_queue_empty)' in audio
     assert "g_capture_session_queue_empty" in audio
-    assert 'send_topic_to_transport("audio/chunk", payload, processed && conversation_session[0])' in audio
-    assert "xQueueSend(g_usb_capture_tx_queue, &frame, 0)" in audio
-    assert 'send_topic("audio/end"' in audio
+    assert 'capture_frame(owner, "audio/chunk", payload, processed && conversation_session[0])' in audio
+    assert 'capture_frame(owner, "audio/end", payload, false)' in audio
     assert "PET_P4_AUDIO_MAX_CAPTURE_MS 30000ULL" in audio
     assert 'strcmp(binding->action, "voice_ptt") == 0' in input_source
     assert 'strcmp(gesture, "hold_start") == 0' in input_source

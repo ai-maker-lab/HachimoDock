@@ -11,6 +11,7 @@
  * [Sync] If this file changes, update `pc/src/component-center/.folder.md`.
  */
 
+import OfflineEditionButton from "./OfflineEditionButton.jsx";
 import React, { useEffect, useRef } from "react";
 import { AlertTriangle, Download, RotateCcw, Save, Settings2, Trash2, X } from "lucide-react";
 import Button from "../shell/Button";
@@ -61,6 +62,7 @@ export default function ComponentPreviewModal({
   onDelete,
   onClose,
   onSourceChange,
+  onEditionImported,
 }) {
   const isDeviceOnly = component.isDeviceOnly === true;
   const isUpdatingCurrent = !isDeviceOnly && (
@@ -197,6 +199,9 @@ export default function ComponentPreviewModal({
                   <span className="component-preview-modal__kind">{componentKind}</span>
                 </div>
                 {component.goal && <p>{component.goal}</p>}
+                {!isDeviceOnly && onEditionImported && (
+                  <OfflineEditionButton componentId={component.id} disabled={installing} onImported={onEditionImported} />
+                )}
                 {playGuide && (
                   <p className="component-preview-modal__play-guide">
                     <strong>怎么玩：</strong>{playGuide}

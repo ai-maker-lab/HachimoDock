@@ -4,7 +4,7 @@ const root=document.querySelector('#app'), embedded=window.parent!==window;
 const categories=[['','全部'],['hachimi','哈基米专属'],['game','小游戏'],['productivity','效率'],['tool','工具'],['relax','放松'],['life','生活']];
 let refreshFeatureTarget=null;
 let hostOrigin='',channel='',context=null,serial=0,epoch=0,dirty=false;
-const pending=new Map(), state={view:'discover',category:'',query:'',order:'featured',offset:0,metric:'downloads',window:'7d'};
+const pending=new Map(), state={view:'discover',category:'',query:'',order:'featured',offset:0,metric:'downloads',window:'all'};
 const memory=new Map();
 function read(key,fallback){try{return JSON.parse(localStorage.getItem(key))??fallback;}catch{return memory.get(key)??fallback;}}
 function save(key,value){localStorage.setItem(key,JSON.stringify(value));memory.set(key,value);}
@@ -93,8 +93,22 @@ async function loadFavoritePage(favorites,offset){
 async function renderList(){const turn=++epoch,wrap=shell(),favorites=state.view==='favorites';wrap.append(heading(favorites?'留住喜欢的玩法':'给桌面，添点新玩法',favorites?'收藏保存在当前客户端或浏览器，不会自动安装。':'发现好玩的灵感，把喜欢的带回你的哈基米。'));
   const content=node('div'),grid=node('div',{class:'grid'}),rank=node('aside',{class:'panel'}),layout=node('div',{class:'layout'},content,rank);
   if(!favorites){const cats=node('div',{class:'categories'},categories.map(([id,label])=>{const b=button(label,()=>{state.category=id;state.offset=0;renderList();},state.category===id?'active':'');b.setAttribute('aria-pressed',String(state.category===id));return b;}));const search=node('input',{'aria-label':'搜索社区组件',placeholder:'搜索玩法或创作者',value:state.query,maxLength:80});const form=node('form',{class:'search',onSubmit:e=>{e.preventDefault();state.query=search.value.trim();state.offset=0;renderList();}},search,node('button',{type:'submit'},'搜索'));wrap.append(node('div',{class:'toolbar'},cats,form));}
-  const select=node('select',{'aria-label':'作品排序',onChange:e=>{state.order=e.target.value;state.offset=0;renderList();}},node('option',{value:'featured'},'精选优先'),node('option',{value:'latest'},'最近更新'));select.value=state.order;
-  content.append(node('div',{class:'title-row'},node('h3',{},favorites?'我的收藏':'社区新鲜玩法'),!favorites?select:null),grid);wrap.append(layout);grid.append(node('p',{class:'loading'},'正在加载…'));loadRank(rank,turn);
+  const orderGroup=node('div',{class:'work-order',role:'group','aria-label':'作品排序'});
+  if(!favorites){
+    for(const [order,label] of [['featured','精选优先'],['latest','最近更新']]){
+      const selected=state.order===order;
+      const control=button(label,()=>{
+        if(state.order===order)return;
+        state.order=order;
+        state.offset=0;
+        renderList();
+        root.querySelector('.work-order [aria-pressed="true"]')?.focus({preventScroll:true});
+      },selected?'active':'');
+      control.setAttribute('aria-pressed',String(selected));
+      orderGroup.append(control);
+    }
+  }
+  content.append(node('div',{class:'title-row'},node('h3',{},favorites?'我的收藏':'社区新鲜玩法'),favorites?null:orderGroup),grid);wrap.append(layout);grid.append(node('p',{class:'loading'},'正在加载…'));loadRank(rank,turn);
   try{
     const result=favorites?await loadFavoritePage(context.favorites,state.offset):await api('browse',state);
     if(turn!==epoch)return;grid.replaceChildren(...result.items.map(card).filter(Boolean));
@@ -105,9 +119,9 @@ async function renderList(){const turn=++epoch,wrap=shell(),favorites=state.view
 }
 async function loadRank(container,turn){container.replaceChildren(node('h3',{},'人气榜单'));
   const metric=node('select',{'aria-label':'榜单类型',onChange:e=>{state.metric=e.target.value;loadRank(container,turn);}},node('option',{value:'downloads'},'下载榜'),node('option',{value:'likes'},'点赞榜'));metric.value=state.metric;
-  const period=node('select',{'aria-label':'榜单时间',onChange:e=>{state.window=e.target.value;loadRank(container,turn);}},node('option',{value:'7d'},'近 7 天'),node('option',{value:'24h'},'近 24 小时'),node('option',{value:'all'},'全部'));period.value=state.window;container.append(node('div',{class:'actions'},metric,period));const rows=node('div');container.append(rows);const key=`${state.metric}:${state.window}`;
+  const period=node('select',{'aria-label':'榜单时间',onChange:e=>{state.window=e.target.value;loadRank(container,turn);}},node('option',{value:'7d'},'近 7 天'),node('option',{value:'all'},state.metric==='downloads'?'累计下载':'累计点赞'));period.value=state.window;container.append(node('div',{class:'actions'},metric,period));const rows=node('div');container.append(rows);const key=`${state.metric}:${state.window}`;
   try{const result=await api('rankings',state);if(turn!==epoch||key!==`${state.metric}:${state.window}`)return;rows.replaceChildren(...result.items.map((work,i)=>node('button',{class:'rank',onClick:()=>navigate(work.id)},node('b',{},String(i+1).padStart(2,'0')),node('span',{},work.name),node('small',{},work.rankValue))));if(!result.items.length)rows.append(node('p',{class:'empty'},'等待每一份真实热爱'));}catch(e){if(turn===epoch)rows.replaceChildren(errorBox(e,()=>loadRank(container,turn)));}
-  container.append(node('p',{class:'muted'},'下载校验完成后计数；同一设备与版本 24 小时内去重。点赞可取消。'));
+  container.append(node('p',{class:'muted'},'榜单显示所选时段，组件卡片显示累计值。'));
 }
 async function renderDetail(id){const turn=++epoch,wrap=shell();wrap.append(button('← 返回广场',()=>navigate(),'back'));const area=node('div');wrap.append(area);area.append(node('p',{class:'loading'},'正在加载玩法…'));
   try{const work=await api('detail',{id});if(turn!==epoch)return;const main=node('article'),side=node('aside',{class:'panel detail-side'});area.replaceChildren(node('div',{class:'detail'},main,side));main.append(node('div',{class:'shots'},(work.covers||[]).map(hash=>image(hash,work.name))),node('p',{class:'muted'},'作者提供的界面示意图，实际状态以设备为准。'),node('h2',{},work.name),node('p',{class:'muted'},`by ${work.author} · ${categories.find(x=>x[0]===work.category)?.[1]||''}`),node('p',{},work.summary));

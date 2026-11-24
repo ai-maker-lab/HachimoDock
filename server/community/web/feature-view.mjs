@@ -35,7 +35,7 @@ export function featureView(manifest, diagnostic) {
       else if (wireless && typeof target?.wifiConnected !== 'boolean') status = 'network-unconfirmed';
       else status = 'capabilities-match';
       paths[path] = status;
-      if (status !== 'unsupported') modes.add(path === 'device' ? 'offline' : path === 'device-wifi' ? 'network' : path === 'unknown' ? 'unknown' : 'pc');
+      if (status !== 'unsupported' && !row.optional) modes.add(path === 'device' ? 'offline' : path === 'device-wifi' ? 'network' : path === 'unknown' ? 'unknown' : 'pc');
     }
     const lines = Object.entries(paths).map(([p,s])=>producers[p] + (s === 'pc-required' || (p === 'unknown' && s === 'unknown') ? '' : '（'+statuses[s]+'）'));
     const boardEvidence = Array.isArray(row.deviceBoards) ? ['适用板型 '+row.deviceBoards.join('/')] : [];
@@ -44,6 +44,7 @@ export function featureView(manifest, diagnostic) {
   });
   const labels = {offline:'设备离线',network:'设备联网',pc:'依赖 PC',unknown:'来源待核对'};
   let summary = Array.from(modes,k=>labels[k]).join(' / ') || '本板不支持';
+  if (manifest.features.some(row => row.id === 'optional-narration')) summary += ' · 可选朗读';
   const states = rows.flatMap(row=>Object.values(row.paths));
   if (states.includes('offline')) summary += ' · 设备未联网';
   else if (states.includes('unconfirmed')) summary += ' · 板卡待核对';

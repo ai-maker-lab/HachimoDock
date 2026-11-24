@@ -23,6 +23,8 @@
   --shadow-sm:none;
   --shadow-xs:none;
   --sidebar-width:208px;
+  --workspace-section-gap: var(--space-3);
+  --workspace-content-gap: var(--space-2);
   --serif:Georgia,'Songti SC','STSong',serif;
 }
 body,.app-shell,.app-main,.app-content {
@@ -79,9 +81,15 @@ html, body, .app-content, .app-sidebar {
   :is(html, body, .app-content, .app-sidebar)::-webkit-scrollbar-thumb { background: #bababa; border-radius: 5px; }
   :is(html, body, .app-content, .app-sidebar)::-webkit-scrollbar-track { background: transparent; }
 }
+/* The parent owns the space between sections, including when a status appears. */
+.page-shell, .page-shell__body {
+  gap: var(--workspace-section-gap);
+}
 .page-shell__header {
-  padding-bottom:20px;
-  margin-bottom:6px;
+  padding-block: 0;
+}
+.api-settings__draft {
+  margin-block: 0;
 }
 .page-shell__title,.detail-page-header h1,.ca-wizard h1 {
   font:600 29px/1.28 var(--serif);
@@ -98,12 +106,18 @@ html, body, .app-content, .app-sidebar {
   border-radius:0;
   box-shadow:none;
 }
-.card__header,.card__header--toggle {
-  padding:18px 0 10px;
-  border:0;
+.card__header {
+  padding: var(--workspace-content-gap) 0 var(--space-1);
+  border: 0;
+}
+.card__header--toggle {
+  padding: 18px 0 10px;
 }
 .card__body {
-  padding:12px 0 19px;
+  padding: var(--workspace-content-gap) 0 var(--workspace-section-gap);
+}
+.card__header + .card__body {
+  padding-block-start: var(--space-1);
 }
 .card__title,.modal-title,.home-detail h2 {
   font:600 21px/1.35 var(--serif);
@@ -187,7 +201,14 @@ button,input,select,textarea {
   color:var(--text);
   margin-left:8px;
 }
-.companion-hero .action {
+.companion-hero__actions {
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin-top:24px;
+}
+.companion-hero .action,
+.companion-hero .companion-hero__switch {
   display:inline-flex;
   align-items:center;
   gap:7px;
@@ -195,7 +216,7 @@ button,input,select,textarea {
   background:var(--accent-action);
   border-radius:5px;
   padding:9px 16px;
-  margin-top:24px;
+  border:1px solid transparent;
 }
 .companion-hero .screen {
   margin:0;
@@ -403,8 +424,31 @@ dialog.devin-config-dialog {
 .home-detail > header .icon-btn {
   flex-shrink: 0;
 }
+.modal-card > .modal-header {
+  padding-block: var(--workspace-section-gap) var(--workspace-content-gap);
+}
+.modal-card > .modal-body {
+  padding-block: var(--workspace-content-gap) var(--space-4);
+}
+.page, .ca-wizard {
+  gap: var(--workspace-section-gap);
+}
 .detail-page-header {
-  padding-bottom: var(--space-5);
+  padding-block-end: 0;
+  row-gap: var(--workspace-content-gap);
+}
+.ca-card {
+  gap: var(--workspace-content-gap);
+  padding-block: var(--space-4);
+}
+.usb-setup-card {
+  padding-block: var(--space-6);
+}
+.usb-setup-card__icon {
+  margin-block-end: var(--workspace-section-gap);
+}
+.usb-setup-checklist, .usb-setup-device {
+  margin-block: var(--space-4);
 }
 .ca-wizard .ca-card,
 .detail-context-drawer,
@@ -491,3 +535,15 @@ dialog.devin-config-dialog {
 .app-sidebar .sidebar-nav button[aria-current="page"] svg {
   color: var(--accent);
 }
+
+.app-shell .companion-hero .companion-hero__switch {
+  color:var(--text);
+  background:#fff;
+  border-color:var(--border);
+}
+.app-shell .companion-hero .companion-hero__switch:hover:not(:disabled) {
+  background:#fff;
+  color:var(--text);
+  border-color:var(--accent-action);
+}
+.companion-hero__switch:disabled { opacity:.55; }

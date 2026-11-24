@@ -528,6 +528,7 @@ fn pack_with_trace(
     clawpkg::complete_p4_runtime_containers(&mut widget);
     clawpkg::validate_p4_runtime_shell(&Value::Object(widget.clone()))?;
     let require_game = compiled_source && component["kind"] == "game";
+    clawpkg::validate_network_declaration(&Value::Object(widget.clone()), module.as_deref())?;
     if let Some(module) = module {
         let (canvas, host, _, _, audio) =
             clawpkg::wasm_profile_details(&module).ok_or("WASM 格式、宿主导入或固定内存无效")?;
@@ -695,7 +696,7 @@ pub(super) fn cli(args: &[OsString]) -> Result<String, String> {
             let entry=component_library::publish_authored(&home,Path::new(source))?;
             serde_json::to_string(&entry).map_err(|e|e.to_string())
         }
-        [command] if command == "tool-info" => Ok(json!({"version":env!("CARGO_PKG_VERSION"),"protocol":2,"target":target(),"pythonPlugin":"petui-python-v1","scopedWrite":"p4-scoped-write-v1","deviceProvider":"github-account-v1","featureManifest":1,"inspection":["compatibility","first-data","install-rehearsal"]}).to_string()),
+        [command] if command == "tool-info" => Ok(json!({"version":env!("CARGO_PKG_VERSION"),"protocol":2,"target":target(),"pythonPlugin":"petui-python-v1","scopedWrite":"p4-scoped-write-v1","featureManifest":1,"inspection":["compatibility","first-data","install-rehearsal"]}).to_string()),
         [command, args @ ..] if matches!(command.to_str(), Some("compatibility" | "first-data" | "install-rehearsal")) => inspection::run(command.to_str().unwrap(), args),
         [command, args @ ..] if command == "data-link" => {
             let [runtime, report, scope @ ..] = args else { return Err(data_link::USAGE.into()); };
@@ -782,7 +783,7 @@ pub(super) fn cli(args: &[OsString]) -> Result<String, String> {
             if let Some(reason) = entry.sync_requirements.blocked_reason {
                 result.push_str(&format!("\n该包暂不可同步：{reason}"));
             } else if entry.sync_requirements.requires_usb_capabilities() {
-                result.push_str("\n同步前请在组件中心连接目标设备，由 USB 握手核对所需服务能力。");
+                result.push_str("\n同步前请在组件中心通过 USB 或受信 Wi-Fi 核对当前设备的组件能力。");
             }
             Ok(result)
         }
@@ -854,7 +855,9 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let status = Command::new(env::current_exe().unwrap()).args(["--exact",
                 "petui_authoring::tests::shipped_examples_pack_validate_and_publish_through_cli_in_isolated_library","--nocapture"])
-                .env(FLAG,tmp.path()).env("HOME",tmp.path()).status().unwrap();
+                .env(FLAG, tmp.path())
+                .env(if cfg!(windows) { "USERPROFILE" } else { "HOME" }, tmp.path())
+                .status().unwrap();
             assert!(status.success());
             assert_eq!(fs::read_dir(component_library::library_root(tmp.path())).unwrap().count(),5);
             return;

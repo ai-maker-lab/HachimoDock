@@ -60,6 +60,8 @@ def feature_manifest(component_id, runtime, application=None, extension=False):
             row['deviceBoards'] = rule['deviceBoards']
         if 'pcRequires' in rule:
             row['pcRequires'] = rule['pcRequires']
+        if rule.get('optional'):
+            row['optional'] = True
         if rule.get('grant'):
             row['grant'] = rule['grant']
         features.append(row)

@@ -550,6 +550,10 @@ R172 候选的 `renderLifetime.sameFramePhases.contentStagesInclusive` 增加 bu
 
 现代 `asset/slot-query` 的 observationSchema、queryNonce、expectedBoardDeviceId、expectedBootId、transferId 必须逐项唯一、类型正确且与当前设备匹配。忙碌回复使用 `ok=false, proof=false, quiescent=false`，保留 queryNonce/boardDeviceId/bootId，并给出 errorCode=`appearance_query_busy`；这是身份绑定的“尚无证明”，不含 slots，不表示安全静默。操作结果未知优先给出 `appearance_query_outcome_unknown`，不得当成可重试的忙碌、升级提示或清理授权。PC 仅对前者在同一连接代次内做有界只读等待，完整正向静默证明前不归档旧未知操作、不重放写入。
 
+USB 与受信 Wi‑Fi 共用形象槽位读回。固件读到确定的空槽才报告无有效包。分区头暂时读失败、内存紧张或并发读取时，请求方应重新查询。设备包标识匹配时，只需激活并回读槽位，素材传输量为零。
+
+配对 Wi‑Fi 的形象操作使用 mode 18。已认证的单字节 `2` 表示工作线程尚未执行本步，可在同一启动和配对下短暂等待后重试。单字节 `0` 无法证明写入结果。只有只读查询和具备重复分块校验的原始视频允许安全重试。重复视频块须属于同一传输，路径、序号、长度和内容校验均须相符。提交或激活的回执不明确时，客户端回读实际槽位。
+
 0.7.100-p4：新增 `widgetMediaQueueMax=128` 与 `widgetMediaLifecycle=p4-media-lifecycle-v1`。媒体队列超过 20 项时，key 至多 80 UTF-8 字节、标题至多 90 字节；上限 128，刷新按 key 保留选中项，不修改音频会话。`media/event` 新增 `operation=visibility`，包含 `source/boot/epoch/visible`；进入或离开递增 epoch，可见时每 2 秒发送心跳。宿主只有资源包声明自动播放、当前可见且新的进入事件时才准备播放，停止/离开取消未开始的播放；目录刷新不重新触发播放。能力与配置为通用媒体机制，不绑定特定组件 ID。
 
 0.7.83-p4 媒体重入：从组件中心重新进入当前已验证的媒体组件只恢复界面，不重写目录或失效图片缓存，避免后台音频因同步 Flash 操作欠载。切到其他组件、安装更新及游戏重开仍走原有加载/校验路径；媒体会话与全局退出语义不变。
@@ -1120,6 +1124,17 @@ PC to board:
   memory pages, respectively. New targets support up to 196,608 file bytes
   subject to their shared component resource capacity, and fixed two- or
   four-page memory. A single sprite remains bounded to 65,536 bytes.
+
+The trusted LAN status request (mode 6, selector 1, `rtcKey & 64`) supports
+selector 2 for a compact bundle descriptor (1 KiB). Bit 7 additionally offers
+selector 3 for the full component capabilities and runtime limits from USB hello.
+The encrypted response binds them to `boardDeviceId`, `bootId` and a nonzero
+`association`, established after checking the SSID and security of the current
+association. Mode 14 accepts a 16-byte boot ID followed by the big-endian u32
+association. Losing that association invalidates outstanding installation work.
+The transfer advertises `widgetTransferChunkBytes`, `widgetTransferMaxFiles` and
+`widgetTransferMaxBytes` from the receiver's limits; audio-capable targets
+also report `widgetWasmAudioMaxBytes`. The per-resource limits still apply.
 
 When hello advertises `widgetTransfer: p4-widget-files-v2`, desktop installs can opt in
 with `transferProtocol`, `packageSha256`, `fileCount`, and `totalBytes` on
@@ -2714,6 +2729,31 @@ observed installed version. The board requires that version to match the
 currently installed copy and commits through the existing validated staging
 transaction. Older boards continue to support their original operations.
 
+The full authenticated install descriptor (selector 3) can advertise
+`widgetLanCommitReason: "commit-reason-v1"`. Only on that same board, boot and
+Wi-Fi association may the desktop send the final mode-14 record `[3, 1]`.
+Without that capability it sends `[3]`. Legacy commits, chunks, fonts and
+maintenance retain their existing replies. The record nonce, authenticated
+length, one-byte reply payload and publication fence are unchanged.
+
+For the opted-in final record, 1 confirms success, 0 is an unspecified
+refusal and 2 denotes an uncertain publication or catalog readback. Known pre-publication
+refusals can return one of these fixed bytes:
+
+| Byte | Final commit reason |
+| --- | --- |
+| 16 | `commit_storage_deferred` |
+| 17 | `commit_audio_busy` |
+| 18 | `commit_storage_interrupted` |
+| 19–20 | Catalog recovery required / no free component slot |
+| 21–23 | Manifest or digest mismatch / resource declarations mismatch / storage budget exceeded |
+| 24–26 | Insufficient memory / WASM validator busy or unavailable / WASM first-frame validation failed |
+| 27–28 | Component storage preparation or validation failed / incompatible save schema |
+
+Unmapped application errors yield 0. No application error text is transmitted.
+An unknown status byte, malformed or unauthenticated reply, or loss of the final
+ACK leaves the outcome unconfirmed. The desktop never replays the commit.
+
 ### LCD scanout diagnostics
 
 Wi-Fi 6 firmware includes `runtime.lcdScanout` in USB and authenticated LAN
@@ -2759,3 +2799,18 @@ LAN 扩展状态使用 `pf` 表示同一存储状态。
 ### 前台麦克风电平
 
 当 P4 麦克风编解码器及采集任务就绪，hello.capabilities 上报 widgetMicLevel=microphone-level-v1。包内 runtime.hardware.service 选择该原生工具，quiet_below 为可选 1–100 整数。实体短按 SW1 只授权当前组件此次前台运行。原生采集任务只向该前台页提供 0–100 的相对峰值。切换、同 ID 替换、退出、争用和帧过期回收授权。该服务没有 USB、LAN 或 WASM 授权命令。
+
+### Component networking on Wi-Fi 6
+
+Wi-Fi 6 v1 and v3 announce `widgetWasmNetwork=component-network-v1`. A device with
+hardware-protected credential storage also announces
+`widgetComponentCredentials=component-credentials-secure-v1`. Components request only
+their declared HTTPS origins, methods and MQTT destinations. Service completions belong
+to the active component generation. Replacement invalidates its queued operations,
+handles and subscriptions. The SDK documents limits, credential binding, the wired
+write-only provisioning message and status codes in the
+[network contract](../pc/skills/petui/references/component-network.md).
+
+### Independent desktop test message
+
+On a physical USB connection, `ui/test-message` replies on `ui/test-message/status`; P4 hello advertises `testMessageReceipt`. The paired Wi-Fi panel uses opcode 13, the 16-byte boot ID and a bounded JSON request. Both transports use the same two phases. Send `phase=prepare` with the board ID, boot ID and a fresh 32-character lowercase hexadecimal intent. USB also carries a per-frame request ID. A `ready` receipt includes a 32-bit token bound to the active agent, session and route. Within five seconds send `phase=send` with the same fields and token. Only the fixed main-screen test notice is eligible for display. A delivered receipt confirms device acceptance. Repeating the same commit cannot extend the three-second display. Busy, changed and expired reservations do not display a notice. The desktop does not repeat a commit after an uncertain result. Session identifiers and message text are absent from these requests and receipts.

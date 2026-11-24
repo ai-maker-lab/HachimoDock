@@ -562,6 +562,9 @@ bool pet_app_host_emit(const char *topic,const cJSON *payload){
   return ok;
 }
 
+bool pet_app_host_instance_matches(const char*id,const char*token){
+  portENTER_CRITICAL(&mux);bool valid=id&&token&&token[0]&&shown&&pet_resources_device_view_current(&resource_view)&&!strcmp(widget,id)&&!strcmp(instance,token);portEXIT_CRITICAL(&mux);return valid;
+}
 #if PET_SERVICE_BRIDGE_ENABLED
 void pet_app_host_tick_bound(const char*id,uint32_t rev,uint8_t page,bool visible,uint64_t now,const char*binding){
   if(!id||!id[0]){pet_app_host_tick(id,rev,page,visible,now);return;}
@@ -575,9 +578,6 @@ bool pet_app_host_observed_value_action(const char*id,uint32_t rev,uint8_t page,
   if(!id||!action||strncmp(action,"host.",5)||!pet_bridge_json_name(parameter,31)||!observed||value < -1000000000||value>1000000000)return false;
   cJSON*data=cJSON_CreateObject();if(!data)return false;cJSON_AddNumberToObject(data,parameter,value);
   bool ok=request(id,rev,page,action,now,true,NULL,0,observed,data,NULL);cJSON_Delete(data);return ok;
-}
-bool pet_app_host_instance_matches(const char*id,const char*token){
-  portENTER_CRITICAL(&mux);bool valid=id&&token&&token[0]&&shown&&pet_resources_device_view_current(&resource_view)&&!strcmp(widget,id)&&!strcmp(instance,token);portEXIT_CRITICAL(&mux);return valid;
 }
 bool pet_app_host_image_ready(const cJSON*p,uint64_t now){
   pet_bridge_image_lease_t lease;bool ready=false;

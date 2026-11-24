@@ -1,3 +1,4 @@
+import { secretInputProps } from "./lib/secret-input.js";
 /**
  * [Input] Shared avatar provider configs including persisted video parameters, native speech configuration and independent ASR/TTS probes, and optional return navigation.
  * [Output] Model settings with editable MiMo speech options, independent custom speech stages and per-stage test results.
@@ -11,8 +12,6 @@ import {
   AlertCircle,
   ArrowLeft,
   CheckCircle2,
-  Eye,
-  EyeOff,
   ExternalLink,
   KeyRound,
   Loader2,
@@ -103,7 +102,6 @@ function savedSpeechProfiles(status) {
 
 export default function ApiSettings({ onBack, configReadError = "", active = true }) {
   const usageHelp = useUsageHelp();
-  const [showSecrets, setShowSecrets] = useState(false);
   const [savedVideoConfigs, setSavedVideoConfigs] = useState(loadVideoConfigs);
   const [videoConfigs, setVideoConfigs] = useState(() => Object.fromEntries(Object.entries(savedVideoConfigs)
     .map(([id, config]) => [id, { ...config, apiKey: "" }])));
@@ -537,24 +535,10 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
     <PageShell
       title="模型配置"
       subtitle="配置语音、对话和形象生成服务"
-      actions={(
-        <div className="api-settings__page-actions">
-          <button
-            type="button"
-            className="btn-secondary btn-sm"
-            aria-pressed={showSecrets}
-            onClick={() => setShowSecrets((current) => !current)}
-          >
-            {showSecrets ? <EyeOff size={14} /> : <Eye size={14} />}
-            {showSecrets ? "隐藏密钥" : "显示密钥"}
-          </button>
-          {onBack && (
-            <button type="button" className="btn-ghost btn-sm" onClick={onBack}>
-              <ArrowLeft size={14} />
-              返回
-            </button>
-          )}
-        </div>
+      actions={onBack && (
+        <button type="button" className="btn-ghost btn-sm" onClick={onBack}>
+          <ArrowLeft size={14} />返回
+        </button>
       )}
     >
       {dirty && <p role="status" className="api-settings__draft">有未保存的修改。切换页面会保留草稿；关闭客户端前请保存。</p>}
@@ -574,7 +558,7 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
       </section>
 
       <nav className="settings-section-links" aria-label="跳至模型配置项目">
-        {[["speech", "语音识别与合成"], ["dialogue", "对话大模型"], ["avatar", "形象生成"], ["network", "云服务网络"]].map(([key, label]) =>
+        {[["speech", "语音识别与合成"], ["dialogue", "对话大模型"], ["avatar", "形象生成"]].map(([key, label]) =>
           <button key={key} type="button" onClick={() => {
             const section = document.getElementById(`model-settings-${key}`);
             section?.focus({ preventScroll: true });
@@ -643,7 +627,7 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
           savedStages.asr.provider !== savedStages.tts.provider && <p className="muted small">
             当前识别服务：{SPEECH_NAMES[savedStages.asr.provider]}。当前合成服务：{SPEECH_NAMES[savedStages.tts.provider]}。
           </p>}
-        <CustomSpeechSettings active={active && asrProvider === "openai"} showSecrets={showSecrets}
+        <CustomSpeechSettings active={active && asrProvider === "openai"}
           onStateChange={setCustomState} onSaved={onCustomSaved} presetRevision={presetRevision} />
         {asrProvider !== "openai" && <>
           <div className="api-settings__form api-settings__speech-actions">
@@ -652,8 +636,7 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
               <input
                 id="api-settings-asr-key"
                 className="ui-control api-settings__secret-input"
-                type={showSecrets ? "text" : "password"}
-                autoComplete="new-password"
+                {...secretInputProps}
                 value={asrApiKey}
                 onChange={event => { editSpeech(); setAsrApiKey(event.target.value); }}
                 placeholder={asrKeySaved ? "已安全保存；留空可直接复测"
@@ -760,11 +743,10 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
             <input
               id="api-settings-llm-key"
               className="ui-control api-settings__secret-input"
-              type={showSecrets ? "text" : "password"}
-              autoComplete="new-password"
+              {...secretInputProps}
               value={voiceChat.llmApiKey}
               onChange={event => editLlm({ llmApiKey: event.target.value })}
-              placeholder={voiceChat.llmConfigured ? `已保存 ${voiceChat.llmApiKeyMasked}；留空保持不变`
+              placeholder={voiceChat.llmConfigured ? "已保存；留空保持不变"
                 : mimo ? (mimo.id === "mimo" ? "粘贴 MiMo 按量 API Key" : "粘贴该集群的 Token Plan API Key")
                   : "粘贴这家模型的 API Key"}
               disabled={voiceChat.llmPending || voiceChat.loading}
@@ -817,7 +799,7 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
           {(voiceChat.llmSearchMode !== "auto" || voiceChat.llmSearchConfigured) && <div>
             <label className="ui-field">
               <span>DeepSeek 搜索 API Key</span>
-              <input type={showSecrets ? "text" : "password"} autoComplete="off" spellCheck={false}
+              <input {...secretInputProps}
                 value={voiceChat.llmSearchApiKey}
                 placeholder={voiceChat.llmSearchConfigured ? "已保存，留空继续使用" : "输入 DeepSeek 官方 API Key"}
                 disabled={voiceChat.llmPending || voiceChat.loading}
@@ -868,8 +850,7 @@ export default function ApiSettings({ onBack, configReadError = "", active = tru
                     <input
                       id={`api-settings-${provider.id}-key`}
                       className="ui-control api-settings__secret-input"
-                      type={showSecrets ? "text" : "password"}
-                      autoComplete="new-password"
+                      {...secretInputProps}
                       value={draft.apiKey}
                       onChange={(event) => updateProvider(provider.id, { apiKey: event.target.value })}
                       placeholder={generationConfig({ ...draft, apiKey: "" }, saved).apiKey ? "已保存；留空保持原 Key" : "输入" + provider.label + " API Key"}

@@ -28,6 +28,7 @@ export function speechModelMessage(error, knownStage) {
     return formatModelIssue("chat", "", detail);
   if (knownStage === "asr") return formatModelIssue("asr", "", detail);
   if (knownStage === "tts") return formatModelIssue("tts", "", detail);
+  if (knownStage === "chat") return formatModelIssue("chat", "", detail);
   if (/\bHTTP(?:\/\d(?:\.\d)?)?\s*[:：]?\s*[45]\d\d\b|Bearer\s|https?:\/\//i.test(detail))
     return formatModelIssue("", "", detail);
   return message;
@@ -35,5 +36,5 @@ export function speechModelMessage(error, knownStage) {
 
 export function realtimeErrorMessage(status) {
   if (isRecoveringAsr(status)) return speechModelMessage(status.error?.replace(/。仍在聆听，请再说一次。$/, ""), "asr") + " 仍在聆听，请再说一次。";
-  return speechModelMessage(status?.error, status?.reason);
+  return speechModelMessage(status?.error, status?.errorStage || status?.reason);
 }

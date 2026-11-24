@@ -135,7 +135,7 @@ use firmware_transaction::{
     P4_FIRMWARE_CORRUPTION_RETRIES_BEFORE_FALLBACK,
     P4_FIRMWARE_MAX_IMAGE_SIZE, P4_FIRMWARE_RECONNECT_TIMEOUT,
 };
-pub(crate) use firmware_transaction::inspect_firmware_image;
+pub(crate) use firmware_transaction::{inspect_firmware_image, read_firmware_image};
 pub use firmware_transaction::FirmwareUpdateResult;
 #[cfg(test)]
 use firmware_transaction::{
@@ -1603,7 +1603,7 @@ impl UsbSerialManager {
             .asset_transfer_guard
             .lock()
             .map_err(|_| "audio-only owner unavailable")?;
-        self.with_appearance_user_intent(expected_board_device_id, &guard, || {
+        self.with_appearance_user_intent(expected_board_device_id, None, &guard, || {
             let (status, generation) = self.connected_board_snapshot(expected_board_device_id)?;
             if status.capabilities["globalAudioCues"].as_str() != Some("p4-global-audio-cues-v1") {
                 return Err(
@@ -1766,12 +1766,7 @@ where
                 return Ok((0, 0, true));
             }
         }
-        Err(error) => {
-            eprintln!(
-                "[usb-p4-native-ota] slot reuse unavailable; falling back to full sync: {}",
-                error
-            );
-        }
+        Err(error) => return Err(error),
     }
     ensure_p4_native_full_pack_supported(&assets)?;
     eprintln!(
@@ -2010,6 +2005,7 @@ pub struct UsbSerialManager {
     widget_resume: Arc<Mutex<Option<WidgetTransferIntent>>>,
     media_requests_pending: Arc<AtomicUsize>,
     appearance_sync_active: Arc<AtomicBool>,
+    appearance_sync_owner: Arc<Mutex<Option<String>>>,
     appearance_sync_cancel_requested: Arc<AtomicBool>,
     serial_body_write_active: Arc<AtomicBool>,
     // Board wedge (deadlock) detector: set by the heartbeat monitor when the
@@ -2440,6 +2436,7 @@ impl UsbSerialManager {
             widget_resume: Arc::new(Mutex::new(None)),
             media_requests_pending: Arc::new(AtomicUsize::new(0)),
             appearance_sync_active: Arc::new(AtomicBool::new(false)),
+            appearance_sync_owner: Arc::new(Mutex::new(None)),
             appearance_sync_cancel_requested: Arc::new(AtomicBool::new(false)),
             serial_body_write_active: Arc::new(AtomicBool::new(false)),
             board_wedged: Arc::new(AtomicBool::new(false)),
@@ -2491,16 +2488,31 @@ impl UsbSerialManager {
     }
 
     pub fn begin_appearance_sync(&self) -> Result<(), String> {
+        self.begin_owned_appearance_sync(None)
+    }
+
+    pub fn begin_owned_appearance_sync(&self, request: Option<String>) -> Result<(), String> {
+        if request.as_ref().is_some_and(|id| uuid::Uuid::parse_str(id).is_err()) {
+            return Err("形象传输请求标识无效".into());
+        }
+        let mut owner = self.appearance_sync_owner.lock().map_err(|_| "形象传输状态不可用")?;
         self.appearance_sync_active
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .map_err(|_| "已有形象素材正在传输，请等待完成或先中断当前传输".to_string())?;
         self.appearance_sync_cancel_requested
             .store(false, Ordering::SeqCst);
+        *owner = request;
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn cancel_appearance_sync(&self) -> bool {
-        if !self.appearance_sync_active.load(Ordering::SeqCst) {
+        self.cancel_owned_appearance_sync(None)
+    }
+
+    pub fn cancel_owned_appearance_sync(&self, request: Option<&str>) -> bool {
+        let Ok(owner) = self.appearance_sync_owner.lock() else { return false };
+        if !self.appearance_sync_active.load(Ordering::SeqCst) || owner.as_deref() != request {
             return false;
         }
         self.appearance_sync_cancel_requested
@@ -2509,6 +2521,8 @@ impl UsbSerialManager {
     }
 
     pub fn finish_appearance_sync(&self) {
+        let mut owner = self.appearance_sync_owner.lock().unwrap_or_else(|e| e.into_inner());
+        *owner = None;
         self.appearance_sync_active.store(false, Ordering::SeqCst);
         self.appearance_sync_cancel_requested
             .store(false, Ordering::SeqCst);
@@ -3986,6 +4000,10 @@ impl UsbSerialManager {
         self.send_device_payload_and_wait_scoped(expected_board_device_id, None, request_topic, response_topic, payload)
     }
 
+    pub(crate) fn test_message_exchange(&self, board: &str, connection: u64, payload: serde_json::Value) -> Result<serde_json::Value, String> {
+        self.send_device_payload_and_wait_scoped(board, Some(connection), "ui/test-message", "ui/test-message/status", payload)
+    }
+
     fn send_device_payload_and_wait_scoped(
         &self,
         expected_board_device_id: &str,
@@ -4006,14 +4024,13 @@ impl UsbSerialManager {
                 response_topic: response_topic.to_string(),
                 sender,
             });
-        if let Err(error) = self.send_inner(
-            request_topic,
-            &payload,
-            true,
-            Some(expected_board_device_id),
-            connection_id,
-            None,
-        ) {
+        let sent = if request_topic == "speech/text" && response_topic == "protocol/ack" {
+            self.send_inner_admitted(request_topic, &payload, true, Some(expected_board_device_id),
+                connection_id, None, None, true)
+        } else {
+            self.send_inner(request_topic, &payload, true, Some(expected_board_device_id), connection_id, None)
+        };
+        if let Err(error) = sent {
             self.remove_device_response_waiter(&request_id, response_topic);
             return Err(error);
         }
@@ -4971,6 +4988,21 @@ impl UsbSerialManager {
     pub fn send_state(&self, source: &str, payload: &serde_json::Value) -> Result<(), String> {
         let topic = format!("state/{}", source);
         self.send(&topic, payload)
+    }
+
+    pub(crate) fn send_test_speech_confirmed(&self, board: &str, generation: u64, text: &str) -> Result<(), String> {
+        let ack = self.send_device_payload_and_wait_scoped(board, Some(generation),
+            "speech/text", "protocol/ack", serde_json::json!({"text": text}))
+            .map_err(|_| "设备未确认测试消息，请查看桌宠屏幕。本次不会自动重发。")?;
+        if ack["requestTopic"] != "speech/text" || ack["ok"] != true {
+            return Err("设备未提供匹配的测试消息回执。".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn send_test_speech_bound(&self, board: &str, generation: u64, text: &str) -> Result<(), String> {
+        self.send_inner_admitted("speech/text", &serde_json::json!({"text": text}), true,
+            Some(board), Some(generation), None, None, true)
     }
 
     /// Send a local test bubble under the current device follow scope.
@@ -6067,6 +6099,11 @@ impl UsbSerialManager {
             .map(|(_, bytes)| bytes.as_slice())
             .ok_or_else(|| "component package is missing runtime/widget.json".to_string())?;
         let widget_definition: serde_json::Value = serde_json::from_slice(widget_source).map_err(|e| e.to_string())?;
+        crate::clawpkg::validate_network_declaration(&widget_definition,
+            entries.iter().find(|(path, _)| path == "runtime/app.wasm").map(|(_, bytes)| bytes.as_slice()))?;
+        if widget_definition.get("hachiNetwork").is_some() && capabilities.is_none() {
+            return Err("联网组件需要设备握手确认网络和凭据能力，请通过 USB 同步".into());
+        }
         crate::app_component_program::validate(&widget_definition)?;
         if let Some(capabilities) = capabilities {
             crate::clawpkg::ComponentSyncRequirements::from_runtime(&widget_definition)
@@ -6614,6 +6651,8 @@ impl UsbSerialManager {
         &self,
         appearance_dir: &std::path::Path,
         app_data_dir: &std::path::Path,
+        expected_board_device_id: &str,
+        expected_scope: Option<(u64, &str)>,
         on_progress: F,
     ) -> Result<(u32, u64), String>
     where
@@ -6623,7 +6662,7 @@ impl UsbSerialManager {
             .asset_transfer_guard
             .lock()
             .map_err(|e| e.to_string())?;
-        self.with_appearance_user_intent(&self.status().board_device_id, &_asset_transfer_guard, || {
+        self.with_appearance_user_intent(expected_board_device_id, expected_scope, &_asset_transfer_guard, || {
         self.ensure_appearance_sync_not_cancelled(None)?;
         let manifest_path = appearance_dir.join("manifest.json");
         let manifest_str = std::fs::read_to_string(&manifest_path)
@@ -6811,6 +6850,7 @@ impl UsbSerialManager {
             appearance_dir,
             app_data_dir,
             expected_board_device_id,
+            None,
             use_device_builtin,
             on_progress,
             |_| {},
@@ -6825,6 +6865,7 @@ impl UsbSerialManager {
         appearance_dir: &std::path::Path,
         app_data_dir: &std::path::Path,
         expected_board_device_id: &str,
+        expected_scope: Option<(u64, &str)>,
         use_device_builtin: bool,
         on_progress: F,
         on_stage: S,
@@ -6850,7 +6891,7 @@ impl UsbSerialManager {
             .asset_transfer_guard
             .lock()
             .map_err(|error| error.to_string())?;
-        self.with_appearance_user_intent(expected_board_device_id, &_asset_transfer_guard, || {
+        self.with_appearance_user_intent(expected_board_device_id, expected_scope, &_asset_transfer_guard, || {
         self.connected_board_status(expected_board_device_id)?;
         self.ensure_appearance_sync_not_cancelled(None)?;
         if p4_native_usb_available() {
@@ -6924,15 +6965,8 @@ impl UsbSerialManager {
                     return Ok((0, 0, false));
                 }
                 Ok(P4CachedPackActivation::NotFound) => {}
-                Err(error) if self.appearance_submitted() || matches!(error.as_str(),
-                    "appearance outcome unknown" | "appearance_slot_query_busy" | "appearance_slot_query_timeout"
-                ) => return Err(error),
-                Err(error) => {
-                    eprintln!(
-                        "[usb-p4-ota] cached slot query failed; falling back to current sync planner: {}",
-                        error
-                    );
-                }
+                // A slot-capable board must positively report a miss before any upload.
+                Err(error) => return Err(error),
             }
         }
         if !force_full_sync {
@@ -7214,7 +7248,7 @@ impl UsbSerialManager {
             .asset_transfer_guard
             .lock()
             .map_err(|error| error.to_string())?;
-        self.with_appearance_user_intent(expected_board_device_id, &_asset_transfer_guard, || {
+        self.with_appearance_user_intent(expected_board_device_id, None, &_asset_transfer_guard, || {
         sync_appearance_p4_native(
             self,
             appearance_dir,
@@ -9431,6 +9465,22 @@ manager.activate_memory_test_connection();
     }
 
     #[test]
+    fn appearance_cancel_only_stops_the_clicked_request() {
+        let manager = UsbSerialManager::new();
+        let first = uuid::Uuid::new_v4().to_string();
+        let second = uuid::Uuid::new_v4().to_string();
+        manager.begin_owned_appearance_sync(Some(first.clone())).unwrap();
+        assert!(!manager.cancel_owned_appearance_sync(None));
+        manager.finish_appearance_sync();
+        manager.begin_owned_appearance_sync(Some(second.clone())).unwrap();
+        assert!(!manager.cancel_owned_appearance_sync(Some(&first)));
+        assert!(manager.ensure_appearance_sync_not_cancelled(None).is_ok());
+        assert!(manager.cancel_owned_appearance_sync(Some(&second)));
+        assert!(manager.ensure_appearance_sync_not_cancelled(None).is_err());
+        manager.finish_appearance_sync();
+    }
+
+    #[test]
     fn appearance_sync_cancellation_is_scoped_to_an_active_transfer() {
         let manager = UsbSerialManager::new();
         assert!(!manager.cancel_appearance_sync());
@@ -10955,6 +11005,25 @@ manager.activate_memory_test_connection();
 
         std::fs::write(&first_path, b"changed").unwrap();
         assert_ne!(first, compute_p4_pack_id(&assets, b"manifest-a").unwrap());
+    }
+
+    #[test]
+    fn p4_protected_slot_snapshot_never_treats_a_missing_or_ambiguous_row_as_an_upload() {
+        let factory = serde_json::json!({"slot": 0, "valid": true, "packId": "factory"});
+        let empty = serde_json::json!({"slot": 1, "valid": false});
+        for rows in [
+            serde_json::json!([factory]),
+            serde_json::json!([factory, empty, empty]),
+            serde_json::json!([factory, {"slot": 1, "valid": true}]),
+            serde_json::json!([factory, {"slot": 1, "valid": false, "packId": "old"}]),
+        ] {
+            assert!(parse_p4_appearance_slot_state(&serde_json::json!({
+                "builtinProtected": true, "slots": rows
+            })).is_err());
+        }
+        assert!(parse_p4_appearance_slot_state(&serde_json::json!({
+            "builtinProtected": true, "slots": [factory, empty]
+        })).is_ok());
     }
 
     #[test]

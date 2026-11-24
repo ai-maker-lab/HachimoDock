@@ -242,15 +242,15 @@ try {
   await card.getByRole('button', { name: '保存', exact: true }).click();
   await page.waitForFunction(() => window.modelTestSaved?.llmWebSearch === false);
   assert.equal(await search.isChecked(), false);
-  assert.match(await key.getAttribute('placeholder'), /tes…mask/);
+  assert.equal(await key.getAttribute('placeholder'), '已保存；留空保持不变');
   await key.fill('unsaved-test-key');
   await card.getByRole('radio', { name: '豆包', exact: true }).click();
   await card.getByRole('link', { name: '方舟模型开通与 API Key' }).waitFor();
   assert.equal(await key.inputValue(), '');
-  assert.match(await key.getAttribute('placeholder'), /db…saved/);
+  assert.equal(await key.getAttribute('placeholder'), '已保存；留空保持不变');
   assert.match(await card.locator('.api-settings__result').first().innerText(), /已读取该服务/);
   await card.getByRole('radio', { name: 'DeepSeek', exact: true }).click();
-  assert.match(await key.getAttribute('placeholder'), /tes…mask/);
+  assert.equal(await key.getAttribute('placeholder'), '已保存；留空保持不变');
   await card.getByRole('radio', { name: 'MiMo', exact: true }).click();
   assert.equal(await key.getAttribute('placeholder'), '粘贴 MiMo 按量 API Key');
   await card.getByRole('radio', { name: 'DeepSeek', exact: true }).click();
@@ -325,18 +325,32 @@ try {
   await card.getByRole('radio', { name: 'MiMo', exact: true }).click();
   assert.match(await card.locator('.card__subtitle').innerText(), /不影响 ChatGPT、Claude 等 Agent 的语音输入/);
   assert.equal(await card.locator('.card__body').getByText('此配置用于和宠物聊天', { exact: false }).count(), 0);
-  const spacing = await card.locator('.usage-help').evaluate(el => ({
-    margin: getComputedStyle(el).margin,
-    paddingTop: getComputedStyle(el.parentElement).paddingTop,
-    paddingBottom: getComputedStyle(el.parentElement).paddingBottom,
-  }));
-  assert.equal(spacing.margin, '0px');
-  assert.equal(spacing.paddingTop, '12px');
-  assert.equal(spacing.paddingBottom, '16px');
+  assert.equal(await card.locator('.usage-help').evaluate(el => getComputedStyle(el).margin), '0px');
+  const contentGap = await card.evaluate(el => {
+    const subtitle = el.querySelector('.card__subtitle').getBoundingClientRect();
+    const first = el.querySelector('.card__body > :first-child').getBoundingClientRect();
+    return first.top - subtitle.bottom;
+  });
+  assert.equal(contentGap, 8);
+  const draftGaps = await page.locator('.api-settings__draft').evaluate(el => {
+    const subtitle = el.closest('.page-shell').querySelector('.page-shell__subtitle').getBoundingClientRect();
+    const draft = el.getBoundingClientRect();
+    return [draft.top - subtitle.bottom, el.nextElementSibling.getBoundingClientRect().top - draft.bottom];
+  });
+  assert.deepEqual(draftGaps, [12, 12]);
   const subtitle = await card.locator('.card__subtitle').evaluate(el => ({height:el.getBoundingClientRect().height,lineHeight:parseFloat(getComputedStyle(el).lineHeight),maxWidth:getComputedStyle(el).maxWidth}));
   assert.equal(subtitle.maxWidth, 'none');
   assert.ok(subtitle.height <= subtitle.lineHeight + 1, 'desktop subtitle should use the full card width on one line');
   if (process.env.PET_TEST_SCREENSHOT) await card.screenshot({ path: process.env.PET_TEST_SCREENSHOT });
+  const avatarModels = page.locator('#model-settings-avatar .video-model-row select');
+  assert.equal(await avatarModels.count(), 3);
+  for (const width of [760, 900, 1200, 1440]) {
+    await page.setViewportSize({ width, height: 760 });
+    const clipped = await avatarModels.evaluateAll(selects => selects
+      .filter(select => select.scrollWidth > select.clientWidth + 1)
+      .map(select => select.getAttribute('aria-label')));
+    assert.deepEqual(clipped, [], `clipped avatar model at ${width}px`);
+  }
   await page.setViewportSize({ width: 820, height: 700 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   await mimoSpeech.click();
@@ -392,10 +406,14 @@ try {
   assert.deepEqual(await page.evaluate(() => window.probeEvents.slice(-2)), [
     ['test_device_asr_settings', 'mimo', last], ['test_device_tts_settings', 'mimo', last],
   ]);
-  await page.getByRole('button', { name: '显示密钥' }).click();
+  assert.equal(await page.getByRole('button', { name: /显示密钥|隐藏密钥/ }).count(), 0);
+  assert.equal(await page.getByRole('navigation', { name: '跳至模型配置项目' }).getByText('云服务网络').count(), 0);
   for (const id of ['volcengine','kling','custom']) {
     const section = page.locator('.api-settings__provider').filter({ has: page.locator('#api-settings-' + id + '-key') });
     const input = section.locator('#api-settings-' + id + '-key');
+    assert.equal(await input.getAttribute('type'), 'password');
+    assert.deepEqual(await input.evaluate(el => ['copy', 'cut', 'dragstart', 'paste'].map(type =>
+      el.dispatchEvent(new Event(type, { bubbles: true, cancelable: true })))), [false, false, false, true]);
     assert.equal(await input.inputValue(), '');
     assert.match(await input.getAttribute('placeholder'), /已保存/);
     await section.getByRole('button', { name: '检查本地配置' }).click();
@@ -634,7 +652,7 @@ try {
   assert.equal(await page.evaluate(() => window.forgotScope), 'doubao');
   assert.equal(await card.getByRole('button', { name: '测试当前模型' }).isDisabled(), true);
   await card.getByRole('radio', { name: 'DeepSeek', exact: true }).click();
-  assert.match(await key.getAttribute('placeholder'), /tes…mask/);
+  assert.equal(await key.getAttribute('placeholder'), '已保存；留空保持不变');
   assert.deepEqual(external, []);
   assert.deepEqual(errors, []);
   console.log('PASS MiMo initial Key-only form, editable preset, migrated/native and custom receipts, address-scoped reuse, saved provider probes, independent 403, catalog and network results, zero external requests.');

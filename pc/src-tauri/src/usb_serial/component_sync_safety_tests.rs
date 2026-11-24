@@ -265,6 +265,22 @@ fn minimal_widget() -> tempfile::TempDir {
     directory
 }
 #[test]
+fn component_network_install_rejects_a_declaration_without_a_module_before_writing() {
+    let directory = minimal_widget();
+    let runtime = directory.path().join("runtime/widget.json");
+    let mut widget: Value = serde_json::from_slice(&std::fs::read(&runtime).unwrap()).unwrap();
+    widget["hachiNetwork"] = json!({
+        "profile":"component-network-v1","https":[{"origin":"https://api.example.org","methods":["GET"]}]
+    });
+    std::fs::write(runtime, serde_json::to_vec(&widget).unwrap()).unwrap();
+    let (manager, trace, _) = manager(Mode::MissingChunkAck, None, true);
+    let error = manager.install_widget_clawpkg_on_board(BOARD, WIDGET, directory.path(),
+        &HashMap::new(), |_,_,_| {}).unwrap_err();
+    assert!(error.contains("网络能力声明与模块不匹配"), "{error}");
+    assert!(topics(&trace).is_empty());
+}
+
+#[test]
 fn production_install_lost_chunk_ack_waits_two_seconds_without_replay_commit_or_abort() {
     assert_eq!(WIDGET_CHUNK_ACK_TIMEOUT,Duration::from_secs(2));
     assert_eq!(WIDGET_CHUNK_MAX_ATTEMPTS,3,"exercise normal production policy, not a one-attempt fixture");

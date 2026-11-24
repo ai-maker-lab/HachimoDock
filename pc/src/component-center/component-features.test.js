@@ -29,3 +29,11 @@ test('filters expose multiple producers and remove unsupported paths for Pico',(
   assert.deepEqual(featureView(manifest,d).modes,['pc']);
   assert.deepEqual(featureView(null,d).modes,['unknown']);
 });
+
+test("optional narration leaves the device operation independent of PC speech", () => {
+  const manifest = builtinFeatureManifest("reader", {engine:"p4",local:{engine:"reader"}}, {autoRead:true});
+  const view = featureView(manifest);
+  assert.deepEqual(view.modes, ["offline"]);
+  assert.match(view.summary, /可选朗读/);
+  assert.match(view.rows.find(row => row.id === "optional-narration").label, /TTS/);
+});

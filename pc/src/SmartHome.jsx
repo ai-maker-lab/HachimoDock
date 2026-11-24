@@ -1,3 +1,5 @@
+import { secretInputProps } from "./lib/secret-input.js";
+import { pollWhileVisible } from "./lib/visible-poll.js";
 /** Smart home: account consent, capability-driven controls, approval queue and execution receipts. */
 import { useDialogFocus } from "./component-center/use-dialog-focus.js";
 import React, { useEffect, useRef, useState } from "react";
@@ -5,7 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Home, RefreshCw, ShieldCheck, Lightbulb, MessageCircle, X, Plus, ArrowUp, Trash2 } from "lucide-react";
 import PageShell from "./shell/PageShell.jsx";
 import Card from "./shell/Card.jsx";
-import { HOME_STATUSES, visibleDevices, stepLabel, parsePropertyValue } from "./lib/smart-home.js";
+import { HOME_STATUSES, executionRows, visibleDevices, stepLabel, parsePropertyValue } from "./lib/smart-home.js";
 import "./smart-home.css";
 
 const empty = { connected: false, devices: [], scenes: [], tasks: [], pending: [], records: [] };
@@ -43,8 +45,8 @@ export default function SmartHome() {
   useEffect(() => {
     alive.current = true;
     refresh().catch(e => { if (alive.current) setError(String(e)); });
-    const timer = setInterval(() => { if (!lock.current) refresh().catch(() => {}); }, 5000);
-    return () => { alive.current = false; statusGeneration.current++; statusRead.current = null; clearInterval(timer); };
+    const stop = pollWhileVisible(() => { if (!lock.current) refresh().catch(() => {}); }, 5000);
+    return () => { alive.current = false; statusGeneration.current++; statusRead.current = null; stop(); };
   }, []);
   async function run(fn, keepNotice = false) {
     if (lock.current) return;
@@ -91,9 +93,7 @@ export default function SmartHome() {
 
   const deviceDialog = useDialogFocus(() => setSelected(null), busy, Boolean(selected));
   const matchingDevices = visibleDevices(data.devices, home, room, query);
-  return <div className="smart-home"><PageShell title="智能家居" subtitle="智能家居能力来自 Xiaomi MiLoCo，让哈基米通过自然语言帮你查状态、控设备、完成家居任务。" actions={<>
-    {data.connected && <button className="btn" disabled={busy} onClick={() => run(async () => { const r = await request("sync"); setNotice(r.warnings?.join("；") || "设备和场景已刷新"); })}><RefreshCw size={15} />刷新设备</button>}
-  </>}>
+  return <div className="smart-home"><PageShell title="智能家居" subtitle="智能家居能力来自 Xiaomi MiLoCo，可用语音查看状态、控制设备或执行任务。">
     {error && <div className="home-message is-error" role="alert">
       {/^(TypeError|Error):/.test(error)
         ? <details><summary>家居服务请求失败 · 查看详情</summary>{error}</details>
@@ -102,11 +102,35 @@ export default function SmartHome() {
     {notice && <div className="home-message" role="status">{notice}</div>}
     {!data.connected ? <Card><div className="home-welcome"><span className="home-mark"><Home size={30} /></span><h2>连接米家设备</h2><p>连接账号后，即可通过实时对话或任务页面使用账号已授权的设备与场景。</p>
       <button className="btn btn-primary" disabled={busy} onClick={() => run(async () => { const r = await request("login"); setLogin(r.url); await invoke("open_external_url", { url: r.url }); })}>连接米家账号</button>
-      {login && <div className="home-auth"><p>在浏览器完成米家授权，然后将授权结果粘贴到下方。</p><button className="btn" onClick={() => invoke("open_external_url", { url: login }).catch(e => setError(String(e)))}>重新打开授权页</button><label htmlFor="home-authorization-result">授权结果或回调链接</label><textarea id="home-authorization-result" aria-label="授权结果" value={payload} onChange={e => setPayload(e.target.value)} placeholder="粘贴授权结果或回调链接（仅用于本次连接）" autoComplete="off" /><button className="btn btn-primary" disabled={busy || !payload.trim()} onClick={() => run(async () => { await request("authorize", { payload }); setPayload(""); setLogin(""); await refresh(); await request("sync"); })}>完成连接</button></div>}
+      {login && <div className="home-auth"><p>在浏览器完成米家授权，然后将授权结果粘贴到下方。</p><button className="btn" onClick={() => invoke("open_external_url", { url: login }).catch(e => setError(String(e)))}>重新打开授权页</button><label htmlFor="home-authorization-result">授权结果或回调链接</label><input {...secretInputProps} id="home-authorization-result" aria-label="授权结果" value={payload} onChange={e => setPayload(e.target.value)} placeholder="粘贴授权结果或回调链接（仅用于本次连接）" /><button className="btn btn-primary" disabled={busy || !payload.trim()} onClick={() => run(async () => { await request("authorize", { payload }); setPayload(""); setLogin(""); await refresh(); await request("sync"); })}>完成连接</button></div>}
     </div></Card> : <>
-      <Card title="家庭已连接" subtitle={`${data.devices.length} 个设备 · 最近同步：${data.syncedAt ? new Date(data.syncedAt * 1000).toLocaleString() : "尚未同步"}`} actions={<button className="btn" disabled={busy} onClick={() => { if (window.confirm("断开账号将清除本机家居任务和记录，并停止后续控制。确定断开？")) run(async () => { await request("disconnect"); setSelected(null); setSpec(null); setMessages([]); setSteps([]); }); }}>断开账号</button>}>
-        <p className="home-availability">将设备切换到「实时对话」模式后，就可以直接通过语音让哈基米机控制本页的智能家居，例如「播放一首爵士乐」「换一首歌」「把客厅灯调暗，再拉上窗帘」。5 步以内的明确指令直接执行；超过 5 步或保存常用任务时，哈基米会说明任务，你直接说「确认」或「取消」即可，无需在本页点击。</p>
-      </Card>
+      <section className="home-connection" aria-label="家庭连接状态">
+        <div className="home-connection-row">
+          <div className="home-connection-status">
+            <strong>家庭已连接</strong>
+            <span>{data.devices.length} 个设备 · 最近同步 {data.syncedAt ? new Date(data.syncedAt * 1000).toLocaleString() : "尚未同步"}</span>
+          </div>
+          <div className="home-actions">
+            <button className="btn" disabled={busy} onClick={() => run(async () => {
+              const result = await request("sync");
+              setNotice(result.warnings?.join("；") || "设备和场景已刷新");
+            })}><RefreshCw size={15} />刷新设备</button>
+            <button className="btn" disabled={busy} onClick={() => {
+              if (window.confirm("断开账号将清除本机家居任务和记录，并停止后续控制。确定断开？")) {
+                run(async () => {
+                  await request("disconnect");
+                  setSelected(null); setSpec(null); setMessages([]); setSteps([]);
+                });
+              }
+            }}>断开账号</button>
+          </div>
+        </div>
+        <details className="home-voice-guide">
+          <summary>如何用实时对话控制设备</summary>
+          <p>在设备上进入「实时对话」，试着说「播放一首爵士乐」「换一首歌」或「把客厅灯调暗，再拉上窗帘」。</p>
+          <p>5 步以内的明确指令直接执行。超过 5 步或保存常用任务时，哈基米会先说明任务，你可以直接说「确认」或「取消」。</p>
+        </details>
+      </section>
       <div className="home-tabs" role="tablist" aria-label="智能家居内容">{[["devices", "设备"], ["tasks", "场景与任务"], ["records", "执行记录"]].map(([id, name]) => <button role="tab" aria-selected={tab === id} tabIndex={tab === id ? 0 : -1} onKeyDown={event => navigateTabs(event,["devices","tasks","records"],id,setTab)} key={id} className={tab === id ? "is-active" : ""} onClick={() => setTab(id)}>{name}</button>)}</div>
       {!!data.pending.length && <Card title={`待你确认 · ${data.pending.length}`} subtitle="请核对设备及操作。场景可能影响多个设备；涉及门锁、安防或电器启动时请特别留意。任务 5 分钟后过期。">{data.pending.map(p => <div className="home-plan" key={p.id}><strong>{p.title}</strong><ol>{p.steps.map((s, i) => <li key={i}>{label(s)}</li>)}</ol><div className="home-actions"><button className="btn btn-primary" disabled={busy} onClick={() => run(async () => { const r = await request("approve", { id: p.id }); setNotice(r.status === "completed" ? "任务步骤已处理，请在执行记录查看核验结果。" : "任务已停止，请查看执行记录。"); setTab("records"); })}>确认执行</button><button className="btn" disabled={busy} onClick={() => run(async () => { await request("save_task", { id: p.id }); setNotice("已保存为常用任务，尚未执行"); })}>保存为常用任务</button><button className="btn" disabled={busy} onClick={() => run(() => request("reject", { id: p.id }))}>取消</button></div></div>)}</Card>}
       {busy && <div className="home-message" role="status">正在处理，请稍候。<button className="btn" onClick={() => invoke("smart_home_cancel").then(() => setNotice("已请求停止后续执行；已发送的命令无法撤回。")).catch(e => setError(String(e)))}>停止后续执行</button></div>}
@@ -124,7 +148,11 @@ export default function SmartHome() {
         <Card title="常用任务">{data.tasks.map(t => <div className="home-plan" key={t.id}><strong>{t.title}</strong><ol>{t.steps.map((s, i) => <li key={i}>{label(s)}</li>)}</ol><div className="home-actions"><button className="btn" disabled={busy} onClick={() => { setSteps(t.steps); setTitle(t.title); }}>编辑副本</button><button className="btn btn-primary" disabled={busy || !data.connected} onClick={() => run(() => request("plan", t))}>核对并运行</button><button className="btn" disabled={busy} onClick={() => run(() => request("delete_task", { id: t.id }))}>删除任务</button></div></div>)}{!data.tasks.length && <p>组合设备操作后，可以保存到这里，下次直接使用。</p>}</Card>
       </>}
       {!!steps.length && <Card title="任务草稿" subtitle="按顺序执行，失败后停止后续步骤；不会自动撤回已完成的操作。"><input aria-label="任务名称" value={title} maxLength={80} onChange={e => setTitle(e.target.value)} /><ol className="home-draft">{steps.map((s, i) => <li key={i}><span>{label(s)}</span><button className="icon-btn" aria-label={`上移第 ${i + 1} 步`} disabled={!i || busy} onClick={() => setSteps(old => { const next = [...old]; [next[i - 1], next[i]] = [next[i], next[i - 1]]; return next; })}><ArrowUp size={14} /></button><button className="icon-btn" aria-label={`删除第 ${i + 1} 步`} disabled={busy} onClick={() => setSteps(old => old.filter((_, j) => j !== i))}><Trash2 size={14} /></button></li>)}</ol><div className="home-actions"><button className="btn" disabled={busy || steps.length >= 12} onClick={() => add({ kind: "wait", seconds: 2 })}>添加等待 2 秒</button><button className="btn btn-primary" disabled={busy || !data.connected} onClick={() => run(async () => { await request("plan", { title, steps }); setSteps([]); })}>检查任务</button><button className="btn" disabled={busy} onClick={() => setSteps([])}>清空草稿</button></div></Card>}
-      {tab === "records" && <Card title="执行记录" subtitle="最多保留最近 50 次任务，仅保存在本机。已受理不代表设备已经完成动作。">{data.records.map(r => <div className="home-plan" key={r.id}><strong>{r.title}</strong><p>{new Date(r.at * 1000).toLocaleString()} · {HOME_STATUSES[r.status] || r.status}</p><ol>{r.results.map((row, i) => <li key={i}>{label(row.step)}<p className={row.error ? "home-error-text" : ""}>{row.error || HOME_STATUSES[row.result?.status] || "状态未确认"}</p></li>)}</ol></div>)}{!data.records.length && <div className="home-empty"><ShieldCheck size={28} /><p>还没有执行记录。任务确认后，结果会显示在这里。</p></div>}</Card>}
+      {tab === "records" && <Card title="执行记录" subtitle="最多保留最近 50 次任务，仅保存在本机。已受理不代表设备已经完成动作。">{data.records.map(r => <div className="home-plan" key={r.id}><strong>{r.title}</strong><p>{new Date(r.at * 1000).toLocaleString()} · {HOME_STATUSES[r.status] || r.status}</p><ol>{executionRows(r).map((row, i) => <li key={i}>{label(row.step)}<p className={row.error ? "home-error-text" : ""}>{row.error || HOME_STATUSES[row.result?.status] || "状态未确认"}</p>
+          {(row.step.kind === "set" || row.step.kind === "check") &&
+           (row.error || ["accepted", "unconfirmed"].includes(row.result?.status)) &&
+           data.devices.some(d => d.did === row.step.did) &&
+           <button className="btn" disabled={busy} onClick={() => openDevice(data.devices.find(d => d.did === row.step.did))}>查看设备当前状态</button>}</li>)}</ol></div>)}{!data.records.length && <div className="home-empty"><ShieldCheck size={28} /><p>还没有执行记录。任务确认后，结果会显示在这里。</p></div>}</Card>}
     </>}
     {selected && <div className="home-overlay" onClick={() => !busy && setSelected(null)}><section ref={deviceDialog} tabIndex={-1} className="home-detail" role="dialog" aria-modal="true" aria-label={`${selected.name}的设备控制`} onClick={e => e.stopPropagation()}><header><div><h2>{selected.name}</h2><p>{selected.room} · {selected.model}</p></div><button className="icon-btn" aria-label="关闭设备详情" onClick={() => setSelected(null)}><X size={20} /></button></header>
       <p>控制项来自设备实际能力。轻量操作可直接执行，也可加入任务统一编排。离线设备可能无法取得最新状态。</p>

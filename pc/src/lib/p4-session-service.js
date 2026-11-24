@@ -5,6 +5,7 @@
  * [Sync] If this file changes, update `pc/src/.folder.md`.
  */
 
+import { isInternalCodexSession } from "../../src-tauri/bridge/packages/agent-session-bus/src/util/codex-session-filter.mjs";
 import {
   DEVICE_SESSION_TERMINAL_HOLD_MS,
   isActiveDeviceSession,
@@ -48,24 +49,6 @@ const GENERIC_SESSION_TITLES = new Set([
   "OpenClaw 会话",
 ]);
 
-function isInternalReviewSession(session) {
-  if ([session?.threadSource, session?.thread_source]
-    .some(value => normalizeSessionText(value).toLowerCase() === "guardian_review")) return true;
-  const model = normalizeSessionText(session?.model).toLowerCase();
-  if (["codex-auto-review", "codex_auto_review", "approvals-reviewer"].includes(model)) {
-    return true;
-  }
-  const text = [
-    session?.name,
-    session?.summary,
-    session?.displayTitle,
-    session?.displayContent,
-  ].map(normalizeSessionText).filter(Boolean).join(" ").toLowerCase();
-  const schemaMarkerCount = ["risk_level", "user_authorization", "outcome", "rationale"]
-    .filter((marker) => text.includes(marker)).length;
-  return schemaMarkerCount >= 3 && text.includes("the following is the code");
-}
-
 export function p4SessionDisplayTitle(session) {
   const candidates = [session?.name, session?.displayTitle, session?.summary]
     .map(normalizeSessionText)
@@ -83,7 +66,7 @@ export function p4SessionHasMeaningfulTitle(session) {
 export function buildP4RoutingSessions(sessions) {
   const sessionsById = new Map();
   for (const session of Array.isArray(sessions) ? sessions : []) {
-    if (isInternalReviewSession(session)) continue;
+    if (isInternalCodexSession(session)) continue;
     const id = normalizeSessionText(session?.id);
     if (!id) continue;
     const existing = sessionsById.get(id);

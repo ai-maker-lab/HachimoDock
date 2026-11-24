@@ -11,6 +11,7 @@ import {
   Pause,
   Play,
   Repeat2,
+  AudioLines,
   Braces,
   Code,
   Loader,
@@ -59,27 +60,17 @@ function appearanceKindLabel(appearance) {
 function normalizeSyncProgress(progress = {}) {
   const bytesSent = Number(progress.bytesSent || 0);
   const bytesTotal = Number(progress.bytesTotal || 0);
-  const rawPercent = Number(progress.percent);
-  const percent = Number.isFinite(rawPercent)
-    ? rawPercent
-    : bytesTotal > 0
-      ? Math.round((bytesSent / bytesTotal) * 100)
-      : 0;
+  const hasBytes = Number.isSafeInteger(bytesSent) && Number.isSafeInteger(bytesTotal)
+    && bytesSent > 0 && bytesSent <= bytesTotal;
   return {
-    text: progress.text || "正在通过 USB 下发形象素材...",
-    // Follow-only switches reuse the device's current appearance: nothing is
-    // transferred, so there is no byte progress and nothing to abort.
+    text: progress.text || "正在核对设备形象…",
     followOnly: progress.followOnly === true,
-    indeterminate: progress.followOnly === true || progress.indeterminate === true,
-    currentFile: Number(progress.currentFile || 0),
-    totalFiles: Number(progress.totalFiles || 0),
-    bytesSent,
-    bytesTotal,
-    percent: Math.max(0, Math.min(100, Math.round(percent))),
+    indeterminate: !hasBytes || progress.followOnly === true || progress.indeterminate === true,
+    percent: hasBytes ? progress.percent ?? Math.floor(bytesSent / bytesTotal * 100) : null,
   };
 }
 
-export default function ChannelMatrixCard({ children, subtitle, actions }) {
+export default function ChannelMatrixCard({ children, subtitle, actions, onOpenPersona }) {
   const {
     appearances,
     agentAppearanceMap,
@@ -141,7 +132,7 @@ export default function ChannelMatrixCard({ children, subtitle, actions }) {
     try {
       const { notice } = await applyDesktopPet(agentId, appearance, {
         initialProgress: {
-          text: `准备下发「${appearance.name}」到设备端...`,
+          text: `正在核对设备上的「${appearance.name}」…`,
           percent: 0,
           indeterminate: true,
         },
@@ -179,7 +170,7 @@ export default function ChannelMatrixCard({ children, subtitle, actions }) {
             followOnly: true,
           }
           : {
-            text: `准备下发「${appearance.name}」并切换跟随...`,
+            text: `正在核对「${appearance.name}」并切换跟随…`,
             percent: 0,
             indeterminate: true,
           },
@@ -231,10 +222,15 @@ export default function ChannelMatrixCard({ children, subtitle, actions }) {
         <span className="kicker">{currentDisplay.appearanceUnverified ? "已配置形象 · 待设备确认" : "当前形象"}</span>
         <h2>{appearance.name}</h2>
         {activeAgentId && <div className="meta">正在跟随<strong>{currentDisplay.channelLabel}</strong></div>}
-        <button type="button" className="action" onClick={() => openPicker(activeAgentId)}
-          disabled={Boolean(pickerHint)} aria-describedby={pickerHint ? "appearance-picker-hint" : undefined}>
-          <Repeat2 size={15} /> 更换形象
-        </button>
+        <div className="companion-hero__actions">
+          <button type="button" className="action" onClick={() => onOpenPersona(appearance)} aria-haspopup="dialog">
+            <AudioLines size={15} /> 人设和声音
+          </button>
+          <button type="button" className="companion-hero__switch" onClick={() => openPicker(activeAgentId)}
+            disabled={Boolean(pickerHint)} aria-describedby={pickerHint ? "appearance-picker-hint" : undefined}>
+            <Repeat2 size={15} /> 更换形象
+          </button>
+        </div>
         {pickerHint && <p id="appearance-picker-hint" className="muted small">{pickerHint}</p>}
       </div>
       <figure className="screen">
@@ -254,25 +250,20 @@ export default function ChannelMatrixCard({ children, subtitle, actions }) {
       {syncProgress && (
         <div className="channel-matrix-sync" aria-live="polite">
           <div className="channel-matrix-sync__copy">
-            <UploadCloud size={15} />
+            {syncProgress.indeterminate ? <Loader size={15} className="spin" /> : <UploadCloud size={15} />}
             <div>
               <strong>{syncProgress.followOnly ? "正在切换跟随" : "正在切换形象"}</strong>
               <span>{syncProgress.text}</span>
             </div>
           </div>
-          <div className="channel-matrix-sync__meter">
-            <span>{syncProgress.indeterminate ? "准备中" : `${syncProgress.percent}%`}</span>
-            <div
-              className={`channel-matrix-sync__bar${syncProgress.indeterminate ? " is-indeterminate" : ""}`}
-              role="progressbar"
-              aria-label={syncProgress.followOnly ? "设备跟随切换进度" : "形象素材下发进度"}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={syncProgress.indeterminate ? undefined : syncProgress.percent}
-            >
+          {!syncProgress.indeterminate && <div className="channel-matrix-sync__meter">
+            <span>{syncProgress.percent}%</span>
+            <div className="channel-matrix-sync__bar" role="progressbar"
+              aria-label="形象素材传输进度" aria-valuemin={0} aria-valuemax={100}
+              aria-valuenow={syncProgress.percent}>
               <span style={{ "--sync-progress": `${syncProgress.percent}%` }} />
             </div>
-          </div>
+          </div>}
           {!syncProgress.followOnly && <Button
             className="channel-matrix-sync__cancel"
             variant="danger"
@@ -280,10 +271,10 @@ export default function ChannelMatrixCard({ children, subtitle, actions }) {
             loading={appearanceSync?.cancelling === true}
             loadingLabel="正在中断…"
             onClick={handleCancelAppearanceSync}
-            aria-label="中断形象传输"
+            aria-label={syncProgress.indeterminate ? "取消形象切换" : "中断形象传输"}
           >
             <X size={14} />
-            中断传输
+            {syncProgress.indeterminate ? "取消切换" : "中断传输"}
           </Button>}
         </div>
       )}
@@ -483,7 +474,7 @@ function FollowAgentConfirmModal({
             将设备端跟随的 Agent 从 {currentLabel || "当前 Agent"} 切换为 {nextLabel || "目标 Agent"}。
             {wifi?.appearanceCapacity
               ? builtin ? `将核对设备上的内置「${appearanceName}」并切换。`
-                : `先核对设备上的「${appearanceName}」。设备缺少该形象时才传输素材。`
+                : `先核对设备上的「${appearanceName}」。设备未缓存相同版本时才传输素材。`
               : wifi ? "当前固件仅支持通过 Wi-Fi 切换跟随，设备继续使用当前形象。"
                 : reusesCurrentAppearance ? `继续使用「${appearanceName}」。` : `同时同步「${appearanceName}」到设备。`}
           </div>

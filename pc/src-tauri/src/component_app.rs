@@ -88,6 +88,15 @@ pub(crate) struct MediaAuthority{
     pub(crate) view:Option<crate::component_runtime_lifecycle::ResourceOwner>,
 }
 impl MediaAuthority{pub(crate) fn is_current(&self)->bool{self.request.is_current()&&self.view.as_ref().is_none_or(|v|v.is_current())}}
+pub(crate) fn av_view(id:&str)->Result<(EventTarget,String),String>{
+    let h=HOST.get().ok_or("组件服务未就绪")?;
+    let epoch=h.device_epoch.lock().map_err(|_|"组件视图不可用")?;
+    let target=epoch.target.as_ref().ok_or("请在设备打开组件")?;
+    if !epoch.visible || epoch.id!=id || epoch.instance.is_empty() || !epoch.fresh(target) {
+        return Err("组件视图已退出或过期".into());
+    }
+    Ok((target.clone(),epoch.instance.clone()))
+}
 pub(crate) fn media_authority(id:&str)->Result<MediaAuthority,String>{
     let request=crate::component_runtime_lifecycle::capture_owner()?;
     let view=if let Some(h)=HOST.get(){
@@ -1093,16 +1102,37 @@ pub(crate) fn publish_fetch(id:&str,generation:u64,result:&Value){
 /// Device's read-only data.refresh request. Reader admission is bounded; file
 /// validation and USB output happen on a worker, with no retry or new URL grant.
 pub(crate) fn data_refresh_event(event:&Value){
-    let Some(h)=HOST.get()else{return;};let board=h.usb.status();
-    if !board.connected||event["boardDeviceId"]!=board.board_device_id{return;}
+    let Some(h)=HOST.get()else{return;};
+    let s=h.usb.status();
+    if !s.connected || event["boardDeviceId"]!=s.board_device_id{return;}
+    let Ok(connection)=s.connection_id.parse()else{return;};
+    refresh_event(event,None,Some(connection));
+}
+pub(crate) fn wifi_data_refresh_event(event:&Value,scope:crate::lan_agent::runtime_events::Scope){
+    refresh_event(event,Some(scope),None);
+}
+pub(crate) fn refresh_source(source:&str)->bool{
+    matches!(source,"computer.status"|"todos.upcoming") || source.starts_with("fetch.") && source.len()<=47
+}
+fn refresh_event(event:&Value,wifi:Option<crate::lan_agent::runtime_events::Scope>,connection:Option<u64>){
+    let Some(h)=HOST.get()else{return;};
+    let Some(expected)=event["boardDeviceId"].as_str().map(str::to_owned)else{return;};
     let Some(id)=event["componentId"].as_str().filter(|id|crate::component_extension::valid_id(id))else{return;};
-    let Some(source)=event["source"].as_str().filter(|s|*s=="computer.status"||*s=="todos.upcoming"||s.starts_with("fetch.")&&s.len()<=47)else{return;};
+    let Some(source)=event["source"].as_str().filter(|s|refresh_source(s))else{return;};
+    let deadline=std::time::Instant::now()+std::time::Duration::from_secs(5);
+    let fetch_owner=if source.starts_with("fetch.") {
+        let e=h.device_epoch.lock().unwrap();
+        if e.id!=id || !e.visible || e.board!=expected ||
+            wifi.as_ref().is_some_and(|s|!e.target.as_ref().is_some_and(|t|t.route==s.route)){return;}
+        let Some(owner)=e.owner else{return;};
+        Some(owner.generation())
+    }else{None};
     static LAST:OnceLock<Mutex<VecDeque<(String,std::time::Instant)>>>=OnceLock::new();
-    let key=format!("{}:{id}",board.board_device_id);let mut last=LAST.get_or_init(Default::default).lock().unwrap();
+    let key=format!("{expected}:{id}");let mut last=LAST.get_or_init(Default::default).lock().unwrap();
     if last.iter().any(|(k,t)|k==&key&&t.elapsed()<std::time::Duration::from_secs(5)){return;}
     let Some(permit)=h.desktop_admission.acquire()else{return;};
     last.retain(|(k,_)|k!=&key);if last.len()>=8{last.pop_front();}last.push_back((key,std::time::Instant::now()));drop(last);
-    let id=id.to_owned();let source=source.to_owned();let expected=board.board_device_id;
+    let id=id.to_owned();let source=source.to_owned();
     tauri::async_runtime::spawn_blocking(move||{
         let _permit=permit;
         let Ok(home)=crate::get_home_dir()else{return;};
@@ -1110,12 +1140,20 @@ pub(crate) fn data_refresh_event(event:&Value){
         if !entry.valid{return;}
         let Some(runtime)=entry.app_runtime else{return;};
         if runtime["data"]["source"]!=source||runtime["data"]["refresh_action"]!="data.refresh"{return;}
-        let current=h.usb.status();if !current.connected||current.board_device_id!=expected{return;}
-        if source.starts_with("fetch."){
-            let generation={let e=h.device_epoch.lock().unwrap();if e.id!=id||!e.visible||e.board!=expected{return;}e.owner.map(|o|o.generation())};
-            if let Some(generation)=generation{let _=request(&id,json!({"operation":"status","_deviceEpoch":generation}));}
+        if let Some(scope)=&wifi {
+            if !scope.current(&h.usb){return;}
+        } else {
+            let current=h.usb.status();
+            if !current.connected || current.board_device_id!=expected || current.connection_id.parse::<u64>().ok()!=connection{return;}
+        }
+        if std::time::Instant::now()>=deadline{return;}
+        if let Some(generation)=fetch_owner{
+            if h.device_epoch.lock().unwrap().accepts(generation){
+                let _=request(&id,json!({"operation":"status","_deviceEpoch":generation}));
+            }
         }else if let Ok(data)=crate::local_widget_data::local_widget_snapshot(source){
-            if let Ok(payload)=serde_json::to_value(data){let _=h.usb.send_widget_data(&expected,&payload);}
+            if let Ok(payload)=serde_json::to_value(data){if let Some(scope)=&wifi {let _=scope.publish(&h.usb,&payload);}
+                else {let _=h.usb.send_widget_data_scoped(&expected,connection,&payload);}}
         }
     });
 }

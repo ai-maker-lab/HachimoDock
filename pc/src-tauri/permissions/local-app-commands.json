@@ -13,6 +13,7 @@
           "reference_image_mount",
           "reference_image_action",
           "set_exit_reasons",
+          "send_device_test_message",
           "stock_watchlist_status",
           "local_tool_execute",
           "local_tool_definitions",
@@ -160,6 +161,7 @@
           "build_petui_project",
           "list_component_library",
           "import_hachiapp",
+          "import_component_edition",
           "read_component_wasm_preview",
           "open_wasm_preview",
           "tick_wasm_preview",
@@ -182,6 +184,7 @@
           "lan_connection_snapshot",
           "lan_follow_agent",
           "lan_sync_appearance",
+          "lan_read_appearance_slot",
           "lan_sync_global_audio_cues",
           "lan_agent_sessions",
           "lan_agent_discover",
@@ -194,6 +197,7 @@
           "lan_component_install",
           "lan_reboot",
           "lan_update_bundled_firmware",
+          "lan_update_firmware_file",
           "lan_trust_usb"
         ]
       }

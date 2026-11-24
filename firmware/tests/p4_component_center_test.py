@@ -146,16 +146,16 @@ static void center_art_prepare(void){
  if(!center_thumb_page)center_thumbnails_prepare();
  if(preview)puts("[\"background\"]");
 }
-static bool observed_thumbnail(const pet_p4_miniapp_catalog_entry_t *e,unsigned slot,int x,int y,bool *allow){
- bool ok=center_draw_thumbnail(e,slot,x,y,allow);
- if(preview&&ok){
+static center_thumb_state_t observed_thumbnail(const pet_p4_miniapp_catalog_entry_t *e,unsigned slot,int x,int y,bool *allow){
+ center_thumb_state_t state=center_draw_thumbnail(e,slot,x,y,allow);
+ if(preview&&state==CENTER_THUMB_DRAWN){
    bounds(x,y,64,48);
    printf("[\"thumbnail\",%d,%d,\"",x,y);
    for(int row=0;row<48;++row)for(int col=0;col<64;++col)
      printf("%04x",center_thumb_page->cards[slot].pixels[row*64+col]);
    puts("\"]");
  }
- return ok;
+ return state;
 }
 #define center_draw_thumbnail observed_thumbnail
 
@@ -173,13 +173,13 @@ int main(int argc,char **argv){
  /* Page two contains unknown legacy packages. All four receive the geometric icon. */
  count=8;selected=4;fallback_tiles=0;
  render_component_center_page(false);assert(fallback_tiles==4);
- /* A pending activation draws all four cards without loading their new artwork. */
+ /* Mapped art is visible on the first frame, even when storage reads are disabled. */
  selected=0;fallback_tiles=0;
  unsigned before=inflations;
- render_component_center_page(true);assert(fallback_tiles==4&&before==inflations);
+ render_component_center_page(true);assert(fallback_tiles==0&&before+4==inflations);
  for(int i=0;i<4;++i){
    fallback_tiles=0;render_component_center_page(false);
-   assert(fallback_tiles==(unsigned)(3-i));
+   assert(fallback_tiles==0&&before+4==inflations);
  }
  count=0;selected=99;render_component_center_page(true);
  for(active_filter=PET_CENTER_GAMES;active_filter<PET_CENTER_FILTER_COUNT;++active_filter)render_component_center_page(false);

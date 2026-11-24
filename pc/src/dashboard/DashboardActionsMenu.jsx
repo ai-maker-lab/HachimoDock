@@ -4,7 +4,7 @@
  *         保证既有调用方/测试不破)，以及可选 onUpdateFirmware /
  *         onDiagnostics opt-ins for P4 A/B updates and diagnostics.
  * [Output] Menu mounted into PageShell actions: 发送测试消息 / 复制桌面设备 ID /
- *          [设备返回主屏]? / [强制同步形象]? /
+ *          [设备返回主屏]? / [重新同步形象]? /
  *          [opt-in] 固件升级 / 设备诊断 / 解绑设备 (danger).
  *          应急两项在物理按键失灵切不回主屏、客户端 UI 与设备形象脱节时使用。
  * [Pos] component node in pc/src/dashboard
@@ -131,10 +131,10 @@ export default function DashboardActionsMenu({
               className="dashboard-actions-menu__item"
               role="menuitem"
               onClick={dispatch(onForceSyncAppearance)}
-              title="客户端 UI 显示的形象与设备屏幕不一致时，绕过缓存重新推送一次"
+              title="核对设备上的目标形象，已有相同素材包时直接切换，缺少时同步素材"
             >
               <RefreshCw size={14} />
-              强制同步形象
+              重新同步形象
             </button>
           )}
           {onUpdateFirmware && (

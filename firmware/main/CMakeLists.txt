@@ -8,7 +8,7 @@ if("$ENV{PET_P4_LCD_PANEL_AUTO}" STREQUAL "1")
 endif()
 
 if("$ENV{PET_P4_SYSTEM_WIFI}" STREQUAL "1")
-  set(settings_requires esp_wifi esp_event esp_netif esp-tls protocomm efuse esp_hw_support bootloader_support)
+  set(settings_requires esp_wifi esp_event esp_netif esp-tls protocomm efuse esp_hw_support bootloader_support mqtt esp_http_client)
   set(settings_sources
     "pet_p4_system_settings.c"
     "pet_p4_community.c"
@@ -19,6 +19,8 @@ if("$ENV{PET_P4_SYSTEM_WIFI}" STREQUAL "1")
     "pet_p4_lan.c"
     "pet_p4_wifi_data.c"
     "pet_p4_live_tls.c"
+    "pet_component_network.c"
+    "pet_component_network_device.c"
     "pet_p4_private_feed.c"
     "pet_p4_mqtt_feed.c"
     "pet_p4_wifi_data_cache.c"

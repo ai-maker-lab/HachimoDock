@@ -1,3 +1,4 @@
+#include "pet_component_network_device.h"
 #include "pet_p4_wasm_trial.h"
 #include "hachi_runtime.h"
 #include "mbedtls/sha256.h"
@@ -399,6 +400,9 @@ typedef enum {
 typedef struct {
   bool active;
   char widget_id[PET_P4_MINIAPP_WIDGET_ID_MAX];
+#if PET_COMPONENT_NETWORK_ENABLED
+  char wasm_network[PET_NETWORK_POLICY_BYTES];
+#endif
   bool resource_incomplete;
   #if PET_BLE_ACCESSORY
   uint8_t accessory;
@@ -563,8 +567,6 @@ static void runtime_action_accepted(miniapp_runtime_t *r,const char *action,uint
   }
 }
 
-#define WIDGET_TRANSFER_FILES_MAX 128
-#define WIDGET_TRANSFER_BYTES_MAX (16U * 1024U * 1024U)
 #define WIDGET_TRANSFER_PATH_MAX 96
 
 typedef struct {
@@ -3297,8 +3299,19 @@ static bool wasm_declaration_valid(const cJSON *root, const pet_p4_miniapp_sprit
   const cJSON *host=cJSON_GetObjectItemCaseSensitive(root,"hachiHost");
   const cJSON *audio=cJSON_GetObjectItemCaseSensitive(root,"hachiAudio");
   const cJSON *audio_hash=cJSON_GetObjectItemCaseSensitive(root,"hachiAudioSha256");
+  const cJSON *network=cJSON_GetObjectItemCaseSensitive(root,"hachiNetwork");
+  if(network){
+#if PET_COMPONENT_NETWORK_ENABLED
+    pet_net_policy_t *policy=pet_net_alloc(sizeof *policy);
+    bool ok = policy && pet_net_policy_parse(network, policy);
+    free(policy);
+    if (!ok) return false;
+#else
+    return false;
+#endif
+  }
   if(!decl){
-    return !canvas && !host && !audio && !audio_hash && bytes==0;
+    return !canvas && !host && !audio && !audio_hash && !network && bytes==0;
   }
   if(!cJSON_IsString(decl)||strlen(decl->valuestring)!=64||!bytes||bytes>HACHI_MAX_MODULE
       ||pack->data_length>sizeof(pack->pixels)-bytes)return false;
@@ -3306,6 +3319,7 @@ static bool wasm_declaration_valid(const cJSON *root, const pet_p4_miniapp_sprit
   unsigned char hash[32];
   bool native, services, uses_audio;
   if (!hachi_module_host_profile(module, bytes, &native, &services, &uses_audio)) return false;
+  bool net=false;if(!hachi_module_network_profile(module,bytes,&net)||net!=(network!=NULL))return false;
   if (uses_audio) {
     if (!cJSON_IsString(audio) || strcmp(audio->valuestring, HACHI_AUDIO_PROFILE) ||
         !cJSON_IsString(audio_hash) || strlen(audio_hash->valuestring) != 64 ||
@@ -3334,7 +3348,7 @@ static bool __attribute__((optimize("Oz"))) parse_runtime_impl(
 ) {
   PET_WIDGET_TRACE_SCOPE(trace_parse, PET_WTRACE_PARSE);
   static const char *const allowed[] = {
-    "accessory", "hardware", "schema_version", "vars", "states", "initial_state", "pages", "initial_page", "hachiWasm", "hachiCanvas", "hachiHost",
+    "accessory", "hardware", "schema_version", "vars", "states", "initial_state", "pages", "initial_page", "hachiWasm", "hachiCanvas", "hachiHost", "hachiNetwork",
 #if PET_P4_WASM_AUDIO
     "hachiAudio", "hachiAudioSha256",
 #endif
@@ -3390,6 +3404,15 @@ static bool __attribute__((optimize("Oz"))) parse_runtime_impl(
     return false;
   }
   copy_utf8(parsed->widget_id, sizeof(parsed->widget_id), widget_id);
+#if PET_COMPONENT_NETWORK_ENABLED
+  const cJSON *network=cJSON_GetObjectItemCaseSensitive(root,"hachiNetwork");
+  if (network && !cJSON_PrintPreallocated((cJSON *)network, parsed->wasm_network,
+                                        sizeof parsed->wasm_network, false)) {
+    set_error(error, error_size, "network policy size limit");
+    goto fail;
+  }
+#endif
+
   schema = cJSON_GetObjectItemCaseSensitive(root, "schema_version");
   fetchers = cJSON_GetObjectItemCaseSensitive(root, "fetchers");
   readers = cJSON_GetObjectItemCaseSensitive(root, "readers");
@@ -5331,6 +5354,23 @@ unsigned pet_p4_wasm_package(void *bytes, size_t capacity, size_t *size,
   return revision;
 }
 
+bool pet_p4_wasm_network_policy(unsigned revision, cJSON **policy) {
+  *policy = NULL;
+#if PET_COMPONENT_NETWORK_ENABLED
+  miniapp_runtime_lock();
+  bool current = revision && g_runtime.active && revision == g_image_revision + 1;
+  if (current && g_runtime.wasm_network[0]) {
+    *policy = cJSON_Parse(g_runtime.wasm_network);
+    current = *policy != NULL;
+  }
+  miniapp_runtime_unlock();
+  return current;
+#else
+  (void)revision;
+  return true;
+#endif
+}
+
 #if PET_P4_WASM_AUDIO
 uint32_t pet_p4_wasm_speech_generation(unsigned revision) {
   miniapp_runtime_lock();
@@ -5477,7 +5517,7 @@ int pet_p4_miniapp_write_if_active(const uint8_t scope[32], int (*send)(void *),
   miniapp_runtime_lock();
   int result = -1;
   if (g_runtime.active && !pet_p4_miniapp_storage_busy() &&
-      (pet_feed_is_write(g_runtime.wifi_feed.private.kind) || g_runtime.wifi_feed.private.kind == PET_GITHUB_ACCOUNT) &&
+      pet_feed_is_write(g_runtime.wifi_feed.private.kind) &&
       !memcmp(scope, g_runtime.wifi_feed.private.id, 32)) result = send(context);
   miniapp_runtime_unlock();
   return result;
@@ -8475,6 +8515,14 @@ esp_err_t pet_p4_miniapp_init(void) {
     int64_t validation_started = esp_timer_get_time();
     unsigned current_loads = 0, backup_loads = 0;
     (void) validate_catalog_snapshot(selected, NULL, &current_loads);
+    /* A scratch allocation failure leaves the newest entries unchecked.
+     * Recovering against them would durably publish older package generations. */
+    if (current_loads != selected->count) {
+      g_catalog_recovery_blocked = true;
+      free(snapshot0);
+      free(snapshot1);
+      return ESP_ERR_NO_MEM;
+    }
     if (backup->parsed) (void) validate_catalog_snapshot(backup, selected, &backup_loads);
     ESP_LOGI(TAG, "catalog boot current_checked=%u backup_checked=%u validate_us=%lld",
       current_loads, backup_loads, (long long)(esp_timer_get_time() - validation_started));
@@ -10570,6 +10618,9 @@ static bool remove_component(const char *widget_id, char *error, size_t error_si
   if (
 #if PET_P4_EVENTS
       !local_alarm_retire(removed_slot,widget_id,NULL) ||
+#endif
+#if PET_COMPONENT_NETWORK_ENABLED
+      !pet_net_device_forget(widget_id) ||
 #endif
 #if PET_P4_SCOPED_WRITE
       !pet_private_retire_component(widget_id) ||

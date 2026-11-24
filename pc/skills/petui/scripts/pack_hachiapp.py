@@ -138,13 +138,14 @@ CANVAS_PROFILE = "640x480-v1"
 HOST_PROFILE = "hachi-host-v1"
 AUDIO_PROFILE = "hachi-audio-v2"
 AUDIO_ASSET = "assets/speech.hab"
+NETWORK_IMPORTS = {b"service_submit", b"service_poll", b"service_read", b"service_release"}
 HOST_IMPORTS = {b"clock_read", b"uv_read", b"random_u32"}
-WASM_IMPORTS = HOST_IMPORTS | {
+WASM_IMPORTS = HOST_IMPORTS | NETWORK_IMPORTS | {
     b"canvas640", b"text", b"rect", b"blit", b"sprite", b"tone", b"sample", b"load", b"save", b"media_cmd"
 }
 
 
-def wasm_profile(module):
+def wasm_profile(module, include_network=False, *, component_id=None):
     """Return the profiles selected by imports."""
     if not 8 <= len(module) <= MAX_WASM_BYTES or not module.startswith(b"\0asm\x01\0\0\0"):
         raise ValueError("WASM 模块格式不正确或超过 192 KiB")
@@ -204,10 +205,26 @@ def wasm_profile(module):
         at = end
     if not saw_memory or b"text" in imports and b"canvas640" not in imports:
         raise ValueError("WASM 缺少固定内存或原生画布声明")
+    if component_id is not None and b"media_cmd" in imports and component_id != "city-radio":
+        raise ValueError("media_cmd 仅用于旧电台兼容")
     canvas = CANVAS_PROFILE if b"canvas640" in imports else None
     services = HOST_PROFILE if imports & HOST_IMPORTS else None
     audio = AUDIO_PROFILE if b"sample" in imports else None
-    return canvas, services, audio
+    return (canvas, services, audio, bool(imports & NETWORK_IMPORTS)) if include_network else (canvas, services, audio)
+
+
+def validate_audio_ownership(runtime):
+    owners = ("instrument", "media", "local", "program", "host", "sequence", "samples", "sfx")
+    surface = runtime.get("surface")
+    if any(key in runtime for key in owners):
+        raise ValueError("WASM 离线语音不能与其他音频、媒体或宿主服务混用")
+    if isinstance(surface, dict):
+        for field in ("nodes", "elements"):
+            nodes = surface.get(field)
+            if isinstance(nodes, list) and any(isinstance(n, dict) and n.get("type") == "clip" for n in nodes):
+                raise ValueError("WASM 离线语音不能与视频混用")
+        if "big_images" in surface:
+            raise ValueError("WASM 离线语音不能与 big_images 混用")
 
 
 def validate_audio(data):
@@ -308,13 +325,19 @@ def write_package(destination, files, module=None, *, require_cover=True, device
             f"runtime/widget.json.transitions[{index}].from 必须是已声明的状态或 '*'"
         )
     if module is not None:
-        canvas, services, audio = wasm_profile(module)
+        canvas, services, audio, network = wasm_profile(module, include_network=True, component_id=component_id)
+        if network:
+            from component_network import validate as validate_network
+            validate_network(widget.get("hachiNetwork"))
+        elif "hachiNetwork" in widget:
+            raise ValueError("Unused component network declaration")
         for key, profile in (("hachiCanvas", canvas), ("hachiHost", services), ("hachiAudio", audio)):
             if profile:
                 widget[key] = profile
             else:
                 widget.pop(key, None)
         if audio:
+            validate_audio_ownership(widget)
             bank = files.get(AUDIO_ASSET)
             validate_audio(bank)
             widget["hachiAudioSha256"] = hashlib.sha256(bank).hexdigest()
@@ -325,7 +348,7 @@ def write_package(destination, files, module=None, *, require_cover=True, device
         widget["hachiWasm"] = hashlib.sha256(module).hexdigest()
         files["runtime/widget.json"] = json_bytes(widget)
         files["runtime/app.wasm"] = module
-    elif AUDIO_ASSET in files or any(key in widget for key in ("hachiWasm", "hachiCanvas", "hachiHost", "hachiAudio", "hachiAudioSha256")):
+    elif AUDIO_ASSET in files or any(key in widget for key in ("hachiWasm", "hachiCanvas", "hachiHost", "hachiAudio", "hachiAudioSha256", "hachiNetwork")):
         raise ValueError("声明了 WASM 但包内缺少 runtime/app.wasm")
     dashboard = initial_host_dashboard(widget)
     if dashboard is not None:

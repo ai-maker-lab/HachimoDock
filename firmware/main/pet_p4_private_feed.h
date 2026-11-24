@@ -17,7 +17,6 @@ typedef enum {
   PET_PUBLIC_MQTT,
   PET_HTTPS_SUBMIT,
   PET_MQTT_PUBLISH,
-  PET_GITHUB_ACCOUNT,
 } pet_private_kind_t;
 
 static inline bool pet_feed_is_write(pet_private_kind_t kind) {
@@ -30,7 +29,7 @@ static inline bool pet_feed_is_write(pet_private_kind_t kind) {
 }
 
 static inline bool pet_feed_requires_account(pet_private_kind_t kind) {
-  return kind == PET_GITHUB_ACCOUNT || kind == PET_PRIVATE_BEARER || kind == PET_PRIVATE_MQTT || pet_feed_is_write(kind);
+  return kind == PET_PRIVATE_BEARER || kind == PET_PRIVATE_MQTT || pet_feed_is_write(kind);
 }
 
 typedef struct {
@@ -64,6 +63,13 @@ bool pet_private_feed_parse(pet_private_feed_t *out, pet_wifi_endpoint_t *endpoi
                             const char *component, const char *url, const cJSON *connection);
 void pet_private_storage_init(void);
 bool pet_private_storage_ready(void);
+#if PET_P4_COMPONENT_NETWORK
+/* Native component-network vault only. The caller supplies the complete binding
+ * as authenticated data and distinct input/output buffers. */
+bool pet_private_network_crypt(bool seal, const void *binding, size_t binding_size,
+                               uint8_t iv[12], uint8_t tag[16], const uint8_t *input,
+                               uint8_t *output, size_t size);
+#endif
 uint32_t pet_private_storage_epoch(void);
 bool pet_private_secret_schedule_at(const pet_private_feed_t *binding,
                                     const pet_private_secret_t *secret, bool forget, uint32_t epoch);

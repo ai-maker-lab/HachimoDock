@@ -28,12 +28,19 @@ function fixture(t, idleClearMs) {
     return path.join(directory, "transcript.jsonl");
   };
   const events = [];
-  let now = Date.now();
+  // Choose an exact whole second so transcript mtimes and the idle timer
+  // can use the same simulated clock on Windows and Unix.
+  let now = Date.UTC(2024, 0, 1);
+  function writeCurrent(session, contents) {
+    const file = transcript(session);
+    fs.writeFileSync(file, contents);
+    fs.utimesSync(file, now / 1000, now / 1000);
+  }
   const monitor = new AntigravityLogMonitor(
     { brainDir, now: () => now, idleClearMs },
     (session, state, event, { display }) => events.push({ session, state, event, ...display }),
   );
-  return { root, brainDir, transcript, monitor, events, advance(ms) { now += ms; monitor.poll(); } };
+  return { root, brainDir, transcript, writeCurrent, monitor, events, advance(ms) { now += ms; monitor.poll(); } };
 }
 
 test("parser covers working, tools, partial reply, completed and error with bounded public fields", () => {
@@ -120,12 +127,12 @@ test("trim, same-length rewrite, replacement and truncate recover without replay
 });
 
 test("the most recent conversation renews its bubble and only it can clear it", (t) => {
-  const { transcript, monitor, events, advance } = fixture(t, 30_000);
+  const { transcript, writeCurrent, monitor, events, advance } = fixture(t, 30_000);
   monitor.poll();
-  fs.writeFileSync(transcript("old"), jsonl(prompt("old"), answer("old answer")));
+  writeCurrent("old", jsonl(prompt("old"), answer("old answer")));
   monitor.poll();
   advance(15_000);
-  fs.writeFileSync(transcript("new"), jsonl(prompt("new")));
+  writeCurrent("new", jsonl(prompt("new")));
   monitor.poll();
   advance(15_000);
   assert.equal(events.at(-1).session, "new");
@@ -140,9 +147,9 @@ test("the most recent conversation renews its bubble and only it can clear it", 
 });
 
 test("a completed reply uses the standard sixty-second bubble lifetime by default", (t) => {
-  const { transcript, monitor, events, advance } = fixture(t);
+  const { writeCurrent, monitor, events, advance } = fixture(t);
   monitor.poll();
-  fs.writeFileSync(transcript("session"), jsonl(answer("completed reply")));
+  writeCurrent("session", jsonl(answer("completed reply")));
   monitor.poll();
   advance(59_999);
   assert.equal(events.at(-1).content, "completed reply");
@@ -151,9 +158,9 @@ test("a completed reply uses the standard sixty-second bubble lifetime by defaul
 });
 
 test("an idle-clear timeout of zero preserves the reply", (t) => {
-  const { transcript, monitor, events, advance } = fixture(t, 0);
+  const { writeCurrent, monitor, events, advance } = fixture(t, 0);
   monitor.poll();
-  fs.writeFileSync(transcript("session"), jsonl(answer("keep this")));
+  writeCurrent("session", jsonl(answer("keep this")));
   monitor.poll();
   advance(1_000_000);
   assert.equal(events.at(-1).content, "keep this");

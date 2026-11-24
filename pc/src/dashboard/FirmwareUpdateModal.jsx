@@ -45,6 +45,8 @@ export default function FirmwareUpdateModal({
   open,
   onClose,
   usb,
+  wifi,
+  expectedWifiBootId,
   expectedBoardDeviceId,
 }) {
   const updating = useRef(null);
@@ -58,8 +60,11 @@ export default function FirmwareUpdateModal({
   const [error, setError] = useState("");
 
   const otherBoard = Boolean(usb?.connected && usb.boardDeviceId && usb.boardDeviceId !== expectedBoardDeviceId);
-  const canSelect = Boolean(open && usb?.connected && usb.connectionId && expectedBoardDeviceId &&
-    usb.boardDeviceId === expectedBoardDeviceId);
+  const wireless = Boolean(expectedWifiBootId);
+  const matchingConnection = wireless
+    ? !usb?.connected && wifi?.wirelessOta && wifi?.controlTrusted && wifi?.bootId === expectedWifiBootId && wifi?.boardDeviceId === expectedBoardDeviceId
+    : usb?.connected && usb.connectionId && usb.boardDeviceId === expectedBoardDeviceId;
+  const canSelect = Boolean(open && expectedBoardDeviceId && matchingConnection);
   const pending = running && running.session === dialogSession.current;
   useExitProtection(running ? "固件升级中，请等待设备重新连接并校验完成" : "");
 
@@ -76,13 +81,13 @@ export default function FirmwareUpdateModal({
     setChoosing(false);
     setFirmwarePath("");
     return () => { pickerSession.current++; };
-  }, [open, expectedBoardDeviceId, usb?.boardDeviceId, usb?.connected, usb?.connectionId, usb?.bootId]);
+  }, [open, expectedBoardDeviceId, usb?.boardDeviceId, usb?.connected, usb?.connectionId, usb?.bootId, expectedWifiBootId, canSelect]);
 
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
     let unlisten;
-    listen("usb-firmware-update-progress", ({ payload }) => {
+    const receiveProgress = ({ payload }) => {
       const owner = updating.current;
       if (cancelled || !owner || owner.session !== dialogSession.current || payload?.updateId !== owner.id) return;
       setProgress({
@@ -91,7 +96,9 @@ export default function FirmwareUpdateModal({
         bytesTotal: Number(payload.bytesTotal) || 0,
         percent: Math.max(0, Math.min(100, Number(payload.percent) || 0)),
       });
-    }).then(stop => {
+    };
+    const subscription = wireless ? listen("lan-firmware-update-progress", receiveProgress) : listen("usb-firmware-update-progress", receiveProgress);
+    subscription.then(stop => {
       if (cancelled) stop();
       else unlisten = stop;
     }).catch(() => {}); // The command result still reports final validation.
@@ -99,7 +106,7 @@ export default function FirmwareUpdateModal({
       cancelled = true;
       unlisten?.();
     };
-  }, [open]);
+  }, [open, wireless]);
 
   const displayedPath = pending ? running.firmwarePath : firmwarePath;
   const selectedName = useMemo(() => fileNameFromPath(displayedPath), [displayedPath]);
@@ -136,7 +143,12 @@ export default function FirmwareUpdateModal({
     setError("");
     setProgress({ ...INITIAL_PROGRESS, stage: "begin" });
     try {
-      const nextResult = await invoke("usb_update_firmware", {
+      const nextResult = wireless ? await invoke("lan_update_firmware_file", {
+        firmwarePath,
+        expectedBoardDeviceId,
+        expectedBootId: expectedWifiBootId,
+        updateId: owner.id,
+      }) : await invoke("usb_update_firmware", {
         firmwarePath,
         expectedBoardDeviceId,
         expectedConnectionId: usb.connectionId,
@@ -177,7 +189,7 @@ export default function FirmwareUpdateModal({
           <div>
             <h3 className="modal-title">ESP32-P4 固件升级</h3>
             <p className="firmware-update-modal__subtitle">
-              目标设备：<code>{expectedBoardDeviceId}</code> · 当前版本：<code>{canSelect ? usb.firmware || "未知" : "未知"}</code>
+              目标设备：<code>{expectedBoardDeviceId}</code> · 当前版本：<code>{canSelect ? (wireless ? wifi.firmware : usb.firmware) || "未知" : "未知"}</code>
             </p>
           </div>
           <button type="button" className="icon-btn" onClick={close} disabled={pending} aria-label="关闭">
@@ -209,7 +221,7 @@ export default function FirmwareUpdateModal({
               <div className="firmware-update-modal__progress-track">
                 <span style={{ width: `${progress.percent}%` }} />
               </div>
-              <small>{formatBytes(progress.bytesSent)} / {formatBytes(progress.bytesTotal)}</small>
+              {progress.bytesTotal > 0 && <small>{formatBytes(progress.bytesSent)} / {formatBytes(progress.bytesTotal)}</small>}
             </div>
           )}
 
@@ -225,7 +237,7 @@ export default function FirmwareUpdateModal({
           {running && !pending && <p role="status">正在等待上一次升级结束。</p>}
           {canSelect && !running && !result && !error && (
             <p className="firmware-update-modal__notice">
-              升级写入备用槽，不会覆盖当前可启动版本。传输开始后请保持 USB 连接和设备供电。
+              升级写入备用槽，不会覆盖当前可启动版本。传输开始后请保持{wireless ? " Wi-Fi " : " USB "}连接和设备供电。
             </p>
           )}
         </div>

@@ -374,7 +374,7 @@ export default function CustomAvatarWizard({ onExit, onOpenApiSettings }) {
               onCancel={()=>previewController.current.invalidate()}
               disabled={!file || !processBackground || taskRunning || starting}
               processingEnabled={processBackground}/>
-            {isVolcengine && <p className="muted small">默认自动清理主体并检查参考图，再为 11 个动作分别生成不同的起始姿势图片，检查后生成对应动画，不需要中途确认。会产生参考图、每个动作起始图、检查和视频费用；已有结果自动复用。请保持客户端运行，完成后可一键应用到设备。</p>}
+            {isVolcengine && <p className="muted small">默认自动清理主体并检查参考图，再为 11 个动作分别生成不同的起始姿势图片，检查后生成对应动画，不需要中途确认。首帧重复或未通过检查时，每个动作最多自动重画一次，再次失败会保留结果供你处理。图片、重画、检查和视频按服务商计费，已完成的视频会复用。请保持客户端运行，完成后可一键应用到设备。</p>}
             <p className="muted small">支持人物、动物、玩偶和机器人。留空使用默认风格；开启主体清理后可预览，生成时会复用预览结果。</p>
             <p className="muted small">{manualReview || providerId === "kling" ? "当前：逐步确认模式" : "当前：全自动模式"} · {processBackground ? "完整主体清理已开启" : "使用原图，未清理背景"}</p>
             {generationReadyIssue && <p role="alert">{generationReadyIssue}</p>}

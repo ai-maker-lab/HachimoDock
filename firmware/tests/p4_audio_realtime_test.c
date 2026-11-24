@@ -87,7 +87,7 @@ static int64_t esp_timer_get_time(void) { return capture_loop_testing?capture_te
 static void pet_p4_afe_reference(const int16_t *pcm, size_t count) { (void)pcm; (void)count; }
 static void pet_p4_afe_reference_abort(void) {}
 static void pet_p4_afe_reset_stream(void) { resets++; }
-static void send_audio_error(const char *session, const char *error, const char *detail) { (void)session; (void)error; (void)detail; }
+static void send_audio_error(const char *owner, const char *session, const char *error, const char *detail) { (void)owner; (void)session; (void)error; (void)detail; }
 void pet_p4_audio_send_status(void) {assert(!ingress_held);}
 void pet_p4_audio_diagnostic(const char *event, const char *session, size_t bytes, bool ok) { assert(!ingress_held); (void)event; (void)session; (void)bytes; (void)ok; }
 bool pet_p4_audio_stream_playing(void) { return atomic_load(&g_stream_playing); }
@@ -412,7 +412,8 @@ static uint64_t fnv1a64_update(uint64_t hash,const uint8_t *bytes,size_t length)
 }
 static const char *g_board_device_id="test-board";
 static void add_conversation_metadata(cJSON *payload){(void)payload;}
-static void send_topic(const char *topic,cJSON *payload){
+static bool capture_frame(const char *capture_owner, const char *topic, cJSON *payload, bool live){
+  assert(!live);
   assert(!strcmp(topic,"audio/begin"));
   assert(capture_begins<2&&capture_ends==capture_begins);
   const cJSON *session=cJSON_GetObjectItemCaseSensitive(payload,"sessionId");
@@ -423,6 +424,7 @@ static void send_topic(const char *topic,cJSON *payload){
     assert(cJSON_IsNumber(token) && token->valueint == 37);
   } else assert(!token);
   assert(cJSON_IsString(session)&&cJSON_IsString(owner));
+  assert(!strcmp(capture_owner, owner->valuestring));
   assert(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(payload,"sessionQueueEmpty"))==(capture_begins==0));
   assert(!strcmp(owner->valuestring,capture_fault==4&&capture_begins==0?"old-owner":""));
   if(capture_fault==4&&capture_begins==0){
@@ -431,10 +433,12 @@ static void send_topic(const char *topic,cJSON *payload){
   snprintf(capture_sessions[capture_begins++],64,"%s",session->valuestring);
   if(capture_begins==2)assert(strcmp(capture_sessions[0],capture_sessions[1]));
   cJSON_Delete(payload);
+  return true;
 }
 #include "production_audio_begin.inc"
-static bool send_audio_chunk(const char *session,uint32_t index,const uint8_t *pcm,
+static bool send_audio_chunk(const char *owner, const char *session,uint32_t index,const uint8_t *pcm,
   size_t length,bool processed,bool speech,const char *conversation){
+  assert(owner && !owner[0]);
   (void)pcm;(void)processed;(void)speech;(void)conversation;
   assert(index==0&&length==PET_P4_AUDIO_FRAME_BYTES);
   if(capture_begins==1){
@@ -444,8 +448,9 @@ static bool send_audio_chunk(const char *session,uint32_t index,const uint8_t *p
   assert(capture_begins==2&&!strcmp(session,capture_sessions[1]));
   new_chunks++;assert(pet_p4_audio_capture_stop()==ESP_OK);return true;
 }
-static void send_audio_end(const char *session,const char *reason,uint32_t chunks,
+static void send_audio_end(const char *owner, const char *session,const char *reason,uint32_t chunks,
   uint64_t bytes,uint64_t hash){
+  assert(!strcmp(owner, capture_fault == 4 && capture_ends == 0 ? "old-owner" : ""));
   (void)hash;assert(capture_ends<2&&!strcmp(session,capture_sessions[capture_ends]));
   if(capture_ends==0){
     assert(chunks==0&&bytes==0&&atomic_load(&g_capture_requested)&&g_capture_pending.serial);

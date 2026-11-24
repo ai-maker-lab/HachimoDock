@@ -16,7 +16,7 @@ import { normalizeGenerationErrorMessage } from "./generation-issue.js";
 export { normalizeGenerationErrorMessage };
 import { replaceFamilyVideo, saveAppearance, prepareSavedAppearance } from "./appearance-store.js";
 import { recordDiagnostic } from "./avatar-pipeline/diagnostics.js";
-import { loadGenerationSession, saveGenerationSession, beginGenerationSession, publicGenerationConfig, resumeGenerationImageEdit, generationSessionNeedsProtection, summarizeGenerationSession, canAutoResume } from "./avatar-pipeline/session.js";
+import { loadGenerationSession, saveGenerationSession, beginGenerationSession, publicGenerationConfig, resumeGenerationImageEdit, rejectedStartFrames, generationSessionNeedsProtection, summarizeGenerationSession, canAutoResume } from "./avatar-pipeline/session.js";
 import { loadProviderConfig, loadArkImageConfig } from "./avatar-pipeline/provider-config.js";
 
 /**
@@ -91,6 +91,7 @@ export function initializeGenerationRecovery() {
     if (state.recoveryReadError) setState({ recoveryReadError: "" });
     if (session && !session.finished && !session.dismissed && state.status === "idle") {
       const summary = summarizeGenerationSession(session);
+      if (summary.manualNotice) return;
       setState({ status: summary.status, recoveryLabel: summary.label, resumable: true,
         automatic: session.automatic === true,
         appearanceName: session.appearanceName, startedAt: session.createdAt || 0,
@@ -109,7 +110,7 @@ export function initializeGenerationRecovery() {
   return initialization;
 }
 
-export async function resumeGenerationTask(key = "current", { automaticResume = false } = {}) {
+export async function resumeGenerationTask(key = "current", { automaticResume = false, regenerateRejected = false, expectedId } = {}) {
   if (isGenerationRunning() || sessionTransitionPending) return;
   sessionTransitionPending = true;
   let restoredInput;
@@ -117,12 +118,19 @@ export async function resumeGenerationTask(key = "current", { automaticResume = 
     const session = await loadGenerationSession(key);
     if (!session || session.finished || session.dismissed) return;
     if (!["volcengine", "kling"].includes(session.config.provider)) throw new Error("自定义接口任务暂不支持跨重启恢复，避免将旧任务发送到不同服务；请在原服务核对结果。");
+    if (expectedId && expectedId !== session.id) throw new Error("任务已变更，请刷新后重试。");
+    const repairFamilies = regenerateRejected ? rejectedStartFrames(session) : null;
+    if (regenerateRejected && !repairFamilies.length) throw new Error("没有可重做的首帧。");
+    if (session.phase === "partial" && !regenerateRejected) {
+      const { manualNotice } = summarizeGenerationSession(session);
+      if (manualNotice) throw new Error(manualNotice);
+    }
     const provider = session.config.provider;
     const saved = loadProviderConfig(provider);
     const imageFile=session.original?.bytes?.byteLength
       ? new File([session.original.bytes],session.original.filename||'reference.png',{type:session.original.mime||'image/png'})
       : session.imageFile;
-    restoredInput = { imageFile, appearanceName: session.appearanceName,
+    restoredInput = { imageFile, repairFamilies, appearanceName: session.appearanceName,
       personality: session.personality, styleDescription: session.styleDescription || '', skipProcessing: session.skipProcessing, session, restoreArchived: key !== "current",
       manualReview: session.automatic !== true,
       retryReview: !automaticResume,
@@ -307,6 +315,13 @@ export function buildAllFamiliesFailedMessage(families) {
   return `生成失败：所有动作都没有生成成功。${summarizeFamilyFailures(families)}`;
 }
 
+function moveManualResultToHistory(session) {
+  if (!summarizeGenerationSession(session).manualNotice) return false;
+  setState({ status: "idle", resumable: false, progress: null, error: "",
+    appearanceId: session.appearanceId, completionEpoch: state.completionEpoch + 1 });
+  return true;
+}
+
 async function runTask(input) {
   const {
     imageFile,
@@ -327,11 +342,13 @@ async function runTask(input) {
     id: crypto.randomUUID(), config: publicGenerationConfig(providerConfig), imageFile,
     appearanceName, personality, styleDescription: input.styleDescription || '', skipProcessing, actions: {}, createdAt: Date.now(),
     distinctStartFrames: !skipProcessing && providerConfig.provider==='volcengine',
+    autoCorrectStartFrames: !skipProcessing && providerConfig.provider === 'volcengine' && input.manualReview !== true,
     ...(input.referencePreview?.bytes?.byteLength && !skipProcessing ? {reference:input.referencePreview} : {}),
     automatic: input.manualReview !== true,
   };
   session.dismissed = false;
   session.pausedByUser = false;
+  if (input.repairFamilies) session.frameRepair = { families: input.repairFamilies, started: {} };
   if (input.session && !input.restoreArchived) await saveGenerationSession(session);
   else await beginGenerationSession(session);
   let savedId = session.appearanceId || "";
@@ -386,6 +403,7 @@ async function runTask(input) {
       await prepareSavedAppearance(savedId);
       session.phase=session.allVideosReady?'completed':'partial';session.finished=!!session.allVideosReady;
       await saveGenerationSession(session);
+      if (!session.finished && moveManualResultToHistory(session)) return;
       setState({status:'completed',resumable:!session.finished,appearanceId:savedId,
         progress:{...summarizeGenerationSession(session),stage:'completed',message:session.finished?'整套动画和设备格式已准备完成。':'已生成部分和设备格式已保存，可继续恢复剩余动作。'},
         completionEpoch:state.completionEpoch+1});return;
@@ -438,8 +456,10 @@ async function runTask(input) {
     await prepareSavedAppearance(savedId);
     session.finished = session.allVideosReady;
     session.phase = session.finished ? "completed" : "partial";
+    if (session.frameRepair && !Object.values(session.actions).some(a => a.deferred)) delete session.frameRepair;
     if(Object.values(session.actions).some(a=>a.deferred))session.phase='waiting_network';
     await saveGenerationSession(session);
+    if (session.phase === 'partial' && moveManualResultToHistory(session)) return;
     setState({
       status: session.phase==='waiting_network' ? "paused" : "completed",
       recoveryLabel: session.phase==='waiting_network' ? '等待网络恢复' : '',

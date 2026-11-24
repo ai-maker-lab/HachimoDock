@@ -1,7 +1,7 @@
 /* Runs the production decoder/cache/blit against the linked catalog blob. */
 static bool draw_test_card(pet_p4_miniapp_catalog_entry_t *entry, unsigned slot) {
   bool allow = true;
-  return center_draw_thumbnail(entry, slot, 12, 8, &allow);
+  return center_draw_thumbnail(entry, slot, 12, 8, &allow) == CENTER_THUMB_DRAWN;
 }
 
 /* Reproduce the installed on-disk format under an isolated temporary mount. */
@@ -29,11 +29,11 @@ static void test_thumbnail_cache(void) {
   center_thumbnails_prepare();
   assert(sizeof(*center_thumb_page) < 27*1024 && outstanding == 1 && inflations == 0);
 
-  /* Each visible slot gets a separate turn. A repeated hit never unpacks or reads. */
+  /* Each visible slot decodes mapped art on the first turn. A repeated hit never unpacks or reads. */
   bool allow = true;
-  assert(center_draw_thumbnail(&item, 0, 12, 8, &allow) && !allow);
-  assert(!center_draw_thumbnail(&item, 1, 12, 8, &allow));
-  assert(draw_test_card(&item, 0) && inflations == 1 && !package_reads);
+  assert(center_draw_thumbnail(&item, 0, 12, 8, &allow) == CENTER_THUMB_DRAWN && allow);
+  assert(center_draw_thumbnail(&item, 1, 12, 8, &allow) == CENTER_THUMB_DRAWN);
+  assert(draw_test_card(&item, 0) && inflations == 2 && !package_reads);
   for (unsigned i = 0; i < CENTER_ART_COUNT; ++i) {
     const size_t offset = center_art_catalog[i].offset, length = center_art_catalog[i].length;
     if (!center_art_catalog[i].art) continue;
@@ -63,12 +63,12 @@ static void test_thumbnail_cache(void) {
   strcpy(item.widget_id, "legacy-without-cover");
   assert(!draw_test_card(&item, 0));
 
-  /* Busy storage uses built-in art immediately, then retries the installed package. */
+  /* A pending installed cover must not be replaced with different built-in art. */
   strcpy(item.widget_id, center_art_catalog[0].id);
   fixture_thumbnail(&item, 0x34, 0);
-  assert(draw_test_card(&item, 0) && package_reads == 1);
+  assert(center_draw_thumbnail(&item, 0, 12, 8, &allow) == CENTER_THUMB_PENDING && package_reads == 1);
   fixture_thumbnail(&item, 0x34, CENTER_THUMB_BYTES);
-  assert(draw_test_card(&item, 0) && package_reads == 1);
+  assert(!draw_test_card(&item, 0) && package_reads == 1);
   clock_us += 1000000;
   g_framebuffer[8*640+12] = 0xf00d;
   assert(draw_test_card(&item, 0) && package_reads == 2);
@@ -78,7 +78,7 @@ static void test_thumbnail_cache(void) {
   strcpy(item.widget_id, "third-party");
   fixture_thumbnail(&item, 0x56, CENTER_THUMB_BYTES);
   allow = false;
-  assert(!center_draw_thumbnail(&item, 0, 12, 8, &allow)); /* Never show the old slot. */
+  assert(center_draw_thumbnail(&item, 0, 12, 8, &allow) == CENTER_THUMB_PENDING); /* Never show the old slot. */
   assert(draw_test_card(&item, 0) && g_framebuffer[16*640+12] == 0x1256);
   ++item.center_thumb_generation;
   fixture_thumbnail(&item, 0x56, CENTER_THUMB_BYTES);
@@ -102,7 +102,7 @@ static void test_thumbnail_cache(void) {
   }
   assert(package_reads == 11);
   /* One static page, no input or catalog updates. Hold audio for six seconds.
-   * Each row first shows its real built-in cover and later its package pixels. */
+   * No card shows substitute art while its installed cover is waiting. */
   for (unsigned slot = 0; slot < PET_CENTER_PAGE_SIZE; ++slot) {
     item.center_title_slot = slot;
     item.center_thumb_generation = 0;
@@ -122,9 +122,9 @@ static void test_thumbnail_cache(void) {
     last_render_ms = clock_us/1000;
     fallback_tiles = 0;
     render_component_center_page(false);
-    assert(package_reads == before && fallback_tiles == (unsigned)(frame < 3 ? 3-frame : 0));
+    assert(package_reads == before && fallback_tiles == 0);
   }
-  assert(inflations == decoded+PET_CENTER_PAGE_SIZE);
+  assert(inflations == decoded);
   storage_busy = false;
   for (int frame = 0; frame < 12; ++frame) {
     clock_us += 50000;
@@ -139,6 +139,21 @@ static void test_thumbnail_cache(void) {
     int x = PET_CENTER_LEFT + slot%2 * PET_CENTER_STEP_X + 18;
     int y = PET_CENTER_TOP + slot/2 * PET_CENTER_STEP_Y + 14;
     assert(g_framebuffer[(y+8)*640+x] == 0x1260+slot);
+  }
+  /* Keep the icon area neutral during retries. Only the final decision
+   * selects built-in art or the legacy icon, depending on the component. */
+  for (unsigned builtin = 0; builtin < 2; ++builtin) {
+    strcpy(item.widget_id, builtin ? center_art_catalog[0].id : "third-party");
+    item.center_title_slot = 31;
+    fixture_thumbnail(&item, 0x70, 0);
+    for (unsigned attempt = 1; attempt <= CENTER_THUMB_MAX_ATTEMPTS; ++attempt) {
+      clock_us += 1000000;
+      allow = true;
+      center_thumb_state_t state = center_draw_thumbnail(&item, 0, 12, 8, &allow);
+      assert(!allow);
+      if (attempt < CENTER_THUMB_MAX_ATTEMPTS) assert(state == CENTER_THUMB_PENDING);
+      else assert(state == (builtin ? CENTER_THUMB_DRAWN : CENTER_THUMB_MISSING));
+    }
   }
   memset(test_package_checksums, 0, sizeof(test_package_checksums));
   center_thumbnails_release();

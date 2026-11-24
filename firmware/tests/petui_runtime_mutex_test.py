@@ -74,6 +74,12 @@ def test_runtime_task_mutex_contended_snapshots_and_fail_closed_guards(tmp_path)
     write = function(code, 'pet_p4_miniapp_write_if_active')
     assert write.index('miniapp_runtime_lock();') < write.index('g_runtime.active') < write.index('!memcmp(scope,')
     assert write.index('!memcmp(scope,') < write.index('send(context)') < write.index('miniapp_runtime_unlock();') < write.index('return result;')
+    policy = function(code, 'pet_p4_wasm_network_policy')
+    assert policy.count('miniapp_runtime_lock();') == policy.count('miniapp_runtime_unlock();') == 1
+    locked = policy.split('miniapp_runtime_lock();', 1)[1].split('miniapp_runtime_unlock();', 1)[0]
+    assert 'revision && g_runtime.active && revision == g_image_revision + 1' in locked
+    assert 'cJSON_Parse(g_runtime.wasm_network)' in locked
+    census = census.replace(policy, '', 1)
     # 65: includes the merged WASM package/speech and filtered-center accessors.
     # Preserve an exact census while the contention test below exercises snapshots.
     assert census.count('miniapp_runtime_lock();') == 65

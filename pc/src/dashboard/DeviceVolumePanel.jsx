@@ -1,3 +1,4 @@
+import { pollWhileVisible } from "../lib/visible-poll.js";
 import GlobalAudioCuesPanel from '../GlobalAudioCuesPanel.jsx';
 import React,{useCallback,useEffect,useMemo,useRef,useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
@@ -26,7 +27,10 @@ function UsbDeviceVolume({usb,active}) {
   useEffect(()=>{void control.setTarget({connected:usb?.connected,boardDeviceId:usb?.boardDeviceId,bootId:usb?.bootId,connectionId:usb?.connectionId,
     portName:usb?.portName,runtime:usb?.runtime,engine}, active);},[control,active,usb?.connectionId,usb?.connected,usb?.boardDeviceId,usb?.bootId,usb?.portName,usb?.runtime,engine]);
   useEffect(()=>()=>control.dispose(),[control]);
-  useEffect(()=>{if(!active)return;const timer=setInterval(()=>{const s=control.getSnapshot();if(s.known&&s.draft===s.value&&!s.persisted&&!s.busy)void control.refresh();},5000);return()=>clearInterval(timer);},[active,control]);
+  useEffect(()=>{if(!active)return;return pollWhileVisible(() => {
+      const state = control.getSnapshot();
+      if (state.known && state.draft === state.value && !state.persisted && !state.busy) void control.refresh();
+    }, 5000);},[active,control]);
   useExitProtection(state.busy && !state.loading ? "设备音量请求尚未完成" : "");
   const disabled=!state.available||!state.known||state.busy;
   const level=state.known?`${state.draft}%`:'—';
@@ -109,8 +113,7 @@ function WifiDeviceVolume({ wifi, active }) {
 
   useEffect(() => {
     if (!active || persisted !== false || busy || awaiting || Number(value) !== observedVolume) return;
-    const timer = setInterval(() => void readVolume(), 5000);
-    return () => clearInterval(timer);
+    return pollWhileVisible(() => void readVolume(), 5000);
   }, [active, awaiting, busy, observedVolume, persisted, readVolume, value]);
 
   useEffect(() => {

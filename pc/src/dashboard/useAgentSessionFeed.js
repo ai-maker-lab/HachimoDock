@@ -25,8 +25,8 @@ export const P4_PENDING_EVENT_LIMIT = 100;
 
 let lastFeedContact = { agentId: "", at: -Infinity };
 
-export function agentSessionFeedFresh(agentId) {
-  return lastFeedContact.agentId === agentId && performance.now() - lastFeedContact.at < 9000;
+export function agentSessionFeedFresh(agentId, maxAgeMs = 9000) {
+  return lastFeedContact.agentId === agentId && performance.now() - lastFeedContact.at < maxAgeMs;
 }
 
 const EMPTY_SESSIONS = Object.freeze([]);

@@ -124,7 +124,7 @@ export default function RealtimeChatPanel({ keyBound = false, onOpenApiSettings,
         </div>
       )}
       {realtimeChat?.searchState === "searching" && <p className="muted small" role="status">正在联网检索…</p>}
-      {realtimeChat?.searchState === "failed" && <p className="muted small" role="status">{realtimeChat.searchError}</p>}
+      {realtimeChat?.searchState === "failed" && realtimeChat.searchError !== realtimeChat.error && <p className="muted small" role="status">{realtimeChat.searchError}</p>}
       {realtimeChat?.searchSources?.length > 0 && (
         <details className="usage-help">
           <summary>联网来源（{realtimeChat.searchSources.length}）{realtimeChat.searchProvider && ` · ${realtimeChat.searchProvider}`}</summary>

@@ -1,6 +1,9 @@
 //! Agent presentation and authenticated status for a paired WiFi6 board.
 #[path = "lan_agent/discovery.rs"]
 mod discovery;
+pub(crate) mod test_message;
+pub(crate) mod runtime_events;
+pub(crate) mod maintenance;
 #[path = "lan_agent/component.rs"]
 pub(crate) mod component;
 #[path = "lan_agent/appearance.rs"]
@@ -15,6 +18,7 @@ pub(crate) mod trust;
 pub(crate) mod realtime;
 pub(crate) mod voice;
 pub(crate) mod private_feed;
+pub(crate) mod component_av;
 #[path = "lan_agent/component_events.rs"]
 pub(crate) mod component_events;
 #[path = "lan_agent/widget_data.rs"]
@@ -192,6 +196,13 @@ fn exchange_link(peer: &Peer, mode: u8, body: &[u8], response_max: Option<usize>
 // than just an ACK timeout. Existing control/audio callers keep their budgets.
 fn exchange_link_bounded(peer: &Peer, mode: u8, body: &[u8], response_max: Option<usize>,
                  response_timeout: Duration, until: Option<Instant>) -> io::Result<AuthenticatedLink> {
+    exchange_link_observed(peer, mode, body, response_max, response_timeout, until, || {})
+}
+
+// Crossing this boundary can mutate the device even if the reply never arrives.
+fn exchange_link_observed(peer: &Peer, mode: u8, body: &[u8], response_max: Option<usize>,
+                          response_timeout: Duration, until: Option<Instant>,
+                          before_frame_write: impl FnOnce()) -> io::Result<AuthenticatedLink> {
     let budget = |limit: Duration| -> io::Result<Duration> {
         let remaining = until.map(|at| at.saturating_duration_since(Instant::now())).unwrap_or(limit);
         if remaining.is_zero() { return Err(io::ErrorKind::TimedOut.into()); }
@@ -238,6 +249,7 @@ fn exchange_link_bounded(peer: &Peer, mode: u8, body: &[u8], response_max: Optio
     frame.extend_from_slice(&header);
     frame.extend_from_slice(&ciphertext);
     stream.set_write_timeout(Some(budget(IO_TIMEOUT)?))?;
+    before_frame_write();
     stream.write_all(&frame).map_err(|e| stage(e, "未取得可验证的认证回执"))?;
     let deadline = Instant::now() + budget(response_timeout)?;
     let mut aad = header.to_vec();
@@ -276,6 +288,10 @@ pub(crate) struct LanDeviceStatus {
     component_delivery: bool,
     #[serde(default)]
     component_bundle: bool,
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    component_target: Option<ComponentTarget>,
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    component_target_error: Option<String>,
     #[serde(default, skip_deserializing)]
     center_thumb: bool,
     #[serde(default, rename(deserialize = "ac"))]
@@ -344,6 +360,48 @@ fn query_status(peer: &Peer) -> io::Result<LanDeviceStatus> {
     decode_status(&reply)
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ComponentTarget {
+    board_device_id: String,
+    boot_id: String,
+    association: u32,
+    capabilities: Value,
+}
+
+fn query_component_status(peer: &Peer) -> io::Result<LanDeviceStatus> {
+    let mut status = query_status(peer)?;
+    if status.control_trusted && status.wifi_connected && status.component_bundle && status.rtc_key & 64 != 0 {
+        match read_component_target(peer, &status) {
+            Ok(target) => status.component_target = Some(target),
+            Err(error) => {
+                let message = match error.kind() {
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => "无线组件能力查询超时，请刷新连接。".into(),
+                    io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe =>
+                        "无线设备在能力查询期间断开，请恢复连接。".into(),
+                    _ => format!("未取得当前 Wi-Fi 组件能力：{error}"),
+                };
+                status.component_target_error = Some(message);
+            }
+        }
+    }
+    Ok(status)
+}
+
+fn read_component_target(peer: &Peer, status: &LanDeviceStatus) -> io::Result<ComponentTarget> {
+    // An intermediate firmware returned the full table on selector 2.
+    let selector = if status.rtc_key & 128 != 0 { 3 } else { 2 };
+    let reply = exchange_response(peer, DEVICE_STATUS, &[selector], Some(16 * 1024 - 2))?;
+    let target: ComponentTarget = serde_json::from_slice(&reply)?;
+    if target.board_device_id.is_empty() || target.board_device_id != status.board_device_id
+        || target.boot_id != status.boot_id || target.boot_id.len() != 16
+        || !target.boot_id.bytes().all(|b| b.is_ascii_hexdigit())
+        || target.association == 0 || !target.capabilities.is_object() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "无线连接或设备身份变化，请刷新能力"));
+    }
+    Ok(target)
+}
+
 fn decode_status(reply: &[u8]) -> io::Result<LanDeviceStatus> {
     let mut status: LanDeviceStatus = serde_json::from_slice(reply)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "认证已通过，状态格式无法解析"))?;
@@ -360,9 +418,10 @@ pub(crate) async fn lan_device_status(app: tauri::AppHandle) -> Result<PairedLan
 }
 
 fn current_status(app: &tauri::AppHandle, peer: Peer) -> Result<PairedLanStatus, String> {
-    let (peer, device) = read_peer_with_recovery(peer, query_status,
+    let (peer, device) = read_peer_with_recovery(peer, query_component_status,
         "无法读取 Wi-Fi 设备状态，请确认设备在线且固件支持无线状态查询。")?;
     let (version, blocked) = ota::bundled_wifi6_status(app, &device.board_device_id);
+    maintenance::observe(app, &peer, &device);
     Ok(PairedLanStatus {
         address: peer.address.ip().to_string(),
         bundled_firmware_version: version,
@@ -500,6 +559,11 @@ pub(crate) fn ensure_bubble_font(usb: &crate::usb_serial::UsbSerialManager, boar
     }, Some(&mut |id, bytes| component::send_font(&peer, boot, id, bytes, current, || require_no_usb(usb))), None, current)
 }
 
+fn panel_receipt_matches(response: &Value, board: &str, boot: &str) -> bool {
+    response["boardDeviceId"].as_str() == Some(board)
+        && response.get("bootId").is_none_or(|id| id.as_str() == Some(boot))
+}
+
 #[tauri::command]
 pub(crate) async fn lan_panel_control(
     usb_manager: tauri::State<'_, crate::usb_serial::UsbSerialManager>,
@@ -558,8 +622,8 @@ pub(crate) async fn lan_panel_control(
             return Err("设备未接受无线请求，请检查连接和设备状态。".into());
         }
         let response: Value = serde_json::from_slice(&bytes).map_err(|_| "设备返回无效数据。")?;
-        if response["boardDeviceId"].as_str() != Some(board_device_id.as_str()) {
-            return Err("设备回报身份与当前连接不一致。".into());
+        if require_no_usb(&usb).is_err() || !panel_receipt_matches(&response, &board_device_id, &expected_boot_id) {
+            return Err("设备连接已变化，本次结果待核对。请读取当前设备状态。".into());
         }
         if response["ok"].as_bool() != Some(true) {
             return Err(response["message"].as_str().unwrap_or("设备拒绝这项无线操作。").into());
@@ -1235,6 +1299,7 @@ pub(crate) fn require_no_usb(usb: &crate::usb_serial::UsbSerialManager) -> Resul
 }
 
 pub(crate) fn start(app: tauri::AppHandle, usb: crate::usb_serial::UsbSerialManager) {
+    runtime_events::start(app.clone(), usb.clone());
     voice::start(app.clone(), usb.clone());
     std::thread::spawn(move || {
         let mut presses = press::Poller::default();
@@ -1347,6 +1412,19 @@ pub(crate) fn start(app: tauri::AppHandle, usb: crate::usb_serial::UsbSerialMana
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn panel_receipt_rejects_other_boards_reboots_and_invalid_boot_fields() {
+        use super::panel_receipt_matches;
+        use serde_json::json;
+        let board = "p4-a";
+        let boot = "100000000000000a";
+        assert!(panel_receipt_matches(&json!({"boardDeviceId":board}), board, boot));
+        assert!(panel_receipt_matches(&json!({"boardDeviceId":board,"bootId":boot}), board, boot));
+        for receipt in [json!({"boardDeviceId":"p4-b"}),json!({"boardDeviceId":board,"bootId":"old"}),json!({"boardDeviceId":board,"bootId":null})] {
+            assert!(!panel_receipt_matches(&receipt, board, boot));
+        }
+    }
+
     use super::*;
 
     fn hex(data: &[u8]) -> String {

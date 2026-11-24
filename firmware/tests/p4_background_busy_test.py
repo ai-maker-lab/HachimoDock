@@ -86,7 +86,7 @@ int main(void){
  const uint32_t hash[]={1,2,3};uint64_t token=0;
  pet_program_registry_entry_t *entry=&g_background_programs.entries[0];
  memcpy(entry->content,hash,sizeof(hash));entry->session.live=entry->session.host.lease=1;
- #define start(local) background_start_installed("app",hash,&token,NULL,0,local)
+ #define start(local) background_start_installed("app",hash,&token,NULL,0,local,NULL,NULL)
  audio=true;assert(start(false)&&token==17&&!io);token=0;
  assert(!start(true)&&!token&&!io);
  entry->config.local_background=true;consent=false;assert(!start(true)&&!token&&!io);

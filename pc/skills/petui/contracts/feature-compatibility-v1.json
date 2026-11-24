@@ -6,7 +6,6 @@
     {"id":"mic-level","group":"hardware","when":{"/runtime/hardware/service":"microphone-level-v1"},"label":"前台麦克风电平","paths":["device"],"requires":{"widgetMicLevel":"microphone-level-v1"},"grant":"本机实体 SW1 逐次授权，退出停止"},
     {"id": "feed-mqtt-publish", "group": "data", "when": {"/runtime/data/source": "wifi.feed", "/runtime/data/connection/type": "mqtt-publish"}, "label": "由设备发布 MQTT 消息", "paths": ["device-wifi"], "requires": {"widgetWifiFeed": "p4-wifi-feed-v1", "widgetPrivateFeed": "p4-private-feed-v1", "widgetCredentialStorageReady": true, "widgetScopedWrite": "p4-scoped-write-v1"}, "grant": "设备绑定主题与值，逐次确认", "capsGroup": "feed"},
     {"id": "feed-https-submit", "group": "data", "when": {"/runtime/data/source": "wifi.feed", "/runtime/data/connection/type": "https-submit"}, "label": "由设备提交 HTTPS 写入", "paths": ["device-wifi"], "requires": {"widgetWifiFeed": "p4-wifi-feed-v1", "widgetPrivateFeed": "p4-private-feed-v1", "widgetCredentialStorageReady": true, "widgetScopedWrite": "p4-scoped-write-v1"}, "grant": "设备绑定目标与值，逐次确认", "capsGroup": "feed"},
-    {"id": "feed-github-account", "group": "data", "when": {"/runtime/data/source": "wifi.feed", "/runtime/data/connection/type": "github-account"}, "label": "在设备读取 GitHub 账号", "paths": ["device-wifi"], "requires": {"widgetWifiFeed": "p4-wifi-feed-v1", "widgetPrivateFeed": "p4-private-feed-v1", "widgetCredentialStorageReady": true, "widgetDeviceProvider": "github-account-v1"}, "grant": "设备服务账号", "capsGroup": "feed"},
     {"id": "feed-bearer", "group": "data", "when": {"/runtime/data/source": "wifi.feed", "/runtime/data/connection/type": "bearer"}, "label": "私人 HTTPS 列表", "paths": ["device-wifi"], "requires": {"widgetWifiFeed": "p4-wifi-feed-v1", "widgetPrivateFeed": "p4-private-feed-v1", "widgetCredentialStorageReady": true}, "grant": "设备服务账号", "capsGroup": "feed"},
     {"id": "feed-mqtt", "group": "data", "when": {"/runtime/data/source": "wifi.feed", "/runtime/data/connection/type": "mqtt"}, "label": "私人 MQTT TLS 订阅", "paths": ["device-wifi"], "requires": {"widgetWifiFeed": "p4-wifi-feed-v1", "widgetPrivateFeed": "p4-private-feed-v1", "widgetCredentialStorageReady": true}, "grant": "设备服务账号", "capsGroup": "feed"},
     {"id": "feed-mqtt-public", "group": "data", "when": {"/runtime/data/source": "wifi.feed", "/runtime/data/connection/type": "mqtt-public"}, "label": "公开 MQTT TLS 订阅", "paths": ["device-wifi"], "requires": {"widgetWifiFeed": "p4-wifi-feed-v1", "widgetPublicMqtt": "p4-public-mqtt-v1"}, "capsGroup": "feed"},
@@ -38,6 +37,7 @@
     {"id": "extension", "group": "extension", "when": {"/extension": true}, "label": "电脑扩展操作", "paths": ["pc"]},
     {"id": "local-tool", "group": "local", "when": {"/runtime/local/engine": "*"}, "label": "设备本地工具", "paths": ["device"], "requires": {"widgetLocalTools": "p4-local-tools-v1"}},
     {"id": "game", "group": "local", "when": {"/runtime/game/type": "*"}, "label": "设备本地游戏", "paths": ["device"]},
+    {"id":"offline-reader","group":"local","when":{"/runtime/offlineReading":"embedded-shelf-v1","/runtime/hachiWasm":"*","/runtime/hachiCanvas":"640x480-v1"},"label":"离线阅读与本机书签","paths":["device"],"requires":{"widgetWasm":"hachi-wasm-v1"},"capsGroup":"wasm"},
     {"id": "wasm", "group": "local", "when": {"/runtime/hachiWasm": "*"}, "label": "设备 WASM 程序", "paths": ["device"], "requires": {"widgetWasm": "hachi-wasm-v1"}, "capsGroup": "wasm"},
     {"id": "clock", "group": "clock", "when": {"/runtime/local/kind": "countdown"}, "label": "冷启动后校时", "paths": ["device-wifi", "pc-usb"], "requires": {"wifiStatus": true}},
     {"id": "background-alarm", "group": "alarm", "when": {"/backgroundAlarm": true}, "label": "隐藏提醒", "paths": ["device"], "requires": {"widgetEvents": "p4-events-v1"}, "grant": "按本板实际提醒策略授权"},
@@ -47,11 +47,15 @@
     {"id": "program-v1", "group": "program", "when": {"/runtime/program/engine": "p4-component-program-v1"}, "label": "设备本地程序与私有状态", "paths": ["device"], "requires": {"widgetProgram": "p4-component-program-v1"}},
     {"id": "program-v2", "group": "program", "when": {"/runtime/program/engine": "p4-component-program-v2"}, "label": "设备本地程序与私有状态", "paths": ["device"], "requires": {"widgetProgram": "p4-component-program-v2"}},
     {"id": "save", "group": "save", "when": {"/runtime/persist/version": "*"}, "label": "保存和恢复组件状态", "paths": ["device"], "requires": {"widgetState": "p4-app-state-v1"}},
+    {"id":"optional-narration","group":"speech","when":{"/app/autoRead":true},"label":"可选朗读（电脑需配置 TTS）","paths":["pc"],"optional":true},
     {"id": "local", "group": "fallback", "when": {}, "label": "设备本地运行", "paths": ["device"]}
   ],
   "capabilities": [
     {"when": "/runtime/data/response_map", "requires": {"widgetWifiFeedMap": "p4-wifi-feed-map-v1"}, "group": "feed"},
     {"when": "/runtime/data/http", "requires": {"widgetWifiFeedHttp": "p4-wifi-feed-http-v1"}, "group": "feed"},
+    {"when": "/runtime/hachiNetwork", "requires": {"widgetWasmNetwork": "component-network-v1"}, "group": "wasm"},
+    {"when": "/runtime/hachiNetwork/credentials", "requires": {"widgetComponentCredentials": "component-credentials-secure-v1"}, "group": "wasm"},
+    {"when": "/runtime/hachiAudio", "requires": {"widgetWasmAudio": "hachi-audio-v2"}, "group": "wasm"},
     {"when": "/runtime/hachiCanvas", "requires": {"widgetWasmCanvas": "640x480-v1"}, "group": "wasm"},
     {"when": "/runtime/hachiHost", "requires": {"widgetWasmHost": "hachi-host-v1"}, "group": "wasm"}
   ]

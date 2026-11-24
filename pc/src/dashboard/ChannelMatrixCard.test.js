@@ -41,7 +41,7 @@ test("ChannelMatrixCard keeps supported agents visible and marks unavailable cli
   assert.match(source, /followAgent\(agentId, appearance/);
   assert.match(source, /当前固件仅支持通过 Wi-Fi 切换跟随，设备继续使用当前形象/);
   assert.match(source, /将核对设备上的内置/);
-  assert.match(source, /设备缺少该形象时才传输素材/);
+  assert.match(source, /设备未缓存相同版本时才传输素材/);
   assert.match(source, /已配置形象 · 待设备确认/);
 
   const unavailableRule = extractCssRule(styles, ".channel-row.is-undetected");
@@ -118,7 +118,7 @@ test("Follow confirmation describes appearance handling for the active connectio
   assert.match(source, /同步「\$\{appearanceName\}」到设备/);
   assert.match(source, /当前固件仅支持通过 Wi-Fi 切换跟随，设备继续使用当前形象/);
   assert.match(source, /将核对设备上的内置/);
-  assert.match(source, /设备缺少该形象时才传输素材/);
+  assert.match(source, /设备未缓存相同版本时才传输素材/);
   assert.match(source, /已配置形象 · 待设备确认/);
 });
 
@@ -132,10 +132,10 @@ test("USB appearance sync progress stays inline and survives dashboard tab unmou
   assert.doesNotMatch(source, /onProgress:\s*\(p\)\s*=>\s*push\(\{\s*tone:\s*"info"/);
   assert.match(source, /className="channel-matrix-sync"/);
   assert.match(source, /role="progressbar"/);
-  assert.match(source, /aria-valuenow=\{syncProgress\.indeterminate \? undefined : syncProgress\.percent\}/);
+  assert.match(source, /aria-valuenow=\{syncProgress\.percent\}/);
   assert.match(source, /cancelAppearanceSync/);
   assert.match(source, /handleCancelAppearanceSync/);
-  assert.match(source, /aria-label="中断形象传输"/);
+  assert.match(source, /syncProgress\.indeterminate \? "取消形象切换" : "中断形象传输"/);
   assert.match(source, /variant="danger"/);
   assert.match(source, /中断传输/);
 
@@ -156,9 +156,8 @@ test("Follow-only switches are not presented as appearance transfers", () => {
   assert.match(source, /\{!syncProgress\.followOnly && <Button/);
   assert.match(source, /text: "正在确认…"/);
   assert.match(source, /initialProgress: followOnly/);
-  // Pre-transfer device steps sweep instead of freezing at 0%.
-  assert.match(source, /syncProgress\.indeterminate \? "准备中"/);
-  assert.match(extractCssRule(styles, ".channel-matrix-sync__bar.is-indeterminate > span"), /animation:/);
+  assert.match(source, /!syncProgress\.indeterminate && <div className="channel-matrix-sync__meter">/);
+  assert.match(source, /indeterminate: !hasBytes/);
 });
 
 test("AgentAppearancePickerModal subcomponent is declared in the same file", () => {

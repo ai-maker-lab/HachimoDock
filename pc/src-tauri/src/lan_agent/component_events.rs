@@ -113,6 +113,8 @@ impl EventTarget {
         })
     }
 
+    pub(super) fn av_peer(&self) -> Option<Peer> { self.wifi.as_ref().map(|s|s.peer.clone()) }
+
     pub fn board(&self) -> &str {
         match &self.route {
             Route::Usb { board, .. } | Route::Wifi { board, .. } => board,

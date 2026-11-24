@@ -129,6 +129,7 @@ pub struct RealtimeChatStatus {
     pub transcript: String,
     pub reply: String,
     pub error: String,
+    pub error_stage: Option<&'static str>,
     pub reason: String,
     pub started_at_ms: u64,
     pub turns: u32,
@@ -138,6 +139,19 @@ pub struct RealtimeChatStatus {
     pub search_sources: Vec<crate::web_search::Source>,
     pub search_retrieved_at: String,
     pub device_stop_state: String,
+}
+
+fn model_error_stage(reason: &str, error: &str) -> Option<&'static str> {
+    if error.is_empty() { return None; }
+    if error.starts_with(crate::model_issue::ASR) { return Some("asr"); }
+    if error.starts_with(crate::model_issue::TTS) { return Some("tts"); }
+    if error.starts_with(crate::model_issue::LLM) { return Some("chat"); }
+    match reason {
+        "asr" | "asr_timeout" => Some("asr"),
+        "tts" => Some("tts"),
+        "llm" => Some("chat"),
+        _ => None,
+    }
 }
 
 fn clear_search(status: &mut RealtimeChatStatus) {
@@ -305,6 +319,7 @@ fn publish(app: &AppHandle, session: &Session, update: impl FnOnce(&mut Realtime
                 next.reason = status.reason.clone();
                 next.error = status.error.clone();
             }
+            next.error_stage = model_error_stage(&next.reason, &next.error);
             *status = next;
             if status.state != previous {
                 diagnostics::record(&session.id, "state", json!({"state": status.state, "turn": status.turns}));
@@ -759,6 +774,7 @@ fn request_failure(session: &Session, reason: &str, error: Option<&str>) {
     status.reason = reason.to_owned();
     // Earlier recoverable-round warnings are not a new user-stop failure.
     status.error = error.unwrap_or_default().to_owned();
+    status.error_stage = model_error_stage(&status.reason, &status.error);
     drop(status);
     crate::smart_home::cancel_voice_session(&session.id);
     session.stop_notify.notify_one();
@@ -1535,7 +1551,14 @@ async fn run_session(
                 };
                 if !asr_generation_matches(asr_generation, *generation) { continue; }
                 match event {
-                    StreamingSpeechEvent::Partial { text, .. } => { if !text.trim().is_empty() { latest_asr = text; } }
+                    StreamingSpeechEvent::Partial { text, .. } => {
+                        if !text.trim().is_empty() {
+                            if latest_asr.is_empty() {
+                                diagnostics::record(&session.id, "asr_first_partial", json!({"turn": turns + 1, "elapsedMs": asr_started_at.elapsed().as_millis()}));
+                            }
+                            latest_asr = text;
+                        }
+                    }
                     StreamingSpeechEvent::Final { text, .. } => {
                         if !text.trim().is_empty() { latest_asr = text; }
                         final_asr = Some(latest_asr.clone());
@@ -2169,23 +2192,24 @@ async fn answer_turn(
     let user = user_text.to_string();
     let turn_started = Instant::now();
     let log_session = session.id.clone();
+    let turn_number = session.status.lock().map(|s|s.turns).unwrap_or(0);
     let desktop_context=crate::desktop_agent::Context::new(&session.id,&session.board_device_id,
-        session.status.lock().map(|s|s.turns).unwrap_or(0),user_text)
+        turn_number,user_text)
         .with_conversation(desktop_conversation).with_followed_agent();
     // Retain the user turn even if the reply future is interrupted or fails.
     desktop_conversation.push("user", user_text);
-    diagnostics::record(&session.id, "llm_started", json!({}));
+    diagnostics::record(&session.id, "llm_started", json!({"turn":turn_number}));
     let llm_task = tokio::spawn(async move {
         let mut first_delta = true;
         let mut first_sentence = true;
         let result = persona_llm::stream_chat_with_desktop(&llm_cfg, &prompt, &history_snapshot, &user, Some(&log_session), Some(desktop_context), |delta| {
             if first_delta {
-                diagnostics::record(&log_session, "llm_first_delta", json!({"elapsedMs":turn_started.elapsed().as_millis()}));
+                diagnostics::record(&log_session, "llm_first_delta", json!({"turn":turn_number,"elapsedMs":turn_started.elapsed().as_millis()}));
                 first_delta = false;
             }
             for sentence in splitter.push(delta) {
                 if first_sentence {
-                    diagnostics::record(&log_session, "llm_first_sentence", json!({"elapsedMs":turn_started.elapsed().as_millis()}));
+                    diagnostics::record(&log_session, "llm_first_sentence", json!({"turn":turn_number,"elapsedMs":turn_started.elapsed().as_millis()}));
                     first_sentence = false;
                 }
                 let _ = sentence_tx.send(ReplyEvent::Sentence(sentence));
@@ -2194,7 +2218,7 @@ async fn answer_turn(
         .await;
         if let Some(rest) = splitter.flush() {
             if first_sentence {
-                diagnostics::record(&log_session, "llm_first_sentence", json!({"elapsedMs":turn_started.elapsed().as_millis()}));
+                diagnostics::record(&log_session, "llm_first_sentence", json!({"turn":turn_number,"elapsedMs":turn_started.elapsed().as_millis()}));
             }
             let _ = sentence_tx.send(ReplyEvent::Sentence(rest));
         }
@@ -2250,7 +2274,10 @@ async fn answer_turn(
         let shown = reply.clone();
         publish(app, session, |s| s.reply = shown.clone());
         speak_one_logged(tts, player, &clean, &session.id, std::future::ready(Ok(())),
-            || { if first_sentence { speaking(app, session); } }).await?;
+            || { if first_sentence {
+                diagnostics::record(&session.id, "reply_first_pcm_queued", json!({"turn":turn_number,"elapsedMs":turn_started.elapsed().as_millis()}));
+                speaking(app, session);
+            } }).await?;
     }
     let full = match llm_task.await {
         Ok(Ok(text)) => text,
@@ -2352,6 +2379,7 @@ async fn finish(app:&AppHandle,usb:&UsbSerialManager,session:&Arc<Session>,reaso
         if !session.cancelled.swap(true,Ordering::SeqCst){
             if status.reason=="asr_timeout"{status.error.clear();}
             status.reason=reason.into();status.error=error.into();
+            status.error_stage=model_error_stage(reason,error);
         }
     }
     session.capture_armed.store(false,Ordering::SeqCst);session.capture_ready.store(false,Ordering::SeqCst);

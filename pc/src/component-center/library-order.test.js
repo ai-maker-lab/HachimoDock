@@ -13,7 +13,7 @@ import {
   mergeComponentCatalog,
   isComponentVisible,
   legacyAudioInstallBlockedReason,
-  componentUsbInstallBlockedReason,
+  componentInstallBlockedReason,
   isWithdrawnComponent,
   DEFAULT_COMPONENT_ORDER,
   sortComponentsByDefaultOrder,
@@ -55,12 +55,12 @@ test("USB preflight checks the declared service requirements against the current
     widgetServiceBridge:"p4-service-bridge-v1",
     widgetHostCollection:"p4-host-collection-v1",
   }}};
-  assert.match(componentUsbInstallBlockedReason(component, {}), /连接 USB/);
+  assert.match(componentInstallBlockedReason(component, {}), /连接 USB/);
   const board = {connected:true, boardDeviceId:"p4-a", capabilities:{widgetServiceBridge:true}};
-  assert.match(componentUsbInstallBlockedReason(component, board), /widgetServiceBridge=.*widgetHostCollection=/);
+  assert.match(componentInstallBlockedReason(component, board), /widgetServiceBridge=.*widgetHostCollection=/);
   board.capabilities = {...component.syncRequirements.usbCapabilities};
-  assert.equal(componentUsbInstallBlockedReason(component, board), "");
-  assert.equal(componentUsbInstallBlockedReason({id:"ordinary"}, {}), "");
+  assert.equal(componentInstallBlockedReason(component, board), "");
+  assert.equal(componentInstallBlockedReason({id:"ordinary"}, {}), "");
 });
 
 test("PC and firmware share the curated default component order", () => {
@@ -170,4 +170,20 @@ test("current radio catalog stays visible without rewriting saved copies", () =>
   assert.equal(isWithdrawnComponent(cached),false);
   assert.equal(isWithdrawnComponent({componentId:"city-radio"}),false);
   assert.equal(mergeComponentCatalog([cached],[])[0],cached);
+});
+
+test("Wi-Fi checks package byte and memory requirements before transfer", () => {
+  const caps = {widgetWasm:"hachi-wasm-v1", widgetWasmMaxBytes:196608, widgetWasmMemoryPages:4};
+  const target = {boardDeviceId:"p4-123456789abc", bootId:"1234567890abcdef", association:7, capabilities:caps};
+  const wifi = {...target, panelControl:true, controlTrusted:true, wifiConnected:true,
+    componentDelivery:true, componentBundle:true, componentTarget:target};
+  const game = {syncRequirements:{usbCapabilities:{widgetWasm:"hachi-wasm-v1"},
+    minimumLimits:{widgetWasmMaxBytes:191570, widgetWasmMemoryPages:4}}};
+  const reason = () => componentInstallBlockedReason(game, {}, wifi, target);
+  assert.equal(reason(), "");
+  caps.widgetWasmMaxBytes = 65536;
+  assert.match(reason(), /191570.*65536/);
+  caps.widgetWasmMaxBytes = 196608;
+  delete caps.widgetWasmMemoryPages;
+  assert.match(reason(), /未报告有效的 widgetWasmMemoryPages/);
 });

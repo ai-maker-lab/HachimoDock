@@ -98,7 +98,7 @@ static bool feed_binding(pet_private_feed_t *out, pet_wifi_endpoint_t *endpoint,
   for (const char *p = component; *p; ++p)
     if (!((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || strchr("-_.", *p))) return false;
   *out = (pet_private_feed_t){.kind = kind, .port = 443};
-  if (kind == PET_PRIVATE_BEARER || kind == PET_GITHUB_ACCOUNT || kind == PET_HTTPS_SUBMIT) {
+  if (kind == PET_PRIVATE_BEARER || kind == PET_HTTPS_SUBMIT) {
     /* Credentials belong in Authorization. Disallow query strings in this
      * first profile so an exported declaration cannot hide them in a URL. */
     if (topic || strchr(url, '?') || !pet_wifi_endpoint_parse(url, endpoint) ||
@@ -141,9 +141,6 @@ bool pet_private_feed_parse(pet_private_feed_t *out, pet_wifi_endpoint_t *endpoi
   if (!cJSON_IsString(kind)) return false;
   const int fields = cJSON_GetArraySize(connection);
 #if PET_P4_SCOPED_WRITE
-  if (fields == 1 && !strcmp(kind->valuestring, "github-account") && url &&
-      !strcmp(url, "https://api.github.com/user"))
-    return feed_binding(out, endpoint, component, url, PET_GITHUB_ACCOUNT, NULL) && bind_owner(out, component);
   const bool post = !strcmp(kind->valuestring, "https-submit");
   if (post || !strcmp(kind->valuestring, "mqtt-publish")) {
     const cJSON *value = cJSON_GetObjectItemCaseSensitive(connection, "value");
@@ -172,7 +169,7 @@ bool pet_private_feed_parse(pet_private_feed_t *out, pet_wifi_endpoint_t *endpoi
 }
 
 static bool secret_valid(const pet_private_feed_t *feed, const pet_private_secret_t *secret) {
-  if (feed->kind == PET_PRIVATE_BEARER || feed->kind == PET_GITHUB_ACCOUNT || feed->kind == PET_HTTPS_SUBMIT) {
+  if (feed->kind == PET_PRIVATE_BEARER || feed->kind == PET_HTTPS_SUBMIT) {
     if (secret->user[0] || !secret->token[0]) return false;
     for (const char *p = secret->token; *p; ++p)
       if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
@@ -182,11 +179,11 @@ static bool secret_valid(const pet_private_feed_t *feed, const pet_private_secre
   return true;
 }
 
-static bool setup_key(mbedtls_gcm_context *gcm) {
+static bool setup_key(mbedtls_gcm_context *gcm, const char *label, size_t length) {
   esp_efuse_block_t block;
   uint8_t key[32];
   const bool ok = credential_key_block(&block) &&
-    esp_hmac_calculate((hmac_key_id_t)(block - EFUSE_BLK_KEY0), purpose, sizeof(purpose), key) == ESP_OK &&
+    esp_hmac_calculate((hmac_key_id_t)(block - EFUSE_BLK_KEY0), label, length, key) == ESP_OK &&
     mbedtls_gcm_setkey(gcm, MBEDTLS_CIPHER_ID_AES, key, 256) == 0;
   mbedtls_platform_zeroize(key, sizeof(key));
   return ok;
@@ -194,13 +191,42 @@ static bool setup_key(mbedtls_gcm_context *gcm) {
 
 enum { READ_GRANT, SAVE_GRANT, REVOKE_GRANT, CLAIM_GRANT, ACK_GRANT };
 
-static bool seal_record(nvs_handle_t nvs, const char *slot, mbedtls_gcm_context *gcm,
-                        credential_t *record, const pet_private_secret_t *plain) {
+/* All nonce allocation uses the same writer guard as feed mutations. */
+static bool next_iv(uint8_t iv[12]) {
   if (nonce_index == UINT32_MAX) return false;
-  memcpy(record->iv, boot_nonce, sizeof(record->iv));
+  memcpy(iv, boot_nonce, sizeof(boot_nonce));
   const uint32_t index = nonce_index++;
   for (unsigned i = 0; i < 4; ++i)
-    record->iv[8 + i] ^= (uint8_t)(index >> (24 - 8 * i));
+    iv[8 + i] ^= (uint8_t)(index >> (24 - 8 * i));
+  return true;
+}
+
+#if PET_P4_COMPONENT_NETWORK
+bool pet_private_network_crypt(bool seal, const void *binding, size_t binding_size,
+                               uint8_t iv[12], uint8_t tag[16], const uint8_t *input,
+                               uint8_t *output, size_t size) {
+  static const char domain[] = "HachimiDock/PetUI/component-network/v1";
+  if (!crypto_ready || !binding || !binding_size || !input || !output || !size ||
+      atomic_flag_test_and_set(&writer)) return false;
+  mbedtls_gcm_context gcm;
+  mbedtls_gcm_init(&gcm);
+  bool ok = setup_key(&gcm, domain, sizeof(domain));
+  if (ok && seal)
+    ok = next_iv(iv) && !mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, size,
+      iv, 12, binding, binding_size, input, output, 16, tag);
+  else if (ok)
+    ok = !mbedtls_gcm_auth_decrypt(&gcm, size, iv, 12, binding, binding_size,
+                                    tag, 16, input, output);
+  mbedtls_gcm_free(&gcm);
+  if (!ok) mbedtls_platform_zeroize(output, size);
+  atomic_flag_clear(&writer);
+  return ok;
+}
+#endif
+
+static bool seal_record(nvs_handle_t nvs, const char *slot, mbedtls_gcm_context *gcm,
+                        credential_t *record, const pet_private_secret_t *plain) {
+  if (!next_iv(record->iv)) return false;
   return !mbedtls_gcm_crypt_and_tag(gcm, MBEDTLS_GCM_ENCRYPT, sizeof(*plain),
       record->iv, sizeof(record->iv), record->id, sizeof(record->id), (const uint8_t *)plain,
       record->ciphertext, sizeof(record->tag), record->tag) &&
@@ -245,7 +271,7 @@ static pet_private_result_t credential(const pet_private_feed_t *feed, uint8_t o
     }
     goto done;
   }
-  if ((found < 0 && free_slot < 0) || !setup_key(&gcm)) goto done;
+  if ((found < 0 && free_slot < 0) || !setup_key(&gcm, purpose, sizeof(purpose))) goto done;
   /* Old read-only credentials remain replaceable with the original wire command. */
   if (found >= 0 && (op != SAVE_GRANT || pet_feed_is_write(feed->kind))) {
     if (mbedtls_gcm_auth_decrypt(&gcm, sizeof(plain), record.iv, sizeof(record.iv), record.id,
