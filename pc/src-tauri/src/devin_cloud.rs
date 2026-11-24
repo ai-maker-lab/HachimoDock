@@ -507,8 +507,8 @@ fn session_presentation(session: &DevinSession) -> Option<SessionPresentation> {
     let state = match session.status.as_str() {
         "new" | "claimed" | "resuming" => "working",
         "running" => match session.status_detail.as_deref() {
-            Some("waiting_for_user" | "waiting_for_approval") => "waiting_user",
-            Some("finished") => "done",
+            Some("waiting_for_approval") => "waiting_user",
+            Some("waiting_for_user" | "finished") => "done",
             _ => "working",
         },
         "exit" => "done",
@@ -665,14 +665,18 @@ mod tests {
                 "working"
             );
         }
-        for detail in ["waiting_for_user", "waiting_for_approval"] {
-            assert_eq!(
-                session_presentation(&session("running", Some(detail), None))
-                    .unwrap()
-                    .state,
-                "waiting_user"
-            );
-        }
+        assert_eq!(
+            session_presentation(&session("running", Some("waiting_for_user"), None))
+                .unwrap()
+                .state,
+            "done"
+        );
+        assert_eq!(
+            session_presentation(&session("running", Some("waiting_for_approval"), None))
+                .unwrap()
+                .state,
+            "waiting_user"
+        );
         assert_eq!(
             session_presentation(&session("running", Some("finished"), None))
                 .unwrap()
