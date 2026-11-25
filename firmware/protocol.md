@@ -2632,6 +2632,8 @@ The ESP-SR WebRTC NS allocation debug print is suppressed at the firmware link b
 实验构建 `esp32_p4_wifi6_system_settings_v1` / `esp32_p4_wifi6_system_settings_v3` 在确认 WiFi6 板型后声明
 `capabilities.systemSettings: true` 和 `screenPages` 项 `settings`。客户端可将 `system_settings` 写入
 现有的全局按键配置，不改变出厂按键映射。宠物首页和组件列表均可通过已配置的按键进入系统设置。
+
+本地 Codex 专用构建可在已验证签名的 Atlas 运行时内把 SW3 短按转给明信片，长按转给返回。仅当全局短按为返回、长按为设置或未绑定时生效；不改变持久按键表，也不新增线协议命令。
 组件中心的数量标记左侧也提供「设置」触控入口。返回时回到原页面。
 设置内触屏和摇杆直接操作。摇杆中按或 SW1 确认，摇杆中按长按或 SW3 返回。
 系统设置不作为 USB `screen/page` 的远程导航目标。

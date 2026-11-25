@@ -21,6 +21,8 @@ enum {
     HACHI_KEY_DOWN = 4,
     HACHI_KEY_UP = 5,
     HACHI_TOUCH_CANCEL = 6,
+    HACHI_CODEX_DAY_TOKENS = 32,
+    HACHI_CODEX_MINUTE_TOKENS = 33,
 };
 
 enum {
@@ -88,5 +90,9 @@ HACHI_IMPORT(media_cmd) void hachi_media_cmd(int command);
 HACHI_EXPORT(hachi_init) void hachi_init(void);
 HACHI_EXPORT(hachi_event) void hachi_event(int type, int a, int b);
 HACHI_EXPORT(hachi_frame) void hachi_frame(int elapsed_ms);
+
+static inline uint64_t hachi_codex_day_tokens(int low, int high) {
+    return high < 0 ? UINT64_MAX : ((uint64_t)(unsigned)high << 31) | (unsigned)low;
+}
 
 #endif

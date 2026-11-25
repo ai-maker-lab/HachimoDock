@@ -4562,6 +4562,9 @@ bool pet_p4_handle_line_with_reply(
     send_protocol_ack_if_requested(send_line, ctx, topic, payload);
   } else if (strcmp(topic, "stats/update") == 0 || strcmp(topic, "runtime/stats") == 0) {
     handle_stats_update(state, payload);
+#ifdef PET_P4_LOCAL_CODEX_USAGE_PUBKEY
+    if (strcmp(topic, "runtime/stats") == 0) pet_p4_wasm_codex_usage_update(payload);
+#endif
     send_protocol_ack_if_requested(send_line, ctx, topic, payload);
   } else if (strcmp(topic, "input/config-query") == 0) {
     if (!pet_p4_input_send_config_state(
