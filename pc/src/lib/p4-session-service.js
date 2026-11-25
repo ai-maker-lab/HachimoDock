@@ -8,6 +8,7 @@
 import { isInternalCodexSession } from "../../src-tauri/bridge/packages/agent-session-bus/src/util/codex-session-filter.mjs";
 import {
   DEVICE_SESSION_TERMINAL_HOLD_MS,
+  deviceSessionIdentity,
   isActiveDeviceSession,
   reconcileDeviceSessionQueue,
 } from "./session-display.js";
@@ -201,7 +202,15 @@ export function p4SessionActivitySignature(session) {
 
 export function filterDismissedP4Sessions(sessions, dismissedSessions = {}) {
   return (Array.isArray(sessions) ? sessions : []).filter((session) => {
+    // Identity is `(agentId, sessionId)`; two Agents may legitimately share a
+    // raw session id, so dismissals are keyed by the pair. Legacy entries that
+    // only stored the raw id still apply when no pair key exists.
+    const identity = deviceSessionIdentity(session);
+    if (!identity) return true;
     const id = normalizeSessionText(session?.id);
-    return !id || dismissedSessions[id] !== p4SessionActivitySignature(session);
+    const dismissed = Object.hasOwn(dismissedSessions, identity)
+      ? dismissedSessions[identity]
+      : dismissedSessions[id];
+    return dismissed !== p4SessionActivitySignature(session);
   });
 }

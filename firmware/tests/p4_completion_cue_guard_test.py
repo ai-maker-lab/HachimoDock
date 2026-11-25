@@ -28,7 +28,7 @@ static void test_after_unlock(void);
 #include "pet_p4_completion_cue_guard.h"
 typedef int pet_resource_result_t;
 typedef struct{unsigned serial;}pet_resource_realtime_t;
-typedef struct{char id[96],state[32];unsigned long long transition_revision;}pet_p4_session_queue_item_t;
+typedef struct{char id[96],agent[48],state[32];unsigned long long transition_revision;}pet_p4_session_queue_item_t;
 typedef struct{char family[32],audio_path[80];bool audio_custom;}pet_p4_asset_entry_t;
 typedef struct{uint16_t count;pet_p4_asset_entry_t entries[1];}catalog_t;
 typedef struct{bool asset_transfer_active;unsigned session_queue_count,current_session_index,asset_revision;char current_session_id[96],current_session_agent[48],active_agent[48];pet_p4_session_queue_item_t session_queue[8];catalog_t asset_catalog;}pet_p4_runtime_state_t;

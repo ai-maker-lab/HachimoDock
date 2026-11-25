@@ -23,6 +23,10 @@ def test_real_broker_atomic_priority_reserved_capacity_and_physical_completion(t
 def test_actual_audio_control_overlap_aba_and_write_stop_completion(tmp_path):
     source = (ROOT / "main/pet_p4_audio.c").read_text()
     sections = {
+        "production_voice_selection.inc": (
+            "typedef struct {\n  char agent[PET_P4_AGENT_MAX];\n  char id[PET_P4_SESSION_QUEUE_ID_MAX];\n} voice_selection_t;",
+            "#if PET_P4_SYSTEM_WIFI",
+        ),
         "production_audio_resources.inc": ("/* Pending requests and physical workers", "static atomic_uint g_capture_tx_last_us"),
         "production_stream_buffered.inc": ("static size_t stream_buffered(", "static bool playback_gates_capture("),
         "production_stream_drain.inc": ("static void stream_silence_step(", "static atomic_bool g_instrument_enabled"),

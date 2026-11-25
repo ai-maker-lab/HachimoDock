@@ -211,6 +211,11 @@ static atomic_bool g_conversation_starting;
 static portMUX_TYPE g_conversation_lock = portMUX_INITIALIZER_UNLOCKED;
 static char g_conversation_session[64];
 static char g_capture_owner[64];
+typedef struct {
+  char agent[PET_P4_AGENT_MAX];
+  char id[PET_P4_SESSION_QUEUE_ID_MAX];
+} voice_selection_t;
+static voice_selection_t g_capture_selection;
 #if PET_P4_SYSTEM_WIFI
 /* Published under g_stream_lock. The atomic owner also permits the worker
  * to identify a revoked LAN capture without taking the codec mutex. */
@@ -252,7 +257,7 @@ static portMUX_TYPE g_voice_meter_lock = portMUX_INITIALIZER_UNLOCKED;
 static pet_voice_meter_t g_voice_meter;
 
 static bool capture_request_publish(pet_resource_realtime_t *reservation,
-    bool queue_empty, const char *owner, uint32_t feedback_token) {
+    bool queue_empty, const char *owner, uint32_t feedback_token, const voice_selection_t *selection) {
   portENTER_CRITICAL(&g_capture_resource_lock);
   bool expected = false;
   bool admitted = reservation->serial && !g_capture_pending.serial
@@ -264,13 +269,14 @@ static bool capture_request_publish(pet_resource_realtime_t *reservation,
     memset(reservation, 0, sizeof(*reservation));
     atomic_store_explicit(&g_capture_session_queue_empty, queue_empty, memory_order_release);
     memcpy(g_capture_owner, owner, strlen(owner) + 1);
+    g_capture_selection = selection ? *selection : (voice_selection_t){0};
     g_capture_feedback_token = feedback_token;
   }
   portEXIT_CRITICAL(&g_capture_resource_lock);
   return admitted;
 }
 static bool capture_worker_take(pet_resource_realtime_t *reservation, bool *queue_empty,
-    char *owner, uint32_t *feedback_token) {
+    char *owner, uint32_t *feedback_token, voice_selection_t *selection) {
   portENTER_CRITICAL(&g_capture_resource_lock);
   *reservation = g_capture_pending;
   memset(&g_capture_pending, 0, sizeof(g_capture_pending));
@@ -282,6 +288,7 @@ static bool capture_worker_take(pet_resource_realtime_t *reservation, bool *queu
     if (queue_empty) *queue_empty = atomic_load_explicit(&g_capture_session_queue_empty, memory_order_acquire);
     /* The admitted request owns this label even if stop/start or conversation
      * replaces the global owner before this worker publishes its begin. */
+    *selection = g_capture_selection;
     if (owner) memcpy(owner, g_capture_owner, sizeof(g_capture_owner));
     if (feedback_token) *feedback_token = g_capture_feedback_token;
   }
@@ -552,13 +559,17 @@ static void send_audio_error(const char *owner, const char *session_id, const ch
 }
 
 static void send_audio_begin(const char *session_id, bool session_queue_empty, const char *owner,
-                             uint32_t feedback_token) {
+                             uint32_t feedback_token, const voice_selection_t *selection) {
   pet_p4_audio_diagnostic("capture_started", session_id, 0, true);
   cJSON *payload = cJSON_CreateObject();
   cJSON_AddStringToObject(payload, "sessionId", session_id);
   cJSON_AddStringToObject(payload,"captureOwner",owner);
   cJSON_AddStringToObject(payload, "boardDeviceId", g_board_device_id);
   cJSON_AddBoolToObject(payload, "sessionQueueEmpty", session_queue_empty);
+  if (selection->id[0]) {
+    cJSON_AddStringToObject(payload, "targetAgentId", selection->agent);
+    cJSON_AddStringToObject(payload, "targetSessionId", selection->id);
+  }
   if (feedback_token) cJSON_AddNumberToObject(payload, "voiceFeedbackToken", feedback_token);
   cJSON_AddStringToObject(payload, "format", "pcm_s16le");
   cJSON_AddNumberToObject(payload, "sampleRate", PET_P4_AUDIO_SAMPLE_RATE);
@@ -1470,8 +1481,9 @@ static void audio_task(void *arg) {
     PET_AUDIO_REALTIME_SCOPE(capture_work);
     bool session_queue_empty = false;
     char capture_owner[sizeof(g_capture_owner)];
+    voice_selection_t selection;
     uint32_t feedback_token = 0;
-    if (!capture_worker_take(&capture_work, &session_queue_empty, capture_owner, &feedback_token)) {
+    if (!capture_worker_take(&capture_work, &session_queue_empty, capture_owner, &feedback_token, &selection)) {
       continue;
     }
 
@@ -1501,7 +1513,7 @@ static void audio_task(void *arg) {
     const unsigned wifi_owner = wifi_capture ? atomic_load(&g_wifi_audio_owner) : 0;
     if (!wifi_capture)
 #endif
-    send_audio_begin(session_id, session_queue_empty, capture_owner, feedback_token);
+    send_audio_begin(session_id, session_queue_empty, capture_owner, feedback_token, &selection);
 
     while (capture_worker_current(capture_work)) {
 #if PET_P4_SYSTEM_WIFI
@@ -1818,24 +1830,26 @@ static const char *completion_agent(const pet_p4_runtime_state_t *state) {
   return state->current_session_agent[0]?state->current_session_agent:state->active_agent;
 }
 static void completion_cue_observe(const pet_p4_runtime_state_t *state,unsigned long long now_ms) {
-  const char *agent=completion_agent(state);
+  const char *fallback_agent=completion_agent(state);
+  #define COMPLETION_ITEM_AGENT(item) ((item)->agent[0]?(item)->agent:fallback_agent)
   unsigned count=state->session_queue_count<PET_P4_SESSION_QUEUE_MAX?state->session_queue_count:PET_P4_SESSION_QUEUE_MAX;
   portENTER_CRITICAL(&g_status_cue_mux);
   pet_completion_snapshot_begin(&g_completion_cues);
-  for(unsigned i=0;i<count;i++)pet_completion_snapshot_present(&g_completion_cues,agent,state->session_queue[i].id);
-  if(!count)pet_completion_snapshot_present(&g_completion_cues,agent,state->current_session_id);
+  for(unsigned i=0;i<count;i++)pet_completion_snapshot_present(&g_completion_cues,COMPLETION_ITEM_AGENT(&state->session_queue[i]),state->session_queue[i].id);
+  if(!count)pet_completion_snapshot_present(&g_completion_cues,fallback_agent,state->current_session_id);
   for (unsigned i = 0; i < count; i++) {
     const pet_p4_session_queue_item_t *item = &state->session_queue[i];
-    pet_completion_observe(&g_completion_cues, agent, item->id, item->transition_revision,
+    pet_completion_observe(&g_completion_cues, COMPLETION_ITEM_AGENT(item), item->id, item->transition_revision,
       completion_active(item->state), completion_outcome(item->state));
   }
   if (!count) {
     const char *lifecycle = pet_p4_state_effective_lifecycle(state, now_ms);
-    pet_completion_observe(&g_completion_cues, agent, state->current_session_id, 0,
+    pet_completion_observe(&g_completion_cues, fallback_agent, state->current_session_id, 0,
       completion_active(lifecycle), completion_outcome(lifecycle));
   }
   pet_completion_snapshot_end(&g_completion_cues);
   portEXIT_CRITICAL(&g_status_cue_mux);
+  #undef COMPLETION_ITEM_AGENT
 }
 void pet_p4_audio_process(
   const pet_p4_runtime_state_t *state,
@@ -1860,7 +1874,10 @@ void pet_p4_audio_process(
   const pet_p4_session_queue_item_t *current_session = NULL;
   for (unsigned i = 0; i < state->session_queue_count && i < PET_P4_SESSION_QUEUE_MAX; i += 1) {
     if (state->current_session_id[0]
-        && strcmp(state->session_queue[i].id, state->current_session_id) == 0) {
+        && strcmp(state->session_queue[i].id, state->current_session_id) == 0
+        && (!state->current_session_agent[0]
+          || !state->session_queue[i].agent[0]
+          || strcmp(state->session_queue[i].agent, state->current_session_agent) == 0)) {
       current_session = &state->session_queue[i];
       break;
     }
@@ -1992,7 +2009,7 @@ static esp_err_t audio_set_enabled(bool enabled) {
 }
 
 static esp_err_t audio_capture_start(bool session_queue_empty, const char *owner, bool conversation,
-                                     uint32_t feedback_token) {
+                                     uint32_t feedback_token, const voice_selection_t *selection) {
   if(!owner||strlen(owner)>=sizeof(g_capture_owner))return ESP_ERR_INVALID_ARG;
   if(!conversation&&owner[0]&&(atomic_load(&g_capture_active)||pet_p4_audio_conversation_active()))return ESP_ERR_INVALID_STATE;
   if (!pet_p4_audio_ready() || !pet_p4_audio_enabled()) return ESP_ERR_INVALID_STATE;
@@ -2005,7 +2022,7 @@ static esp_err_t audio_capture_start(bool session_queue_empty, const char *owner
     if(g_stream_lock)xSemaphoreGiveRecursive(g_stream_lock);
     return ESP_ERR_INVALID_STATE;
   }
-  if (!capture_request_publish(&request, session_queue_empty, owner, feedback_token)) {
+  if (!capture_request_publish(&request, session_queue_empty, owner, feedback_token, selection)) {
     if(g_stream_lock)xSemaphoreGiveRecursive(g_stream_lock);
     return ESP_ERR_INVALID_STATE;
   }
@@ -2030,12 +2047,12 @@ static void audio_wired_unlock(void) {
 }
 #endif
 
-static esp_err_t audio_capture_start_wired(bool queue_empty, const char *owner, uint32_t feedback_token) {
+static esp_err_t audio_capture_start_wired(bool queue_empty, const char *owner, uint32_t feedback_token, const voice_selection_t *selection) {
 #if PET_P4_SYSTEM_WIFI
   if (owner && owner[0] == wifi_capture_label[0]) return ESP_ERR_INVALID_ARG;
   if (!audio_wired_lock()) return ESP_ERR_INVALID_STATE;
 #endif
-  const esp_err_t result = audio_capture_start(queue_empty, owner, false, feedback_token);
+  const esp_err_t result = audio_capture_start(queue_empty, owner, false, feedback_token, selection);
 #if PET_P4_SYSTEM_WIFI
   audio_wired_unlock();
 #endif
@@ -2047,23 +2064,30 @@ esp_err_t pet_p4_note_start(const char *owner) {
   if (!owner || strncmp(owner, PET_NOTE_PREFIX, sizeof(PET_NOTE_PREFIX)-1) ||
       strlen(owner) >= sizeof(note_owner) || !note_reserve(owner)) return ESP_ERR_INVALID_STATE;
   esp_err_t err = pet_p4_audio_set_enabled(true);
-  if (err == ESP_OK) err = audio_capture_start_wired(true, owner, 0);
+  if (err == ESP_OK) err = audio_capture_start_wired(true, owner, 0, NULL);
   if (err != ESP_OK) pet_p4_note_discard(owner);
   return err;
 }
 #endif
 
 esp_err_t pet_p4_audio_capture_start_owned(bool queue_empty, const char *owner) {
-  #if PET_P4_SYSTEM_WIFI
+#if PET_P4_SYSTEM_WIFI
   if (owner && !strncmp(owner, PET_NOTE_PREFIX, sizeof(PET_NOTE_PREFIX)-1)) return ESP_ERR_INVALID_ARG;
 #endif
-  return audio_capture_start_wired(queue_empty, owner, 0);
+  return audio_capture_start_wired(queue_empty, owner, 0, NULL);
 }
 
 esp_err_t pet_p4_audio_capture_start(bool session_queue_empty){return pet_p4_audio_capture_start_owned(session_queue_empty,"");}
 
-esp_err_t pet_p4_audio_capture_start_button(bool queue_empty, uint32_t feedback_token) {
-  return audio_capture_start_wired(queue_empty, "", feedback_token);
+esp_err_t pet_p4_audio_capture_start_button(const pet_p4_runtime_state_t *state, uint32_t feedback_token) {
+  voice_selection_t selection = {0};
+  if (state && state->current_session_index && state->current_session_index <= state->session_queue_count &&
+      state->current_session_index <= PET_P4_SESSION_QUEUE_MAX) {
+    const pet_p4_session_queue_item_t *item = &state->session_queue[state->current_session_index - 1];
+    memcpy(selection.agent, item->agent, sizeof(selection.agent));
+    memcpy(selection.id, item->id, sizeof(selection.id));
+  }
+  return audio_capture_start_wired(state && !state->session_queue_count, "", feedback_token, &selection);
 }
 esp_err_t pet_p4_audio_capture_stop_owned(const char *owner){
   if(!owner||!owner[0])return ESP_ERR_INVALID_ARG;
@@ -2174,7 +2198,7 @@ static esp_err_t audio_conversation_set(bool enabled, bool half_duplex, const ch
   atomic_fetch_add_explicit(&g_playback_generation, 1U, memory_order_acq_rel);
   esp_err_t err = audio_set_enabled(true);
   if (err == ESP_OK) {
-    err = audio_capture_start(true, capture_owner, true, 0);
+    err = audio_capture_start(true, capture_owner, true, 0, NULL);
     if (!capture_owner[0] && err == ESP_ERR_INVALID_STATE && atomic_load_explicit(&g_capture_active, memory_order_acquire)) {
       err = ESP_OK; /* PTT 采集已经在跑：直接转入对话模式 */
     }
@@ -2424,7 +2448,7 @@ static esp_err_t audio_wifi_start(pet_p4_audio_wifi_capture_fn tap, void *ctx, b
     /* The worker snapshots the private route label at admission. The
      * conversation ID is local and cannot identify a wired conversation. */
     result = ptt
-      ? audio_capture_start(queue_empty, wifi_ptt_label, false, 0)
+      ? audio_capture_start(queue_empty, wifi_ptt_label, false, 0, NULL)
       : audio_conversation_set(true, false, "wifi-realtime", wifi_capture_label);
     if (result == ESP_OK) *session = owner;
     else (void)pet_p4_audio_wifi_stop(owner);

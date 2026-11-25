@@ -5,11 +5,12 @@
  * [Sync] If this file changes, update `pc/src/dashboard/.folder.md` and `pc/src/.folder.md`.
  */
 
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { agentSessionFeedFresh } from "./useAgentSessionFeed.js";
 import {
+  deviceSessionIdentity,
   deviceSessionTerminalUntilMs,
   deviceSessionTransitionRevision,
   filterActiveDeviceSessions,
@@ -18,6 +19,7 @@ import {
 import {
   buildP4DeviceSessionTransportPayload,
   enqueueP4SessionBinding,
+  filterDismissedP4Sessions,
   p4SessionDisplayTitle,
   p4SessionActivitySignature,
 } from "../lib/p4-session-service.js";
@@ -81,6 +83,19 @@ export function formatDeviceSessionTitle(session, fallbackSessionId = "") {
   return sessionId && sessionId !== "auto" ? `会话 ${sessionId.slice(0, 8)}` : "";
 }
 
+export function nextWifiSelectionAction({
+  connectionChanged,
+  hasRow,
+  selectionKey,
+  lastSelectionKey,
+}) {
+  // A reported device card wins over the connection reset in the same update;
+  // the reset only applies when the new link has no selectable card.
+  if (hasRow && selectionKey !== lastSelectionKey) return "apply";
+  if (connectionChanged) return "reset";
+  return "ignore";
+}
+
 export function isDeviceSessionTargetUnique(selectedSession, sessions) {
   const selectedTitle = formatDeviceSessionTitle(selectedSession);
   if (!selectedTitle) return false;
@@ -120,9 +135,14 @@ export function useP4SessionSync({
   dismissedSessions,
   onDismissSessions,
   formatSessionOption,
+  selection,
+  setSelection,
+  rememberAgent,
+  wifi,
   push,
 }) {
-  const [selection, setSelection] = useState({ sessionId: "auto", selectedAt: 0 });
+  // One merged Session list; the selection is the only state. `agentId` is
+  // only the fallback source used while no Session is selectable.
   const [bindingSyncRevision, requestBindingSync] = useReducer(
     (revision) => revision + 1,
     0,
@@ -133,7 +153,14 @@ export function useP4SessionSync({
     missingSessionNoticeRef.current = createMissingSessionNoticeGate();
   }
   const bindingQueueRef = useRef(Promise.resolve());
-  const bindingScope = useMemo(() => ({}), [enabled, boardDeviceId, agentId, usbConnected, usbConnectionId, usbBootId]);
+  const bindingScope = useMemo(() => ({}), [
+    enabled,
+    boardDeviceId,
+    agentId,
+    usbConnected,
+    usbConnectionId,
+    usbBootId,
+  ]);
   const bindingScopeRef = useRef(bindingScope);
   bindingScopeRef.current = bindingScope;
   useEffect(() => {
@@ -141,31 +168,46 @@ export function useP4SessionSync({
     return () => { if (bindingScopeRef.current === bindingScope) bindingScopeRef.current = null; };
   }, [bindingScope]);
   const sessionId = selection.sessionId;
+  const selectionAgentId = normalizeText(selection.agentId);
 
-  const visibleSessions = useMemo(() => (
-    (Array.isArray(sessions) ? sessions : []).filter((session) => {
-      const id = normalizeText(session?.id);
-      return !id || dismissedSessions?.[id] !== p4SessionActivitySignature(session);
-    })
-  ), [dismissedSessions, sessions]);
+  const visibleSessions = useMemo(
+    () => filterDismissedP4Sessions(sessions, dismissedSessions),
+    [dismissedSessions, sessions],
+  );
   const selectableSessions = useMemo(
     () => displayEnabled ? visibleSessions : [],
     [displayEnabled, visibleSessions],
   );
   const switchCandidates = selectableSessions;
-  const explicitDshSessionRequired = agentId === "deepseek-harness" && (!sessionId || sessionId === "auto");
-  const autoRoutingSession = explicitDshSessionRequired ? null : selectableSessions[0] || routingSessions?.[0] || sessions?.[0];
+  // One merged Session list: `auto` is the newest selectable Session, exactly
+  // like the old single-Agent list. DSH still requires an explicit Session and
+  // never participates in auto selection.
+  const autoEligible = (session) => normalizeText(session?.agentId) !== "deepseek-harness";
+  const autoVisibleSession = (routingSessions || []).filter(autoEligible)
+    .map(row => selectableSessions.find(card => deviceSessionIdentity(card) === deviceSessionIdentity(row)))
+    .find(Boolean) || selectableSessions.find(autoEligible) || null;
+  const autoRoutingSession = autoVisibleSession
+    || (routingSessions || []).find(autoEligible)
+    || filterDismissedP4Sessions(sessions, dismissedSessions).find(autoEligible)
+    || null;
+  const matchesSelection = useCallback((session) => {
+    if (normalizeText(session?.id) !== normalizeText(sessionId)) return false;
+    return !selectionAgentId || normalizeText(session?.agentId) === selectionAgentId;
+  }, [selectionAgentId, sessionId]);
   const selectedRoutingSession = (sessionId === "auto"
     ? autoRoutingSession
-    : (routingSessions || []).find(
-      (session) => normalizeText(session?.id) === normalizeText(sessionId),
-    )) || null;
+    : (routingSessions || []).find(matchesSelection)) || null;
   const selectedVisibleSession = sessionId === "auto"
-    ? (explicitDshSessionRequired ? null : selectableSessions[0] || null)
-    : selectableSessions.find(
-      (session) => normalizeText(session?.id) === normalizeText(sessionId),
-    ) || null;
+    ? autoVisibleSession
+    : selectableSessions.find(matchesSelection) || null;
   const selectedTargetSession = selectedRoutingSession || selectedVisibleSession;
+  const selectedAgentId = selectionAgentId
+    || normalizeText(selectedTargetSession?.agentId)
+    || agentId;
+  // The device binding resolves `auto` to a real Session; voice/injection
+  // targets must use that resolved id, matching the old single-Agent lease.
+  const selectedRealSessionId = normalizeText(selectedTargetSession?.id)
+    || (sessionId === "auto" ? "" : normalizeText(sessionId));
   const selectedSessionTitle = selectedTargetSession
     ? formatDeviceSessionTitle(selectedTargetSession, sessionId)
     : "";
@@ -175,7 +217,7 @@ export function useP4SessionSync({
   const selectedSessionCwd = normalizeText(selectedTargetSession?.cwd);
   const selectedSessionTitleUnique = isDeviceSessionTargetUnique(
     selectedTargetSession,
-    routingSessions,
+    (routingSessions || []).filter(session => session.agentId === selectedAgentId),
   );
   const selectedSessionIndex = selectedVisibleSession
     ? selectableSessions.findIndex((session) => session === selectedVisibleSession) + 1
@@ -184,6 +226,7 @@ export function useP4SessionSync({
     const title = formatDeviceSessionTitle(session);
     return {
       id: clampUtf8Text(normalizeText(session?.id), 127),
+      agentId: normalizeText(session?.agentId),
       title: clampUtf8Text(title, 191),
       cwd: clampUtf8Text(normalizeText(session?.cwd), 2048),
       content: formatDeviceSessionContent(session, title),
@@ -205,18 +248,69 @@ export function useP4SessionSync({
   const activeSessionIdsSignature = JSON.stringify(activeSessionIds);
   const cardsEnabled = displayEnabled && deviceSessions.length > 0;
 
-  const onSessionChange = useCallback((nextSessionId) => {
-    const value = nextSessionId || "auto";
+  const onSessionChange = useCallback((nextSessionId, nextAgentId = "") => {
+    const value = nextSessionId && nextSessionId !== "auto" ? nextSessionId : "auto";
+    const agent = value === "auto"
+      ? ""
+      : normalizeText(nextAgentId) || selectionAgentId || agentId;
     setSelection({
+      agentId: agent,
       sessionId: value,
       selectedAt: value === "auto" ? 0 : Date.now(),
     });
-  }, []);
+  }, [agentId, selectionAgentId]);
 
+  const pendingAgent = useRef("");
   useEffect(() => {
-    setSelection({ sessionId: "auto", selectedAt: 0 });
-    pendingNoticeRef.current = null;
-  }, [agentId, boardDeviceId]);
+    if (!selectedAgentId || selectedAgentId === agentId || pendingAgent.current) return;
+    pendingAgent.current = selectedAgentId;
+    rememberAgent(selectedAgentId).catch((error) => {
+      push?.({ tone: "warning", title: "会话路由同步失败，将重试", message: String(error) });
+    }).finally(() => { pendingAgent.current = ""; });
+  }, [selectedAgentId, agentId, rememberAgent, bindingSyncRevision, push]);
+
+  const lastConnectionIdentity = useRef("");
+  const lastWifiSelection = useRef("");
+  useEffect(() => {
+    const identity = [boardDeviceId, wifi?.boardDeviceId, wifi?.bootId].join("/");
+    const connectionChanged = identity !== lastConnectionIdentity.current;
+    if (connectionChanged) {
+      lastConnectionIdentity.current = identity;
+      // Allow the new link to re-apply its reported card after the reset gate.
+      lastWifiSelection.current = "";
+      pendingNoticeRef.current = null;
+    }
+    const selectionKey = [wifi?.boardDeviceId, wifi?.bootId, wifi?.selectionSequence].join("/");
+    const row = wifi?.selectionSequence
+      ? selectableSessions.find(
+        (session) => session.id === wifi.selectionSession && session.agentId === wifi.selectionAgent,
+      )
+      : null;
+    const action = nextWifiSelectionAction({
+      connectionChanged,
+      hasRow: Boolean(row),
+      selectionKey,
+      lastSelectionKey: lastWifiSelection.current,
+    });
+    if (action === "apply") {
+      lastWifiSelection.current = selectionKey;
+      onSessionChange(row.id, row.agentId);
+      return;
+    }
+    if (action === "reset") {
+      setSelection({ agentId: "", sessionId: "auto", selectedAt: 0 });
+    }
+  }, [
+    boardDeviceId,
+    wifi?.boardDeviceId,
+    wifi?.bootId,
+    wifi?.selectionSequence,
+    wifi?.selectionSession,
+    wifi?.selectionAgent,
+    selectableSessions,
+    onSessionChange,
+    setSelection,
+  ]);
 
   useEffect(() => {
     if (!agentId) return undefined;
@@ -226,57 +320,77 @@ export function useP4SessionSync({
 
   useEffect(() => {
     if (sessionId === "auto") return undefined;
-    const selectedStillExists = switchCandidates.some(
-      (session) => normalizeText(session?.id) === normalizeText(sessionId),
-    );
+    const selectedStillExists = switchCandidates.some(matchesSelection);
     if (!selectedStillExists) {
       onSessionChange("auto");
       return undefined;
     }
-    if (agentId === "deepseek-harness") return undefined;
+    if (selectedAgentId === "deepseek-harness") return undefined;
     const elapsed = Date.now() - selection.selectedAt;
     const delay = Math.max(0, P4_MANUAL_SESSION_TIMEOUT_MS - elapsed);
     const timer = setTimeout(() => onSessionChange("auto"), delay);
     return () => clearTimeout(timer);
-  }, [agentId, onSessionChange, selection.selectedAt, sessionId, switchCandidates]);
+  }, [agentId, matchesSelection, onSessionChange, selection.selectedAt, sessionId, switchCandidates]);
 
   useEffect(() => {
     if (!agentId) return;
+    // The selected Session defines the active Agent; wait for the native
+    // state/speech scope to follow it before committing the binding.
+    if (selectedAgentId !== agentId) return;
     const pendingNotice = pendingNoticeRef.current;
-    const matchedNotice = pendingNotice?.sessionId === sessionId ? pendingNotice : null;
+    const matchedNotice = pendingNotice?.sessionId === sessionId
+      && (!pendingNotice?.agentId || pendingNotice.agentId === selectedAgentId)
+      ? pendingNotice
+      : null;
     const notice = matchedNotice?.message || "";
-    const confirmedEmptyQueue = sessionsLoaded && selectableSessions.length === 0;
+    const confirmedSnapshot = sessionsLoaded && (selectableSessions.length === 0
+      || selectableSessions.every(session => !autoEligible(session)));
     if (
-      ["codex", "claude-code"].includes(agentId)
+      ["codex", "claude-code"].includes(selectedAgentId)
       && !selectedRoutingSession
-      && !confirmedEmptyQueue
+      && !confirmedSnapshot
     ) return;
     const autoFollow = sessionId === "auto" && Boolean(selectedRoutingSession);
     const requestedSessionId = autoFollow
       ? normalizeText(selectedRoutingSession?.id)
       : sessionId;
-    if (!usbConnected && sessionsLoaded && agentSessionFeedFresh(agentId)) {
+    const requestedAgentId = autoFollow
+      ? normalizeText(selectedRoutingSession?.agentId) || selectedAgentId
+      : selectedAgentId;
+    if (wifi && !usbConnected && sessionsLoaded && agentSessionFeedFresh(selectedAgentId)) {
+      const lanSessions = wifi?.sessionSelection ? deviceSessions
+        : deviceSessions.filter(row => row.agentId === requestedAgentId);
+      const lanSelectedIndex = lanSessions.findIndex(row =>
+        row.agentId === requestedAgentId && row.id === requestedSessionId);
       invoke("lan_agent_sessions", {
         input: {
-          agentId,
+          agentId: requestedAgentId,
           sessionId: requestedSessionId,
           title: selectedDeviceSessionTitle,
-          index: selectedSessionIndex,
-          count: selectableSessions.length,
-          sessions: buildP4DeviceSessionTransportPayload(deviceSessions),
-          activeSessionIds,
+          boardDeviceId: wifi?.boardDeviceId,
+          bootId: wifi?.bootId,
+          sessionCwd: selectedSessionCwd,
+          sessionTitleUnique: selectedSessionTitleUnique,
+          selectionSequence: wifi?.selectionSequence || 0,
+          autoFollow,
+          index: lanSelectedIndex >= 0 ? lanSelectedIndex + 1 : 0,
+          count: lanSessions.length,
+          sessions: buildP4DeviceSessionTransportPayload(lanSessions),
+          activeSessionIds: activeSessionIds.filter((id) => (
+            lanSessions.some((session) => session.id === id)
+          )),
           displayEnabled: cardsEnabled,
         },
       }).catch(() => {});
     }
-    if (!enabled || !boardDeviceId) return;
+    if (!usbConnected || !enabled || !boardDeviceId) return;
     if (matchedNotice) pendingNoticeRef.current = null;
     const isCurrent = () => bindingScopeRef.current === bindingScope;
     const bindingPromise = enqueueP4SessionBinding(bindingQueueRef.current, isCurrent,
       () => invoke("set_p4_session_binding", {
         input: {
           boardDeviceId,
-          agentId,
+          agentId: selectedAgentId,
           expectedConnectionId: usbConnectionId,
           expectedBootId: usbBootId,
           sessionId: requestedSessionId,
@@ -302,8 +416,8 @@ export function useP4SessionSync({
         if (resultSessionId !== requestedSessionId || !matchedNotice) return;
         const location = normalizeText(result?.desktopLocation).toLowerCase();
         const locationError = normalizeText(result?.desktopLocationError);
-        const desktopAgentLabel = agentId === "claude-code" ? "Claude" : "ChatGPT（Codex）";
-        if (["codex", "claude-code"].includes(agentId) && location !== "located") {
+        const desktopAgentLabel = selectedAgentId === "claude-code" ? "Claude" : "ChatGPT（Codex）";
+        if (["codex", "claude-code"].includes(selectedAgentId) && location !== "located") {
           push?.({
             tone: "warning",
             title: `会话已切换，${desktopAgentLabel} 定位失败`,
@@ -313,7 +427,7 @@ export function useP4SessionSync({
         }
         push?.({
           tone: "success",
-          title: ["codex", "claude-code"].includes(agentId)
+          title: ["codex", "claude-code"].includes(selectedAgentId)
             ? `${matchedNotice.title}并定位`
             : matchedNotice.title,
           message: matchedNotice.sessionLabel,
@@ -337,6 +451,7 @@ export function useP4SessionSync({
     enabled,
     push,
     selectableSessions.length,
+    selectedAgentId,
     selectedDeviceSessionTitle,
     selectedRoutingSession,
     selectedSessionCwd,
@@ -346,6 +461,7 @@ export function useP4SessionSync({
     sessionId,
     sessionsLoaded,
     usbConnected,
+    wifi,
     usbConnectionId,
     usbBootId,
   ]);
@@ -370,8 +486,8 @@ export function useP4SessionSync({
         if (action === "session_clear") {
           const dismissed = {};
           for (const session of sessions || []) {
-            const id = normalizeText(session?.id);
-            if (id) dismissed[id] = p4SessionActivitySignature(session);
+            const identity = deviceSessionIdentity(session);
+            if (identity) dismissed[identity] = p4SessionActivitySignature(session);
           }
           pendingNoticeRef.current = null;
           onDismissSessions?.(dismissed);
@@ -389,17 +505,35 @@ export function useP4SessionSync({
             : 0;
         if (!direction) return;
 
+        const boardSelectedAgentId = normalizeText(payload.agentId);
         const boardSelectedSessionId = normalizeText(payload.sessionId);
-        const boardSelectedSession = boardSelectedSessionId
-          ? switchCandidates.find(
-            (session) => normalizeText(session?.id) === boardSelectedSessionId,
-          )
-          : null;
+        const boardSelectedIndex = Number(payload.sessionIndex) || 0;
+        const boardSelectedCount = Number(payload.sessionCount) || 0;
+        let boardSelectedSession = null;
+        if (boardSelectedSessionId || boardSelectedAgentId) {
+          boardSelectedSession = deviceSessions.find((session) => (
+            (!boardSelectedAgentId || normalizeText(session?.agentId) === boardSelectedAgentId)
+            && (!boardSelectedSessionId || normalizeText(session?.id) === boardSelectedSessionId)
+          )) || null;
+        }
+        // Older firmware returns only `sessionId`/`sessionIndex`; when two
+        // Agents share a raw id, the index into the last snapshot disambiguates.
+        if (!boardSelectedSession
+            && boardSelectedIndex > 0
+            && boardSelectedIndex <= deviceSessions.length
+            && (!boardSelectedCount || boardSelectedCount === deviceSessions.length)) {
+          const indexed = deviceSessions[boardSelectedIndex - 1];
+          if (indexed
+              && (!boardSelectedSessionId || normalizeText(indexed?.id) === boardSelectedSessionId)) {
+            boardSelectedSession = indexed;
+          }
+        }
         const nextSessionId = boardSelectedSession
-          ? boardSelectedSessionId
+          ? normalizeText(boardSelectedSession.id)
           : cycleVoiceSessionId(sessionId, switchCandidates, direction);
+        const nextAgentId = normalizeText(boardSelectedSession?.agentId);
         if (nextSessionId === "auto") {
-          if (!missingSessionNoticeRef.current.allow(JSON.stringify([boardDeviceId, agentId]))) return;
+          if (!missingSessionNoticeRef.current.allow(JSON.stringify([boardDeviceId, selectedAgentId]))) return;
           push?.({
             tone: "warning",
             title: "没有可切换的会话",
@@ -413,15 +547,17 @@ export function useP4SessionSync({
         missingSessionNoticeRef.current.reset();
         pendingNoticeRef.current = {
           sessionId: nextSessionId,
+          agentId: nextAgentId,
           message: direction > 0 ? "已切换到下一个会话" : "已切换到上一个会话",
           title: direction > 0 ? "已切换到下一个会话" : "已切换到上一个会话",
           sessionLabel: formatSessionOption?.(
-            boardSelectedSession || switchCandidates.find(
-              (session) => normalizeText(session?.id) === nextSessionId,
-            ),
+            boardSelectedSession || switchCandidates.find((session) => (
+              normalizeText(session?.id) === nextSessionId
+              && (!nextAgentId || normalizeText(session?.agentId) === nextAgentId)
+            )),
           ) || "",
         };
-        onSessionChange(nextSessionId);
+        onSessionChange(nextSessionId, nextAgentId);
         requestBindingSync();
       });
       unlistenCurrentVoice = await listen("voice-transcript", (event) => {
@@ -429,7 +565,7 @@ export function useP4SessionSync({
           ? event.payload
           : {};
         if (normalizeText(payload.boardDeviceId) !== boardDeviceId) return;
-        if (normalizeText(payload.agentId) !== agentId) return;
+        if (normalizeText(payload.agentId) !== selectedAgentId) return;
         if (normalizeText(payload.phase).toLowerCase() !== "submitted") return;
         if (normalizeText(payload.sessionId).toLowerCase() !== "current") return;
 
@@ -457,7 +593,9 @@ export function useP4SessionSync({
   }, [
     agentId,
     boardDeviceId,
+    deviceSessions,
     enabled,
+    selectedAgentId,
     formatSessionOption,
     onDismissSessions,
     onSessionChange,
@@ -470,6 +608,8 @@ export function useP4SessionSync({
 
   return {
     sessionId,
+    selectedAgentId,
+    selectedRealSessionId,
     sessions: Array.isArray(sessions) ? sessions : [],
     routingSessions: Array.isArray(routingSessions) ? routingSessions : [],
     sessionsLoaded,

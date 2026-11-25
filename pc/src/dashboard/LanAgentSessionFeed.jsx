@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
-import { useAgentSessionFeed } from "./useAgentSessionFeed.js";
+import { useMultiAgentSessionFeed } from "./useMultiAgentSessionFeed.js";
+import { useDeviceContext } from "../shell/DeviceContext.jsx";
 import { useP4SessionSync } from "./useP4SessionSync.js";
 import { LAN_AGENT_PAIRING_UPDATED, readLanAgentPairing } from "./lanAgentPairing.js";
 
 const NO_DISMISSALS = Object.freeze({});
 
 export default function LanAgentSessionFeed({ agentId, usbConnected }) {
+  const { enabledAgents, rememberAgent, wifi } = useDeviceContext();
+  const [selection, setSelection] = useState({ agentId: "", sessionId: "auto", selectedAt: 0 });
   const [paired, setPaired] = useState(false);
   useEffect(() => {
     let current = true;
@@ -24,13 +27,16 @@ export default function LanAgentSessionFeed({ agentId, usbConnected }) {
   }, []);
 
   const followedAgent = paired && !usbConnected ? agentId || "codex" : "";
-  const feed = useAgentSessionFeed({
-    agentId: followedAgent,
+  const feed = useMultiAgentSessionFeed({
+    enabledAgentIds: followedAgent ? enabledAgents : null,
+    selectedSession: selection,
+    liveAgentId: followedAgent,
     displayEnabled: true,
     dismissedSessions: NO_DISMISSALS,
   });
   useP4SessionSync({
     enabled: false,
+    wifi, selection, setSelection, rememberAgent,
     agentId: followedAgent,
     usbConnected,
     displayEnabled: true,

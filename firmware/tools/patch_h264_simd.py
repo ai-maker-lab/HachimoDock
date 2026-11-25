@@ -37,9 +37,15 @@ def patch(source, output, ar, nm, objcopy):
         for member in members:
             if Path(member).name != member:
                 raise ValueError('Unexpected archive member path')
-            original = subprocess.check_output([ar, 'p', str(source), member])
             obj = tmp / member
-            obj.write_bytes(original)
+            # `ar p` on the Windows toolchain adds bytes to the extracted
+            # member; extract into the scratch directory instead.
+            subprocess.run(
+                [ar, 'x', str(source), member], cwd=tmp, check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            if not obj.is_file():
+                raise ValueError('tinyH264 archive member extraction failed')
             undefined = {line.split()[-1] for line in subprocess.check_output(
                 [nm, '-u', str(obj)], text=True).splitlines() if line.split()}
             names = sorted(undefined & RENAMES.keys())

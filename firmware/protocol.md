@@ -979,8 +979,11 @@ PC to board:
   before the runtime returns it to `idle`, so completed replies stay readable.
 - `session/current`: updates the live desktop conversation queue, selected
   position, and temporary explicit Session binding. The main page renders up
-  to three cards around the selection. Each item carries `id`, `title`,
-  `content`, `state`, `transitionRevision`, and `terminalRemainingMs`; later
+  to three cards around the selection. Each item carries `id`, `agentId`,
+  `title`, `content`, `state`, `transitionRevision`, and
+  `terminalRemainingMs`. `agentId` is the card's real Agent ownership; two
+  Agents may report the same raw `id`, and firmware deduplicates, orders,
+  caches, and de-duplicates completion audio by `(agentId, id)`. Later
   `speech/text` updates use `sessionId` to replace
   the matching card's progress content. Titles use one line and progress uses
   up to two lines, with UTF-8-safe pixel-width `...` truncation. Holding the
@@ -1026,12 +1029,15 @@ PC to board:
   remaining 60-second deadline. This protects the screen from stale working
   cards if the desktop bridge stops publishing while other USB traffic remains.
   On `main`, device previous/next actions update the selected Session card and
-  report its exact ID back to the desktop. On `components`, the same actions
-  select the previous/next catalog entry without changing desktop Session
-  routing. SW2's default `component_center` action toggles the two peer pages.
-  On a followed-Agent change, the desktop sends the new `agentId` with an empty
-  `sessions`/`activeSessionIds` snapshot before loading that Agent's queue.
-  Firmware treats this as an immediate cross-Agent clear. `displayEnabled:
+  report its exact `sessionId` and `agentId` back to the desktop. On
+  `components`, the same actions select the previous/next catalog entry without
+  changing desktop Session routing. SW2's default `component_center` action
+  toggles the two peer pages.
+  A followed-Agent change is handled per snapshot shape: when `sessions[]`
+  items carry `agentId` (new PC), firmware keeps the other Agents' cards and
+  reconciles the queue by `(agentId, id)`; when the snapshot has no per-item
+  `agentId` (old PC), firmware keeps the historical behavior and treats the
+  top-level `agentId` change as an immediate cross-Agent clear. `displayEnabled:
   false` explicitly clears the visible queue. Older senders that omit the field
   default to display enabled.
   Host activity received concurrently with a render frame is treated as online
@@ -1285,11 +1291,11 @@ Current Session example:
     "index": 2,
     "count": 3,
     "sessions": [
-      {"id":"019f-a","title":"修复设备端白屏","state":"done","transitionRevision":1740000001000,"terminalRemainingMs":42000},
-      {"id":"019f-b","title":"完善会话切换","state":"working","transitionRevision":1740000002000,"terminalRemainingMs":0},
-      {"id":"019f-c","title":"验证语音输入","state":"waiting_user","transitionRevision":1740000003000,"terminalRemainingMs":0}
+      {"id":"019f-a","agentId":"codex","title":"修复设备端白屏","state":"done","transitionRevision":1740000001000,"terminalRemainingMs":42000},
+      {"id":"019f-b","agentId":"claude-code","title":"完善会话切换","state":"working","transitionRevision":1740000002000,"terminalRemainingMs":0},
+      {"id":"019f-c","agentId":"claude-code","title":"验证语音输入","state":"waiting_user","transitionRevision":1740000003000,"terminalRemainingMs":0}
     ],
-    "agentId": "codex",
+    "agentId": "claude-code",
     "activeSessionIds": ["019f-b", "019f-c"],
     "displayEnabled": true,
     "notice": "已切换到下一个会话"
@@ -2679,6 +2685,14 @@ realtime physical-key mailbox, bit 1 says a desktop USB session has priority,
 and bit 2 announces conversation HUD support on the RTC stream. Missing means
 unsupported. Legacy mode 0 (empty request and empty authenticated response) is
 unchanged. Pico builds do not compile the LAN producer or mailbox.
+
+Session selection is separate from `rtcKey` bits 6/7 (which describe the
+component descriptor selectors). A trusted, online peer without USB priority
+reads the pending card with mode 6 selector 4 (manual selection) or selector 5
+(pressed selection); the reply is `{bootId, sequence, agentId, sessionId}`.
+A successful reply is itself the capability signal, so the saturated status
+payload needs no new field, and firmware without these selectors keeps the old
+single-source behavior.
 
 Mode 16 uses the existing P4LAN1 authentication/GCM envelope. The request is
 exactly 36 bytes: boot ID (16 ASCII hex), desktop-process receiver nonce (16

@@ -12,8 +12,6 @@ import {
   fetchAgentSessions,
 } from "../lib/agent-bus-client.js";
 import {
-  buildP4ConversationQueue,
-  filterDismissedP4Sessions,
   mergeP4SessionEvent,
   mergeP4SessionSnapshot,
 } from "../lib/p4-session-service.js";
@@ -37,6 +35,7 @@ export const AGENT_SESSION_FEED_INITIAL_STATE = Object.freeze({
   fingerprint: "",
   loaded: false,
   agentId: "",
+  authoritativeSnapshot: false,
 });
 
 function normalizeText(value) {
@@ -102,31 +101,16 @@ export function dispatchSessionTurn(pendingEvents, apply) {
 function nextSessionFeedState(state, action, routingSessions, authoritativeSnapshot) {
   const agentId = action.agentId || "";
   const sameAgent = state.loaded && state.agentId === agentId;
-  const displayEnabled = action.displayEnabled !== false;
-  const dismissedSessions = action.dismissedSessions || {};
-  const previousQueue = displayEnabled && sameAgent
-    ? filterDismissedP4Sessions(state.sessions, dismissedSessions)
-    : [];
-  const visibleRoutingSessions = filterDismissedP4Sessions(
-    routingSessions,
-    dismissedSessions,
-  );
-  const sessions = displayEnabled
-    ? buildP4ConversationQueue(
-      visibleRoutingSessions,
-      previousQueue,
-      action.nowMs,
-      { authoritativeSnapshot },
-    )
-    : [];
-  const fingerprint = JSON.stringify([sessions, routingSessions]);
-  if (sameAgent && fingerprint === state.fingerprint) return state;
+  const fingerprint = JSON.stringify(routingSessions);
+  if (!authoritativeSnapshot && sameAgent && fingerprint === state.fingerprint
+      && state.authoritativeSnapshot === authoritativeSnapshot) return state;
   return {
-    sessions,
     routingSessions,
+    snapshotAt: authoritativeSnapshot ? action.nowMs : state.snapshotAt,
     fingerprint,
     loaded: true,
     agentId,
+    authoritativeSnapshot,
   };
 }
 
@@ -148,20 +132,6 @@ export function agentSessionFeedReducer(state, action) {
       );
       return nextSessionFeedState(state, action, routingSessions, false);
     }
-    case "tick_terminal": {
-      const agentId = action.agentId || "";
-      if (!state.loaded || state.agentId !== agentId) return state;
-      const sessions = action.displayEnabled === false
-        ? []
-        : buildP4ConversationQueue(
-          filterDismissedP4Sessions(state.routingSessions, action.dismissedSessions),
-          filterDismissedP4Sessions(state.sessions, action.dismissedSessions),
-          action.nowMs,
-        );
-      const fingerprint = JSON.stringify([sessions, state.routingSessions]);
-      if (fingerprint === state.fingerprint) return state;
-      return { ...state, sessions, fingerprint };
-    }
     case "reset":
       return AGENT_SESSION_FEED_INITIAL_STATE;
     default:
@@ -175,13 +145,12 @@ export function useAgentSessionFeed({ agentId, displayEnabled, dismissedSessions
     AGENT_SESSION_FEED_INITIAL_STATE,
   );
   const previousAgentIdRef = useRef("");
-  const terminalQueuePendingRef = useRef(false);
   const matchesAgent = state.agentId === agentId;
-  const sessions = matchesAgent ? state.sessions : EMPTY_SESSIONS;
   const routingSessions = matchesAgent ? state.routingSessions : EMPTY_SESSIONS;
   const loaded = matchesAgent && state.loaded;
+  const authoritativeSnapshot = matchesAgent && state.authoritativeSnapshot === true;
 
-  terminalQueuePendingRef.current = sessions.some(isTerminalDeviceSession);
+
 
   useEffect(() => {
     if (previousAgentIdRef.current === agentId) return;
@@ -267,15 +236,6 @@ export function useAgentSessionFeed({ agentId, displayEnabled, dismissedSessions
         // Keep the cursor and retry. A successful response resumes or resets it.
       } finally {
         eventsInFlight = false;
-        if (!cancelled && terminalQueuePendingRef.current) {
-          dispatch({
-            type: "tick_terminal",
-            agentId,
-            nowMs: Date.now(),
-            displayEnabled,
-            dismissedSessions,
-          });
-        }
       }
     };
 
@@ -338,5 +298,5 @@ export function useAgentSessionFeed({ agentId, displayEnabled, dismissedSessions
     };
   }, [agentId, dismissedSessions, displayEnabled]);
 
-  return { sessions, routingSessions, loaded };
+  return { routingSessions, loaded, authoritativeSnapshot, snapshotAt: state.snapshotAt };
 }

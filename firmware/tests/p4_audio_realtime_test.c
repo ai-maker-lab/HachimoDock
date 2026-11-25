@@ -116,6 +116,7 @@ static int esp_codec_dev_write(int device, const void *data, int bytes) {
 }
 // Production control now queries AFE readiness; its test implementation is below.
 static bool pet_p4_afe_ready(void);
+#include "production_voice_selection.inc"
 #include "production_audio_resources.inc"
 #include "production_stream_buffered.inc"
 #include "production_stream_drain.inc"
@@ -130,7 +131,7 @@ static void storage_denied(void) {
 }
 static void capture_aba(void) {
   assert(pet_p4_audio_capture_start_owned(true, "old") == ESP_OK && reservations() == 1);
-  pet_resource_realtime_t old_worker = {0}; assert(capture_worker_take(&old_worker,NULL,NULL,NULL));
+  pet_resource_realtime_t old_worker = {0}; assert(capture_worker_take(&old_worker,NULL,NULL,NULL,NULL));
   pet_resource_realtime_t stale = old_worker;
   assert(pet_p4_audio_capture_stop_owned("wrong") == ESP_ERR_INVALID_STATE);
   assert(pet_p4_audio_capture_stop_owned("old") == ESP_OK && reservations() == 1);
@@ -139,16 +140,16 @@ static void capture_aba(void) {
   assert(atomic_load(&g_capture_requested)&&g_capture_pending.serial);
   capture_worker_done(); pet_resources_device_realtime_end(&old_worker);
   assert(reservations() == 1); storage_denied();
-  pet_resource_realtime_t new_worker = {0}; assert(capture_worker_take(&new_worker,NULL,NULL,NULL));
+  pet_resource_realtime_t new_worker = {0}; assert(capture_worker_take(&new_worker,NULL,NULL,NULL,NULL));
   pet_resources_device_realtime_end(&stale); assert(reservations() == 1);
   assert(pet_p4_audio_capture_stop() == ESP_OK && reservations() == 1);
   capture_worker_done(); pet_resources_device_realtime_end(&new_worker); assert(!reservations());
   assert(pet_p4_audio_capture_start(true) == ESP_OK);
   assert(pet_p4_audio_set_enabled(false) == ESP_OK && !reservations());
-  pet_resource_realtime_t disabled = {0}; assert(!capture_worker_take(&disabled,NULL,NULL,NULL));
+  pet_resource_realtime_t disabled = {0}; assert(!capture_worker_take(&disabled,NULL,NULL,NULL,NULL));
   pet_resources_device_realtime_end(&disabled); assert(pet_p4_audio_set_enabled(true) == ESP_OK);
   assert(pet_p4_audio_capture_start(true)==ESP_OK);
-  pet_resource_realtime_t failed={0};assert(capture_worker_take(&failed,NULL,NULL,NULL)&&capture_worker_current(failed));
+  pet_resource_realtime_t failed={0};assert(capture_worker_take(&failed,NULL,NULL,NULL,NULL)&&capture_worker_current(failed));
   capture_worker_cancel(failed);assert(!atomic_load(&g_capture_requested)&&!capture_worker_current(failed));
   assert(reservations()==1);capture_worker_done();pet_resources_device_realtime_end(&failed);assert(!reservations());
 }
@@ -158,7 +159,7 @@ static void overlapping_sessions(void) {
   assert(held == 2); /* Conversation intent and capture request. */
   assert(pet_p4_audio_conversation_set(true, false, "conversation") == ESP_OK);
   assert(reservations() == held && resets == old_resets);
-  pet_resource_realtime_t capture = {0}; assert(capture_worker_take(&capture,NULL,NULL,NULL));
+  pet_resource_realtime_t capture = {0}; assert(capture_worker_take(&capture,NULL,NULL,NULL,NULL));
   assert(pet_p4_audio_stream_begin("voice") == ESP_OK && reservations() == 3);
   assert(pet_p4_audio_music_begin("music-no") == ESP_ERR_INVALID_STATE && reservations() == 3);
   assert(pet_p4_audio_conversation_set(false, false, "") == ESP_OK);
@@ -462,10 +463,11 @@ static atomic_uint g_usb_capture_tx_pending;
 #include "production_capture_task.inc"
 static void *run_actual_capture(void *unused){audio_task(unused);return NULL;}
 static void actual_capture_stop_start_sessions(void){
+  pet_p4_runtime_state_t button_state = {0};
   for(capture_fault=0;capture_fault<6;capture_fault++){
     capture_begins=capture_ends=new_chunks=old_chunk_attempts=0;replaced=false;
     capture_loop_testing=true;
-    assert((capture_fault == 5 ? pet_p4_audio_capture_start_button(true, 37)
+    assert((capture_fault == 5 ? pet_p4_audio_capture_start_button(&button_state, 37)
                                : pet_p4_audio_capture_start_owned(true, capture_fault == 4 ? "old-owner" : ""))
       == ESP_OK);
     pthread_t thread;assert(!pthread_create(&thread,NULL,run_actual_capture,NULL));

@@ -1989,7 +1989,6 @@ pub struct UsbSerialManager {
     status_snapshot: Arc<Mutex<UsbConnectionStatus>>,
     // Exact-generation validated HELLO retained across a busy writer lock.
     pending_hello: Arc<Mutex<Option<(u64, serde_json::Value)>>>,
-    follow_scope: Arc<Mutex<Option<UsbFollowScope>>>,
     desktop_device_id: Arc<Mutex<String>>,
     connect_guard: Arc<Mutex<()>>,
     firmware_reconnect_guard: Arc<Mutex<()>>,
@@ -2022,35 +2021,6 @@ pub struct UsbSerialManager {
 }
 fn component_sync_media_blocks(state:&str)->bool{
     matches!(state,"playing"|"buffering"|"preparing"|"paused"|"ended")
-}
-
-// Physical-send admission, independent of the forwarder's cached profile.
-// A queued old agent/session cannot overwrite a newly submitted follow.
-struct UsbFollowScope {
-    generation: u64,
-    board: String,
-    agent: String,
-    session: Option<String>,
-    submitted: bool,
-}
-impl UsbFollowScope {
-    fn allows(&self, topic: &str, payload: &serde_json::Value) -> bool {
-        let source = if let Some(source) = topic.strip_prefix("state/") {
-            if source == "active" { payload["source"].as_str() } else { Some(source) }
-        } else if topic == "session/current" {
-            payload["agentId"].as_str()
-        } else if topic == "speech/text" {
-            payload["source"].as_str().or_else(|| payload["agentId"].as_str())
-        } else { return true; };
-        if !self.submitted || source.and_then(crate::normalize_agent_id).as_deref() != Some(self.agent.as_str()) {
-            return false;
-        }
-        if topic == "session/current" { return true; }
-        if let Some(session) = self.session.as_deref() {
-            return payload["sessionId"].as_str() == Some(session);
-        }
-        true
-    }
 }
 
 // Text is retained for bounded diagnostics, but lossy decoding must NEVER turn
@@ -2422,7 +2392,6 @@ impl UsbSerialManager {
             connection: Arc::new(Mutex::new(None)),
             status_snapshot: Arc::new(Mutex::new(disconnected_usb_status())),
             pending_hello: Arc::new(Mutex::new(None)),
-            follow_scope: Arc::new(Mutex::new(None)),
             desktop_device_id: Arc::new(Mutex::new(String::new())),
             connect_guard: Arc::new(Mutex::new(())),
             firmware_reconnect_guard: Arc::new(Mutex::new(())),
@@ -3372,17 +3341,8 @@ impl UsbSerialManager {
             Some(expected_board_device_id), Some(expected_connection_id), None)
     }
 
-    // Callback-safe metadata only: never wait for a writer/connection mutex.
-    pub(crate) fn session_follow_target_is_current(&self, board: &str, generation: &str, agent: &str) -> bool {
-        // Every holder only inspects/updates metadata; none performs IO or UI
-        // work under this mutex. Contention alone must not retire valid speech.
-        let Ok(scope) = self.follow_scope.lock() else { return false; };
-        scope.as_ref().filter(|scope| scope.generation.to_string() == generation && scope.board == board)
-            .is_none_or(|scope| scope.allows("session/current", &serde_json::json!({"agentId":agent})))
-    }
-
-    pub(crate) fn check_session_follow_target(
-        &self, board: &str, agent: &str, expected_connection: &str, expected_boot: &str,
+    pub(crate) fn check_session_connection(
+        &self, board: &str, expected_connection: &str, expected_boot: &str,
     ) -> Result<u64, String> {
         let mut connection = self.connection.lock().map_err(|_| "session connection unavailable")?;
         let conn = connection.as_mut().ok_or("Not connected")?;
@@ -3393,20 +3353,7 @@ impl UsbSerialManager {
             || (!expected_connection.is_empty() && expected_connection != conn.connection_id.to_string())
             || (!expected_boot.is_empty() && conn.capabilities["debugBootId"].as_str() != Some(expected_boot))
         { return Err("USB session scope changed; binding not committed".into()); }
-        let scope = self.follow_scope.lock().map_err(|_| "follow scope unavailable")?;
-        if scope.as_ref().filter(|scope| scope.generation == conn.connection_id && scope.board == board)
-            .is_some_and(|scope| !scope.allows("session/current", &serde_json::json!({"agentId":agent})))
-        { return Err("stale follow agent/session; binding not committed".into()); }
         Ok(conn.connection_id)
-    }
-
-    pub(crate) fn send_follow_change_for_connection(
-        &self, board: &str, generation: u64, topic: &str, payload: &serde_json::Value,
-    ) -> Result<(), String> {
-        if generation == 0 || !(topic == "control/remote-cli-binding" || topic.starts_with("state/")) {
-            return Err("invalid follow change scope".into());
-        }
-        self.send_inner(topic, payload, true, Some(board), Some(generation), None)
     }
 
     pub(crate) fn send_session_current_for_connection(
@@ -3471,11 +3418,11 @@ impl UsbSerialManager {
         expected_connection_id: Option<u64>,
         write_slice_bytes: Option<usize>,
     ) -> Result<(), String> {
-        self.send_inner_admitted(topic,payload,flush,expected_board_device_id,expected_connection_id,write_slice_bytes,None,false)
+        self.send_inner_admitted(topic,payload,flush,expected_board_device_id,expected_connection_id,write_slice_bytes,None)
     }
     fn send_inner_admitted(
         &self,topic:&str,payload:&serde_json::Value,flush:bool,
-        expected_board_device_id:Option<&str>,expected_connection_id:Option<u64>,write_slice_bytes:Option<usize>,program_epoch:Option<u64>,test_speech:bool,
+        expected_board_device_id:Option<&str>,expected_connection_id:Option<u64>,write_slice_bytes:Option<usize>,program_epoch:Option<u64>,
     )->Result<(),String>{
         let owned_notes=topic=="audio/control"&&expected_connection_id.is_some()&&payload.get("captureOwner").is_some();
         let preempt_on_send = !owned_notes&&((topic=="audio/conversation"&&payload["enabled"]==true)
@@ -3553,41 +3500,6 @@ impl UsbSerialManager {
         {
             return Err("voice feedback peer changed".into());
         }
-
-        let next_follow = if topic == "control/remote-cli-binding" && payload["enabled"] == true {
-            Some(crate::normalize_agent_id(payload["targetSource"].as_str().unwrap_or(""))
-                .ok_or("follow source is not recognized")?)
-        } else { None };
-        let mut test_payload = test_speech.then(|| payload.clone());
-        {
-            let mut scope = self.follow_scope.lock().map_err(|_| "follow scope unavailable")?;
-            if scope.as_ref().is_some_and(|s| s.generation != conn.connection_id || s.board != conn.board_device_id) {
-                *scope = None;
-            }
-            if let Some(agent) = &next_follow {
-                // A failed/unknown binding write leaves status forwarding closed;
-                // only a new explicit binding submission can reopen it.
-                *scope = Some(UsbFollowScope { generation: conn.connection_id, board: conn.board_device_id.clone(),
-                    agent: agent.clone(), session: None, submitted: false });
-            } else if let Some(scope) = scope.as_ref() {
-                if let Some(test) = test_payload.as_mut() {
-                    // Only the local test command is stamped from the current
-                    // physical scope, while the wire/connection locks are held.
-                    test["source"] = serde_json::json!(scope.agent);
-                    if let Some(session) = &scope.session {
-                        test["sessionId"] = serde_json::json!(session);
-                    }
-                }
-                if !scope.allows(topic, test_payload.as_ref().unwrap_or(payload)) {
-                    return Err(if test_speech {
-                        "Agent 跟随尚未就绪，请稍后重试测试消息"
-                    } else {
-                        "stale follow agent/session; state not submitted"
-                    }.into());
-                }
-            }
-        }
-        let payload = test_payload.as_ref().unwrap_or(payload);
 
         if topic=="audio/volume" {
             master_volume::validate_write(conn,expected_board_device_id,expected_connection_id,payload)?;
@@ -3773,15 +3685,6 @@ impl UsbSerialManager {
         }
 
         if topic=="asset/activate" { self.activation_update(|t|t.write_completed()); }
-        {
-            let mut scope = self.follow_scope.lock().map_err(|_| "follow scope unavailable")?;
-            if let Some(scope) = scope.as_mut().filter(|s| s.generation == conn.connection_id && s.board == conn.board_device_id) {
-                if next_follow.is_some() { scope.submitted = true; }
-                if topic == "session/current" {
-                    scope.session = payload["sessionId"].as_str().filter(|id| !id.is_empty() && *id != "auto").map(str::to_owned);
-                }
-            }
-        }
         drop(pixel_wire_guard);
         drop(connection_guard);
         drop(_admission);
@@ -4026,7 +3929,7 @@ impl UsbSerialManager {
             });
         let sent = if request_topic == "speech/text" && response_topic == "protocol/ack" {
             self.send_inner_admitted(request_topic, &payload, true, Some(expected_board_device_id),
-                connection_id, None, None, true)
+                connection_id, None, None)
         } else {
             self.send_inner(request_topic, &payload, true, Some(expected_board_device_id), connection_id, None)
         };
@@ -5002,13 +4905,13 @@ impl UsbSerialManager {
 
     pub(crate) fn send_test_speech_bound(&self, board: &str, generation: u64, text: &str) -> Result<(), String> {
         self.send_inner_admitted("speech/text", &serde_json::json!({"text": text}), true,
-            Some(board), Some(generation), None, None, true)
+            Some(board), Some(generation), None, None)
     }
 
     /// Send a local test bubble under the current device follow scope.
     pub fn send_speech(&self, text: &str) -> Result<(), String> {
         let payload = serde_json::json!({"text": text});
-        self.send_inner_admitted("speech/text", &payload, true, None, None, None, None, true)
+        self.send_inner_admitted("speech/text", &payload, true, None, None, None, None)
     }
 
     /// Send a control command to the device
@@ -9233,53 +9136,6 @@ manager.activate_memory_test_connection();
         assert_eq!(before,stats.lock().unwrap().writes.len(),"retired component generation wrote a frame");
         manager.send_widget_data("p4-test",&serde_json::json!({"source":"computer.status"})).unwrap();
         assert_eq!(stats.lock().unwrap().flushes,before_widget_flushes,"background widgets must not block in driver drain");
-    }
-
-    #[test]
-    fn session_binding_preflight_rejects_retired_agent_or_generation_without_a_write() {
-        let manager = UsbSerialManager::new();
-        let recorded = Arc::new(Mutex::new(PacedWriterState::default()));
-        *manager.connection.lock().unwrap() = Some(UsbConnection {
-            connection_id: 1, port_name: "COM21".into(), baud_rate: P4_USB_UART_BAUD,
-            writer: Box::new(PacedWriter(recorded.clone())), board_device_id: "p4-test".into(),
-            runtime: "esp-p4".into(), device_model: "ESP32-P4".into(), firmware: "test".into(),
-            build_id: String::new(), git_sha: String::new(), build_dirty: false, protocol_schema: 7,
-            wire_protocol: "pet-usb-jsonl-v3".into(),
-            capabilities: serde_json::json!({"debugBootId":"0123456789abcdef"}), connected: true,
-            cancel_reader: Arc::new(AtomicBool::new(false)), capture_active: Arc::new(AtomicBool::new(false)),
-        });
-manager.activate_memory_test_connection();
-        { let _lease = manager.inbound_owner.lock().unwrap(); manager.inbound_owner.publish(1); }
-        *manager.follow_scope.lock().unwrap() = Some(UsbFollowScope {
-            generation: 1, board: "p4-test".into(), agent: "codex".into(), session: None, submitted: true,
-        });
-        assert!(manager.check_session_follow_target("p4-test", "workbuddy", "1", "0123456789abcdef").is_err());
-        assert!(!manager.session_follow_target_is_current("p4-test", "1", "workbuddy"));
-        assert!(manager.session_follow_target_is_current("p4-test", "1", "codex"));
-        assert!(manager.check_session_follow_target("p4-test", "codex", "2", "0123456789abcdef").is_err());
-        assert!(manager.check_session_follow_target("p4-test", "codex", "1", "ffffffffffffffff").is_err());
-        assert_eq!(manager.check_session_follow_target("p4-test", "codex", "1", "0123456789abcdef"), Ok(1));
-        manager.follow_scope.lock().unwrap().as_mut().unwrap().submitted = false;
-        assert!(manager.check_session_follow_target("p4-test", "codex", "1", "0123456789abcdef").is_err());
-        assert!(!manager.session_follow_target_is_current("p4-test", "1", "codex"));
-        assert!(recorded.lock().unwrap().writes.is_empty());
-        assert!(manager.send_speech("test").is_err());
-        assert!(recorded.lock().unwrap().writes.is_empty());
-        {
-            let mut scope = manager.follow_scope.lock().unwrap();
-            let scope = scope.as_mut().unwrap();
-            scope.submitted = true;
-            scope.session = Some("active-session".into());
-        }
-        assert!(manager.send("speech/text", &serde_json::json!({"text":"old", "source":"codex","sessionId":"retired-session"})).is_err());
-        assert!(recorded.lock().unwrap().writes.is_empty());
-        manager.send_speech("test").unwrap();
-        let wire = recorded.lock().unwrap().writes.concat();
-        let message: serde_json::Value = serde_json::from_slice(&wire).unwrap();
-        assert_eq!(message["topic"], "speech/text");
-        assert_eq!(message["payload"]["source"], "codex");
-        assert_eq!(message["payload"]["sessionId"], "active-session");
-        assert_eq!(message["payload"]["text"], "test");
     }
 
     #[test]

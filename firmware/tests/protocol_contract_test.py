@@ -1128,7 +1128,9 @@ def test_p4_conversation_queue_is_synced_and_rendered_with_pixel_ellipsis():
     assert "json_session_id_array_contains(" in protocol
     assert "lifecycle_is_active" in protocol
     assert "pet_p4_session_queue_item_t candidate = {0}" in protocol
-    assert "pet_p4_session_queue_item_t *previous = agent_changed" in protocol
+    assert 'json_string(session, "agentId")' in protocol
+    assert "pet_p4_session_queue_item_t *previous = legacy_agent_changed" in protocol
+    assert "bool legacy_agent_changed = agent_changed && !inbound_has_per_item_agent" in protocol
     assert "if (!previous) continue" in protocol
     assert "candidate.terminal_until_ms = now_ms + PET_P4_DONE_HOLD_MS" in protocol
     assert '"transitionRevision"' in protocol
@@ -1153,7 +1155,7 @@ def test_p4_conversation_queue_is_synced_and_rendered_with_pixel_ellipsis():
     assert "state->session_queue_staging[ordered_count] = updated_item" in protocol
     assert "state->session_queue_staging[ordered_count] = *previous" in protocol
     assert "pet_p4_session_queue_item_t *selected_item = find_session_queue_item(" in protocol
-    assert "session_ids_match(state->session_queue_staging[j].id, previous->id)" in protocol
+    assert "session_item_matches(&state->session_queue_staging[j], previous->agent, previous->id)" in protocol
     assert "(unsigned int) (selected_item - state->session_queue) + 1" in protocol
     assert "static const char *selected_session_lifecycle(" in protocol
     assert "state->session_queue[selected].state" in protocol
@@ -1189,7 +1191,7 @@ def test_p4_conversation_queue_is_synced_and_rendered_with_pixel_ellipsis():
     assert "rgb565(255, 255, 255)" in renderer
     from p4_render_trace_test import function
     queue_draw = function(renderer, "draw_session_queue_uncached")
-    assert queue_draw.index("session_text(state->current_session_agent, item, now_ms, &text)") < queue_draw.index("draw_bubble_card_title(&text")
+    assert queue_draw.index("session_text(item->agent, item, now_ms, &text)") < queue_draw.index("draw_bubble_card_title(&text")
     title_draw = function(renderer, "draw_bubble_card_title")
     assert "if (view->title_pending) return" not in title_draw
     assert title_draw.index("renderer_bubble_draw_pinned(view, PET_BUBBLE_TITLE") < title_draw.index("draw_bubble_large_line(view, PET_BUBBLE_TITLE, view->title")
@@ -2527,7 +2529,7 @@ def test_p4_device_ptt_stream_is_validated_and_relayed_by_pc():
     assert 'strcmp(binding->action, "voice_ptt") == 0' in input_source
     assert 'strcmp(gesture, "hold_start") == 0' in input_source
     assert 'strcmp(gesture, "hold_end") == 0' in input_source
-    assert "pet_p4_audio_capture_start_button(state && state->session_queue_count == 0, token)" in input_source
+    assert "pet_p4_audio_capture_start_button(state, token)" in input_source
     assert "pet_p4_audio_init" in main
     assert "g_transport_mutex" in main
     assert 'strcmp(topic, "audio/control") == 0' in protocol

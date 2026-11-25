@@ -82,8 +82,9 @@ int main(void) {
 def test_stopped_cue_only_after_admission_and_once_per_revision(tmp_path):
     source = (ROOT / "main/pet_p4_protocol.c").read_text()
     names = ["copy_text", "lifecycle_is", "lifecycle_is_active", "lifecycle_is_terminal",
-             "session_ids_match", "find_session_queue_item", "json_string", "json_u64",
-             "json_bounded_u64", "json_session_id_array_contains"]
+             "session_ids_match", "session_item_matches", "find_session_queue_item",
+             "json_string", "json_u64", "json_bounded_u64",
+             "json_session_id_array_contains"]
     prelude = r'''
 #include <assert.h>
 #include <math.h>
@@ -101,6 +102,7 @@ static long long esp_timer_get_time(void) {return now_us;}
 static int pet_p4_audio_play_event_cue(const char *name) {assert(!strcmp(name,"session_terminated"));return ++cues;}
 static void restore_idle_session_view(pet_p4_runtime_state_t *s,const char *event) {(void)s;(void)event;}
 static char g_last_stopped_cue_session[PET_P4_SESSION_QUEUE_ID_MAX];
+static char g_last_stopped_cue_agent[PET_P4_AGENT_MAX];
 static unsigned long long g_last_stopped_cue_revision;
 '''
     main = r'''
@@ -124,6 +126,55 @@ int main(void) {
   /* A reconnect/cold snapshot of an already announced revision stays silent. */
   memset(&s,0,sizeof(s)); send(&s,stop); assert(cues==3);
   memset(&s,0,sizeof(s)); send(&s,stop); assert(cues==3);
+}
+'''
+    compile_run(tmp_path, prelude + "\n".join(function(source,n) for n in names)
+                + function(source, "handle_session_current") + main,
+                ROOT / "tests/vendor/cjson/cJSON.c")
+
+
+def test_per_item_agent_keeps_cross_agent_cards_and_legacy_snapshots_still_clear(tmp_path):
+    source = (ROOT / "main/pet_p4_protocol.c").read_text()
+    names = ["copy_text", "lifecycle_is", "lifecycle_is_active", "lifecycle_is_terminal",
+             "session_ids_match", "session_item_matches", "find_session_queue_item",
+             "json_string", "json_u64", "json_bounded_u64",
+             "json_session_id_array_contains"]
+    prelude = r'''
+#include <assert.h>
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include "cJSON.h"
+#include "pet_p4_protocol.h"
+#define PET_P4_JSON_SAFE_INTEGER_MAX 9007199254740991ULL
+#define PET_P4_SESSION_NOTICE_MS 2200ULL
+static int cues;
+static long long now_us=1000000;
+static long long esp_timer_get_time(void) {return now_us;}
+static int pet_p4_audio_play_event_cue(const char *name) {(void)name;return ++cues;}
+static void restore_idle_session_view(pet_p4_runtime_state_t *s,const char *event) {(void)s;(void)event;}
+static char g_last_stopped_cue_session[PET_P4_SESSION_QUEUE_ID_MAX];
+static char g_last_stopped_cue_agent[PET_P4_AGENT_MAX];
+static unsigned long long g_last_stopped_cue_revision;
+'''
+    main = r'''
+static void send(pet_p4_runtime_state_t *s,const char *body) {
+  cJSON *j=cJSON_Parse(body); assert(j); handle_session_current(s,j); cJSON_Delete(j);
+}
+int main(void) {
+  pet_p4_runtime_state_t s={0};
+  send(&s,"{\"agentId\":\"codex\",\"sessions\":[{\"id\":\"a\",\"agentId\":\"codex\",\"title\":\"A\",\"state\":\"working\"},{\"id\":\"b\",\"agentId\":\"claude-code\",\"title\":\"B\",\"state\":\"working\"}]}");
+  assert(s.session_queue_count==2);
+  assert(!strcmp(s.session_queue[0].agent,"codex") && !strcmp(s.session_queue[1].agent,"claude-code"));
+  /* Moving the focus keeps both Agents' cards and their order. */
+  send(&s,"{\"agentId\":\"claude-code\",\"sessions\":[{\"id\":\"a\",\"agentId\":\"codex\",\"title\":\"A\",\"state\":\"working\"},{\"id\":\"b\",\"agentId\":\"claude-code\",\"title\":\"B\",\"state\":\"working\"}]}");
+  assert(s.session_queue_count==2);
+  assert(!strcmp(s.session_queue[0].id,"a") && !strcmp(s.session_queue[1].id,"b"));
+  /* A legacy snapshot without per-item Agent retains the historical clear. */
+  send(&s,"{\"agentId\":\"codex\",\"sessions\":[{\"id\":\"c\",\"title\":\"C\",\"state\":\"working\"}]}");
+  assert(s.session_queue_count==1 && !strcmp(s.session_queue[0].id,"c"));
+  return 0;
 }
 '''
     compile_run(tmp_path, prelude + "\n".join(function(source,n) for n in names)

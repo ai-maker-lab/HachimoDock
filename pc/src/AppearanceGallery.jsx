@@ -349,10 +349,7 @@ export default function AppearanceGallery({ binding, onEnterWizard, onOpenDetail
     try {
       if (isActiveOnDevice) {
         const builtinAppearance = listBuiltinAppearances()[0];
-        if (!currentDisplay.agentId) {
-          throw new Error("当前没有可更新的 Agent 跟随主体，无法安全恢复设备默认形象。");
-        }
-        await applyDesktopPet(currentDisplay.agentId, builtinAppearance, {
+        await applyDesktopPet(builtinAppearance, {
           initialProgress: {
             text: "正在把设备恢复为内置默认形象…",
             percent: 0,

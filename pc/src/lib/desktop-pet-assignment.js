@@ -1,21 +1,6 @@
-/**
- * [Input] Current desktop-pet channel map, active appearance, selected appearance, Tauri invoke/listen adapters, verified USB status, and agent labels.
- * [Output] One fresh follow intent first observes old unknown state read-only, then performs one board/connection/boot-bound native appearance operation; native content-cache confirmation owns reuse, unknown results stop without replay, matching USB binding submission precedes profile persistence, and bridge-start failure remains a partial outcome.
- * [Pos] lib node in pc/src/lib
- * [Sync] If this file changes, update `pc/src/.folder.md` and UI callers that set desktop pets.
- */
-
-import {
-  assignAppearanceToAgent,
-  assignedAgentIds,
-  channelLabelForId,
-  saveAgentAppearanceMap,
-  saveEnabledAgents,
-} from "./agent-appearance-config.js";
-
 export const ACTIVE_APPEARANCE_KEY = "pet-manager:active-appearance-id";
 export const APPEARANCE_CHANGE_USB_REQUIRED_MESSAGE =
-  "当前渠道配置的形象与设备端当前形象不一致，请先连接 USB 线后再切换渠道和形象。";
+  "请先通过 USB 连接设备再同步形象。";
 export const CHANNEL_SWITCH_DEVICE_REQUIRED_MESSAGE =
   "切换跟随需要 USB 连接，请连接设备后重试。";
 export const APPEARANCE_SYNC_CANCELLED_MESSAGE = "形象素材传输已中断";
@@ -84,7 +69,7 @@ export async function reconcileDesktopPetAppearance({ invoke, boardDeviceId, isC
       if (attempt === 23 || performance.now() - started >= 6_000) {
         throw new Error("设备尚未完成当前操作，本次未切换；连接保持后可再次切换。");
       }
-      onProgress?.({ stage: "waiting_quiescence", text: "正在等待设备完成当前操作…", indeterminate: true, followOnly: true });
+      onProgress?.({ stage: "waiting_quiescence", text: "正在等待设备完成当前操作…", indeterminate: true, followOnly: false });
       // Short slices make user cancellation/connection retirement prompt.
       for (let slice = 0; slice < 3; slice += 1) {
         await wait(50);
@@ -125,23 +110,17 @@ export function formatBytes(bytes) {
 export async function applyDesktopPetAssignment({
   invoke,
   listen,
-  agentAppearanceMap,
-  agentId,
   appearance,
-  agentOptions,
   boardDeviceId,
   currentAppearanceId = "",
   followIntentId = createDesktopPetIntentId(),
   onProgress,
   isCurrent = () => true,
 }) {
-  if (!appearance?.id || !agentId) {
-    throw new Error("请先选择要展示的渠道和形象。");
+  if (!appearance?.id) {
+    throw new Error("请选择形象。");
   }
 
-  const nextMap = assignAppearanceToAgent(agentAppearanceMap, agentId, appearance.id);
-  const enabledAgents = assignedAgentIds(nextMap, agentId);
-  const channelLabel = channelLabelForId(agentOptions, agentId);
   const storedAppearanceId = readActiveAppearanceId();
   const activeAppearanceId = currentAppearanceId || storedAppearanceId;
   // Local IDs choose only explanatory USB-required text. Device content/cache
@@ -175,7 +154,7 @@ export async function applyDesktopPetAssignment({
   // This explicit follow click owns a NEW intent. First observe any old
   // unresolved transfer without resending it; only then begin this click's
   // normal native sync, which creates its own fresh mutation Attempt UUID.
-  onProgress?.({ stage: "confirming", text: "正在确认…", indeterminate: true, followOnly: true });
+  onProgress?.({ stage: "confirming", text: "正在确认…", indeterminate: true, followOnly: false });
   await reconcileDesktopPetAppearance({ invoke, boardDeviceId: targetBoardDeviceId, usbScope: usbStatus,
     onProgress, isCurrent: () => isCurrent(followIntentId) });
   requireCurrent();
@@ -188,20 +167,7 @@ export async function applyDesktopPetAssignment({
   }
   requireCurrent();
 
-  const profile = await invoke("load_bridge_profile");
-  const profileEnabledAgents = Array.isArray(profile.enabledAgents)
-    ? profile.enabledAgents.filter(Boolean)
-    : [];
-  const selectedAgentId = profile.selectedAgentId || profileEnabledAgents[0] || "";
-  const previousSource = profileEnabledAgents.find((id) => id && id !== agentId)
-    || (selectedAgentId && selectedAgentId !== agentId ? selectedAgentId : "");
-  const followChanged =
-    selectedAgentId !== agentId ||
-    !profileEnabledAgents.includes(agentId) ||
-    profileEnabledAgents.some((id) => id && id !== agentId);
-  let notice = appearanceChanged
-    ? `已将「${appearance.name}」设为 ${channelLabel} 渠道桌宠。`
-    : `已切换设备跟随主体为 ${channelLabel}，沿用「${appearance.name}」，无需重新传输素材。`;
+  let notice;
   // One explicit native operation per user request. Native owns fresh content
   // fingerprint/cache selection and metadata ACK; never force an upload or use a
   // local appearance ID as evidence. Any new unknown stops this intent;
@@ -246,8 +212,8 @@ export async function applyDesktopPetAssignment({
         throw new Error(result?.error || "同步失败");
       }
       notice = result?.reusedSlot
-        ? `已确认「${appearance.name}」从设备缓存切换，并提交跟随 ${channelLabel}，无需重新传输素材。`
-        : `已确认「${appearance.name}」素材并提交跟随 ${channelLabel}，USB 同步 ${result?.fileCount || 0} 个素材 (${formatBytes(result?.byteCount || 0)})`;
+        ? `已确认「${appearance.name}」从设备缓存切换，无需重新传输素材。`
+        : `已确认「${appearance.name}」素材，USB 同步 ${result?.fileCount || 0} 个素材 (${formatBytes(result?.byteCount || 0)})`;
     } catch (err) {
       const detail = err?.message || String(err);
       const unknown = detail.startsWith("APPEARANCE_RESULT_UNKNOWN:");
@@ -277,67 +243,7 @@ export async function applyDesktopPetAssignment({
   }
 
   requireCurrent();
-  // One explicit USB submission. Profile/runtime changes must not race ahead of
-  // the device step. No rollback or replay after an uncertain write result.
-  let dispatched;
-  try {
-    dispatched = await invoke("dispatch_remote_cli_binding", {
-      input: {
-        boardDeviceId: targetBoardDeviceId,
-        expectedConnectionId: confirmedUsb.connectionId,
-        expectedBootId: bootId(confirmedUsb),
-        targetDeviceId: profile.desktopDeviceId,
-        targetSource: agentId,
-        previousSource,
-        mqttNamespace: profile.mqttNamespace,
-      },
-    });
-  } catch {
-    throw new Error("本次切换结果尚未确认，请检查连接后再试。");
-  }
-  if (dispatched?.ok !== true || dispatched?.usbSent !== true
-    || dispatched.targetSource !== agentId || dispatched.targetDeviceId !== profile.desktopDeviceId
-    || dispatched.boardDeviceId !== targetBoardDeviceId) {
-    throw new Error("本次切换结果尚未确认，请检查连接后再试。");
-  }
-  requireCurrent();
-
-  if (followChanged) {
-    await invoke("save_bridge_profile", {
-      input: {
-        desktopDeviceId: profile.desktopDeviceId,
-        mqttUrl: profile.mqttUrl,
-        mqttNamespace: profile.mqttNamespace,
-        mqttUsername: profile.mqttUsername,
-        mqttPassword: profile.mqttPassword,
-        transport: profile.transport,
-        serialPort: profile.serialPort,
-        serialBaud: profile.serialBaud,
-        petChannelId: profile.petChannelId,
-        enabledAgents,
-        selectedAgentId: agentId,
-      },
-    });
-  }
-
-  saveAgentAppearanceMap(nextMap);
-  saveEnabledAgents(new Set(enabledAgents));
-  try {
-    localStorage.setItem(ACTIVE_APPEARANCE_KEY, appearance.id);
-  } catch {}
-
-  if (followChanged) {
-    try {
-      const runtime = await invoke("ensure_bridge_runtime", { input: { forceRestart: true } });
-      if (runtime?.running !== true) throw new Error("本地桥接服务未就绪");
-    } catch {
-      const error = new Error("USB 跟随指令已提交且配置已保存，但本地桥接服务未就绪；请检查桥接状态，不要重复发送设备指令。");
-      error.committedAssignment = { nextMap, enabledAgents, agentId };
-      throw error;
-    }
-  }
-
-  return { nextMap, notice };
+  return { notice };
 }
 
 export function readActiveAppearanceId() {

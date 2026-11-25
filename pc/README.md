@@ -8,6 +8,19 @@ Agent 状态跟随、语音草稿、确认发送与对话切换是不同能力�
 
 直接使用请前往 [下载页面](https://github.com/ai-maker-lab/HachimoDock/releases/latest)。以下内容面向需要自行编译或修改客户端的开发者，技术栈为 Tauri 2 + React。
 
+### 多 Agent 会话队列
+
+当前客户端可以在 PC 端启用多个 Agent，并把它们的会话合并成设备上的同一个队列。**设备和 PC 都只维护一个选中 Session**；没有独立的 Agent 焦点。选中项决定宠物动画、气泡和语音草稿目标，它的 `agentId` 只用于 `state/` 和语音路由。
+
+- 固件协议新增每项会话的 `agentId` 和选择事件 `agentId`；`sessionId` 仍是真实会话 ID，不再拼前缀。旧固件会忽略该字段，按单 Agent 语义降级运行。
+- Agent 列表只负责“加入队列 / 移出队列”；加入或移出不会单独制造 Agent 焦点。
+- 形象同步仍按原有 USB/Wi-Fi 路径独立处理，不随选中项自动切换；渠道只展示当前选中 Session 的 Agent。
+- 合并队列支持“移出队列”；最后一个 Agent 不允许移出，当前选中 Session 的来源被移出时自动落到剩余最新 Session。
+- Wi-Fi 下暂只发送当前选中 Session 的 Agent 的会话（LAN 聚合后续再做）；界面会按 USB/Wi-Fi 分别提示。
+- 审批仍是单条串行；多路审批不在本阶段。
+
+实现边界见 [多 Agent 会话队列计划](../docs/multi-agent-focus-pc-only-plan.md)。
+
 ## 环境与测试 / Requirements and tests
 
 安装 Git、Node.js 22+、Rust stable，以及 Tauri 对应平台的系统依赖。当前源码素材使用普通 Git 保存，不需要 Git LFS 额度。Windows 需要 MSVC C++ Build Tools 和 WebView2；macOS 需要 Xcode Command Line Tools。

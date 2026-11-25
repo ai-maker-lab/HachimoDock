@@ -62,3 +62,6 @@ pc/public/terrier-clips/p4-ready/*
 # Verified OTA binaries staged from the matching release.
 /pc/src-tauri/firmware/esp32-p4/*.bin
 /pc/src-tauri/firmware/esp32-p4/.staging-*/
+
+# 本地构建缓存与下载
+/.build/

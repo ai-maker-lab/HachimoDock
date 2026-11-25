@@ -4391,7 +4391,7 @@ static void draw_session_queue_uncached(
     unsigned int item_index = start + row;
     const pet_p4_session_queue_item_t *item = &state->session_queue[item_index];
     pet_bubble_text_view_t text = {0};
-    session_text(state->current_session_agent, item, now_ms, &text);
+    session_text(item->agent, item, now_ms, &text);
     bool is_selected = item_index == selected;
     int x = PET_P4_SESSION_CARD_X;
     int y = first_y + (int) row * (PET_P4_SESSION_CARD_HEIGHT + PET_P4_SESSION_CARD_GAP);
@@ -4443,7 +4443,6 @@ static uint64_t session_overlay_signature(const pet_p4_runtime_state_t *state) {
   uint64_t hash = 1469598103934665603ULL;
   uint32_t text_revision = pet_bubble_pixels_revision();
   hash = session_cache_hash_bytes(hash, &text_revision, sizeof(text_revision));
-  hash = session_cache_hash_text(hash, state->current_session_agent);
   hash = session_cache_hash_bytes(hash, &state->session_queue_count, sizeof(state->session_queue_count));
   hash = session_cache_hash_bytes(hash, &state->current_session_index, sizeof(state->current_session_index));
   hash = session_cache_hash_bytes(hash, &state->session_voice_active, sizeof(state->session_voice_active));
@@ -4453,6 +4452,7 @@ static uint64_t session_overlay_signature(const pet_p4_runtime_state_t *state) {
   for (unsigned int i = start; i < start + visible && i < PET_P4_SESSION_QUEUE_MAX; i += 1) {
     const pet_p4_session_queue_item_t *item = &state->session_queue[i];
     hash = session_cache_hash_text(hash, item->id);
+    hash = session_cache_hash_text(hash, item->agent);
     hash = session_cache_hash_text(hash, item->title);
     hash = session_cache_hash_text(hash, item->content);
     hash = session_cache_hash_text(hash, item->state);
@@ -4574,7 +4574,7 @@ static __attribute__((noinline)) void refresh_session_text_views(const pet_p4_ru
   (void)selected;
   for (unsigned int row = 0; row < visible; row++) {
     pet_bubble_text_view_t text;
-    session_text(state->current_session_agent, &state->session_queue[start + row], now_ms, &text);
+    session_text(state->session_queue[start + row].agent, &state->session_queue[start + row], now_ms, &text);
     pet_bubble_pixels_release(&text);
   }
 }

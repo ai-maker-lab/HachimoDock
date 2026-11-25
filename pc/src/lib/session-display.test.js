@@ -452,3 +452,29 @@ test("admits a stopped card only within the stop timestamp hold", () => {
   );
   assert.deepEqual(stale, []);
 });
+
+test("authoritativeAgentIds applies the 15s grace per Agent, not globally", () => {
+  const startedAt = 9_000_000;
+  const previous = [{
+    id: "active-a",
+    agentId: "codex",
+    title: "A",
+    state: "working",
+    statusUpdatedAt: startedAt,
+  }];
+
+  const first = reconcileDeviceSessionQueue(previous, [], startedAt, 8, {
+    authoritativeAgentIds: ["codex"],
+  });
+  assert.equal(first[0].state, "working");
+
+  const afterGrace = reconcileDeviceSessionQueue(first, [], startedAt + 16_000, 8, {
+    authoritativeAgentIds: ["codex"],
+  });
+  assert.equal(afterGrace[0].state, "done");
+
+  const otherAgent = reconcileDeviceSessionQueue(previous, [], startedAt + 16_000, 8, {
+    authoritativeAgentIds: ["claude-code"],
+  });
+  assert.equal(otherAgent[0].state, "working");
+});

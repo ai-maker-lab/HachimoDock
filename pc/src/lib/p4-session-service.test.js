@@ -18,6 +18,7 @@ import {
   p4SessionHasMeaningfulTitle,
   p4SessionActivitySignature,
 } from "./p4-session-service.js";
+import { deviceSessionIdentity } from "./session-display.js";
 
 test("routing sessions deduplicate by id, sort by activity, and exclude internal review tasks", () => {
   const sessions = buildP4RoutingSessions([
@@ -159,6 +160,18 @@ test("dismissed sessions return only after their activity signature changes", ()
   );
 });
 
+
+test("dismissal identity is (agentId, sessionId), not the raw id", () => {
+  const codex = { id: "task", agentId: "codex", state: "working", statusUpdatedAt: 10 };
+  const claude = { id: "task", agentId: "claude-code", state: "working", statusUpdatedAt: 10 };
+  const dismissed = { [deviceSessionIdentity(codex)]: p4SessionActivitySignature(codex) };
+
+  assert.deepEqual(filterDismissedP4Sessions([codex], dismissed), []);
+  assert.deepEqual(
+    filterDismissedP4Sessions([claude], dismissed).map((session) => session.agentId),
+    ["claude-code"],
+  );
+});
 
 test("a retired queued Agent binding never reaches native and is never replayed", async () => {
   let unblock;

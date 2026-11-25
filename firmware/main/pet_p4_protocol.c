@@ -296,14 +296,25 @@ static bool session_ids_match(const char *left, const char *right) {
   return strcmp(left_short, right_short) == 0;
 }
 
+static bool session_item_matches(
+  const pet_p4_session_queue_item_t *item,
+  const char *agent,
+  const char *session_id
+) {
+  if (!item || !session_id || !session_id[0]) return false;
+  if (!session_ids_match(item->id, session_id)) return false;
+  return !agent || !agent[0] || strcmp(item->agent, agent) == 0;
+}
+
 static pet_p4_session_queue_item_t *find_session_queue_item(
   pet_p4_session_queue_item_t *items,
   unsigned int count,
+  const char *agent,
   const char *session_id
 ) {
   if (!items || !session_id || !session_id[0]) return NULL;
   for (unsigned int i = 0; i < count; i += 1) {
-    if (session_ids_match(items[i].id, session_id)) return &items[i];
+    if (session_item_matches(&items[i], agent, session_id)) return &items[i];
   }
   return NULL;
 }
@@ -365,9 +376,13 @@ static void mark_current_session_terminal(
   unsigned long long now_ms
 ) {
   if (!state || !lifecycle_is_terminal(lifecycle)) return;
+  const char *session_agent = state->current_session_agent[0]
+    ? state->current_session_agent
+    : state->active_agent;
   pet_p4_session_queue_item_t *item = find_session_queue_item(
     state->session_queue,
     state->session_queue_count,
+    session_agent,
     session_id
   );
   if (!item && (!session_id || !session_id[0]) && state->session_queue_count > 0) {
@@ -3883,9 +3898,13 @@ static void handle_speech(pet_p4_runtime_state_t *state, const cJSON *payload) {
   }
   copy_text(state->current_status_text, sizeof(state->current_status_text), json_string(payload, "statusText"));
   if (session_id[0]) {
+    const char *session_agent = state->current_session_agent[0]
+      ? state->current_session_agent
+      : state->active_agent;
     pet_p4_session_queue_item_t *item = find_session_queue_item(
       state->session_queue,
       state->session_queue_count,
+      session_agent,
       session_id
     );
     if (item) {
@@ -3985,6 +4004,7 @@ static void handle_stats_update(pet_p4_runtime_state_t *state, const cJSON *payl
 }
 
 static char g_last_stopped_cue_session[PET_P4_SESSION_QUEUE_ID_MAX];
+static char g_last_stopped_cue_agent[PET_P4_AGENT_MAX];
 static unsigned long long g_last_stopped_cue_revision;
 
 static void handle_session_current(pet_p4_runtime_state_t *state, const cJSON *payload) {
@@ -4003,7 +4023,21 @@ static void handle_session_current(pet_p4_runtime_state_t *state, const cJSON *p
   unsigned long long index = json_u64(payload, "index", 0);
   unsigned long long count = json_u64(payload, "count", 0);
   unsigned long long now_ms = (unsigned long long) (esp_timer_get_time() / 1000ULL);
+
+  /* Snapshot from this host carries per-card Agents? Old PC builds omit it;
+   * keep their historical "clear on followed-Agent change" behavior. */
+  bool inbound_has_per_item_agent = false;
+  if (cJSON_IsArray(sessions)) {
+    const cJSON *probe = NULL;
+    cJSON_ArrayForEach(probe, sessions) {
+      if (cJSON_IsObject(probe) && json_string(probe, "agentId")[0]) {
+        inbound_has_per_item_agent = true;
+        break;
+      }
+    }
+  }
   bool agent_changed = strcmp(state->current_session_agent, agent_id) != 0;
+  bool legacy_agent_changed = agent_changed && !inbound_has_per_item_agent;
 
   state->session_snapshot_last_seen_ms = now_ms;
 
@@ -4029,6 +4063,16 @@ static void handle_session_current(pet_p4_runtime_state_t *state, const cJSON *p
         sizeof(candidate.id),
         json_string(session, "id")
       );
+      /* Per-item Agent is authoritative; older hosts omit it and fall back to
+       * the top-level focus Agent. */
+      copy_text(
+        candidate.agent,
+        sizeof(candidate.agent),
+        json_string(session, "agentId")
+      );
+      if (!candidate.agent[0]) {
+        copy_text(candidate.agent, sizeof(candidate.agent), agent_id);
+      }
       copy_text(
         candidate.title,
         sizeof(candidate.title),
@@ -4060,16 +4104,18 @@ static void handle_session_current(pet_p4_runtime_state_t *state, const cJSON *p
       if (find_session_queue_item(
             state->session_queue_staging,
             next_count,
+            candidate.agent,
             candidate.id
           )) {
         continue;
       }
 
-      pet_p4_session_queue_item_t *previous = agent_changed
+      pet_p4_session_queue_item_t *previous = legacy_agent_changed
         ? NULL
         : find_session_queue_item(
             state->session_queue,
             state->session_queue_count,
+            candidate.agent,
             candidate.id
           );
       if (previous && !candidate.content[0]) {
@@ -4137,13 +4183,20 @@ static void handle_session_current(pet_p4_runtime_state_t *state, const cJSON *p
       if (lifecycle_is(candidate.state, "stopped")
           && (!previous || !lifecycle_is(previous->state, "stopped"))) {
         bool already_played = g_last_stopped_cue_revision == candidate.transition_revision
-          && strcmp(g_last_stopped_cue_session, candidate.id) == 0;
+          && strcmp(g_last_stopped_cue_session, candidate.id) == 0
+          && strcmp(g_last_stopped_cue_agent, candidate.agent) == 0;
         if (!already_played) {
           snprintf(
             g_last_stopped_cue_session,
             sizeof(g_last_stopped_cue_session),
             "%s",
             candidate.id
+          );
+          snprintf(
+            g_last_stopped_cue_agent,
+            sizeof(g_last_stopped_cue_agent),
+            "%s",
+            candidate.agent
           );
           g_last_stopped_cue_revision = candidate.transition_revision;
           (void) pet_p4_audio_play_event_cue("session_terminated");
@@ -4153,13 +4206,13 @@ static void handle_session_current(pet_p4_runtime_state_t *state, const cJSON *p
       next_count += 1;
     }
   }
-  if (display_enabled && !agent_changed) {
+  if (display_enabled && !legacy_agent_changed) {
     unsigned int ordered_count = 0;
     for (unsigned int i = 0; i < state->session_queue_count; i += 1) {
       pet_p4_session_queue_item_t *previous = &state->session_queue[i];
       unsigned int matched_index = next_count;
       for (unsigned int j = ordered_count; j < next_count; j += 1) {
-        if (session_ids_match(state->session_queue_staging[j].id, previous->id)) {
+        if (session_item_matches(&state->session_queue_staging[j], previous->agent, previous->id)) {
           matched_index = j;
           break;
         }
@@ -4204,6 +4257,7 @@ static void handle_session_current(pet_p4_runtime_state_t *state, const cJSON *p
   pet_p4_session_queue_item_t *selected_item = find_session_queue_item(
     state->session_queue,
     state->session_queue_count,
+    agent_id,
     session_id
   );
   if (selected_item) {
@@ -4211,6 +4265,13 @@ static void handle_session_current(pet_p4_runtime_state_t *state, const cJSON *p
       (unsigned int) (selected_item - state->session_queue) + 1;
   } else if (state->current_session_index > state->session_queue_count) {
     state->current_session_index = state->session_queue_count;
+  }
+  if (state->current_session_index > 0
+      && state->current_session_index <= state->session_queue_count) {
+    const pet_p4_session_queue_item_t *selected =
+      &state->session_queue[state->current_session_index - 1];
+    copy_text(state->current_session_id, sizeof(state->current_session_id), selected->id);
+    copy_text(state->current_session_agent, sizeof(state->current_session_agent), selected->agent);
   }
   state->current_session_count = state->session_queue_count;
   if (state->session_queue_count == 0

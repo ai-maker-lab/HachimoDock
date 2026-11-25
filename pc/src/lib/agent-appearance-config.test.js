@@ -143,6 +143,22 @@ test("loadEnabledAgents keeps legacy values to a single active channel", () => {
   assert.deepEqual([...loadEnabledAgents()], ["claude-code"]);
 });
 
+test("loadEnabledAgents preserves multiple enabled Agents for the PC-only focus queue", () => {
+  installStorage({
+    [ENABLED_AGENTS_STORAGE_KEY]: JSON.stringify(["codex", "claude-code", "codex"]),
+  });
+
+  assert.deepEqual([...loadEnabledAgents()], ["codex", "claude-code"]);
+  assert.deepEqual(
+    activeDesktopAssignment(
+      { codex: "builtin-terrier", "claude-code": "custom-cloud" },
+      new Set(["codex", "claude-code"]),
+      "claude-code",
+    ),
+    { agentId: "claude-code", appearanceId: "custom-cloud" },
+  );
+});
+
 test("normalizeDetectedAgents keeps display order across scans and marks unavailable channels", () => {
   const agents = normalizeDetectedAgents([
     { id: "devin", detected: false },

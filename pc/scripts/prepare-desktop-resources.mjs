@@ -410,20 +410,43 @@ if (builtinsCheck.status !== 0) throw new Error('Built-in local-delights resourc
 // Python validation may leave bytecode containing absolute build-machine paths.
 cleanSkillBytecode(join(repositoryRoot, "pc", "skills", "petui"));
 const targetArch = requestedArch(target, process.platform, process.arch);
-const authoring = spawnSync(process.execPath,
-  [join(scriptDir, "prepare-petui-runtime.mjs"), `${target}-${targetArch}`, join(tauriRoot, "authoring-runtime-bundle")],
-  { stdio: "inherit" });
+const skipAuthoring = process.argv.includes("--skip-authoring")
+  && existsSync(join(tauriRoot, "authoring-runtime-bundle", "manifest.json"));
+const authoring = skipAuthoring
+  ? { status: 0 }
+  : spawnSync(process.execPath,
+    [join(scriptDir, "prepare-petui-runtime.mjs"), `${target}-${targetArch}`, join(tauriRoot, "authoring-runtime-bundle")],
+    { stdio: "inherit" });
 if (authoring.status !== 0) throw new Error("无法准备 PetUI 创作工具链");
+if (skipAuthoring) console.log("本地临时构建：复用现有 PetUI 创作工具链");
 
 // Validate historical non-P4 voice resources only when explicitly supplied; P4 uses native ASR.
 const voiceRuntime = prepareVoiceRuntime({tauriRoot,target,arch:targetArch});
 if(voiceRuntime.enabled)console.log("Explicit legacy voice bundle requires --config src-tauri/tauri.voice-legacy.conf.json");
 const runtimeName = target === "windows" ? "node.exe" : "node";
 const targetRuntime = join(generatedRuntime, runtimeName);
-const p4Firmware = validateBundledP4Firmware("firmware.bin", "esp32_p4_wifi6_system_settings_v1", 1, 199);
-validateBundledP4Firmware("firmware-v3.bin", "esp32_p4_wifi6_system_settings_v3", 300, 399);
-validateBundledP4Firmware("firmware-pico-v1.bin", "esp32_p4_pico_v1", 1, 199);
-validateBundledP4Firmware("firmware-pico-v3.bin", "esp32_p4_pico_v3", 300, 399);
+const firmwareProfiles = {
+  "wifi6-v1": ["firmware.bin", "esp32_p4_wifi6_system_settings_v1", 1, 199],
+  "wifi6-v3": ["firmware-v3.bin", "esp32_p4_wifi6_system_settings_v3", 300, 399],
+  "pico-v1": ["firmware-pico-v1.bin", "esp32_p4_pico_v1", 1, 199],
+  "pico-v3": ["firmware-pico-v3.bin", "esp32_p4_pico_v3", 300, 399],
+};
+// Local-only override for a single-board test build. Release packaging must
+// still validate all four reviewed images.
+const firmwareOnlyArg = process.argv.find((arg) => arg.startsWith("--firmware-only="));
+const firmwareOnly = firmwareOnlyArg?.slice("--firmware-only=".length) || "";
+let p4Firmware;
+if (firmwareOnly) {
+  if (!Object.hasOwn(firmwareProfiles, firmwareOnly)) {
+    throw new Error(`未知的 --firmware-only 目标：${firmwareOnly}`);
+  }
+  p4Firmware = validateBundledP4Firmware(...firmwareProfiles[firmwareOnly]);
+} else {
+  p4Firmware = validateBundledP4Firmware(...firmwareProfiles["wifi6-v1"]);
+  for (const name of ["wifi6-v3", "pico-v1", "pico-v3"]) {
+    validateBundledP4Firmware(...firmwareProfiles[name]);
+  }
+}
 let sourceRuntime = process.env.PET_MANAGER_NODE_BIN
   ? resolve(process.env.PET_MANAGER_NODE_BIN)
   : process.execPath;

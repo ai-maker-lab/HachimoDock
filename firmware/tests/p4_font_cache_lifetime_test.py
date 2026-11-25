@@ -15,7 +15,7 @@ def cached_cards(tmp_path_factory):
 #define PET_P4_SESSION_QUEUE_MAX 8
 #define PET_P4_AGENT_MAX 64
 #define PET_P4_SESSION_QUEUE_ID_MAX 128
-typedef struct {char id[32],title[192],content[384],state[32];} pet_p4_session_queue_item_t;
+typedef struct {char id[32],agent[64],title[192],content[384],state[32];} pet_p4_session_queue_item_t;
 typedef struct {unsigned session_queue_count,current_session_index;bool session_voice_active;char current_session_agent[64];pet_p4_session_queue_item_t session_queue[8];} card_state_t;
 static pet_p4_runtime_state_t cards;
 static bool g_session_overlay_cache_valid, cache_available=true;

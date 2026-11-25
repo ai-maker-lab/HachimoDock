@@ -1,6 +1,7 @@
 /**
- * [Input] Pure Agent Session feed reducer actions.
- * [Output] Behavioral coverage for Agent isolation, ordered terminal transitions, expiry, and deduplication.
+ * [Input] Pure Agent Session feed reducer actions plus the multi-Agent device queue.
+ * [Output] Behavioral coverage for Agent isolation, ordered terminal transitions,
+ *          60-second card retention/expiry, and deduplication.
  * [Pos] Test node for dashboard Session orchestration.
  * [Sync] If this file changes, update `pc/src/dashboard/.folder.md`.
  */
@@ -14,6 +15,7 @@ import {
   dispatchSessionTurn,
   queueSessionEvents,
 } from "./useAgentSessionFeed.js";
+import { buildMultiAgentDeviceQueue } from "../lib/agent-focus.js";
 import { deviceSessionTerminalUntilMs } from "../lib/session-display.js";
 
 function reduce(state, action) {
@@ -39,9 +41,14 @@ test("a tail completion and user attention bypass unrelated events, preserving t
   dispatchSessionTurn(pending, apply);
   assert.deepEqual(applied, [["a","working",2],["b","working",1],["b","waiting_user",2],["a","done",3]]);
   assert.equal(pending.length, 96);
-  assert.equal(deviceSessionTerminalUntilMs(state.sessions.find(s => s.id === "a")), 60003);
+  // The routing reducer no longer materializes a device queue; it stores the
+  // merged routing rows only. Terminal-card TTL belongs to the multi-Agent
+  // queue built below.
+  assert.equal(state.routingSessions.find(s => s.id === "a").state, "done");
+  assert.equal(state.sessions, undefined);
   while (pending.length) dispatchSessionTurn(pending, apply);
   assert.equal(applied.findLast(([id]) => id === "a")[1], "working");
+  assert.equal(state.routingSessions.find(s => s.id === "a").state, "working");
 });
 
 test("sustained saturation bounds retained events and preserves distinct and implicit transitions", () => {
@@ -81,7 +88,7 @@ test("equal clock times use the sequence from the same lifecycle epoch", () => {
   assert.equal(snapshot(3).routingSessions[0].state, "done");
 });
 
-test("Session feed admits active work and deduplicates an unchanged authoritative snapshot", () => {
+test("Session feed admits active work, reapplies authoritative snapshots, and deduplicates repeated events", () => {
   const working = {
     id: "session-a",
     name: "Active task",
@@ -97,15 +104,35 @@ test("Session feed admits active work and deduplicates an unchanged authoritativ
 
   assert.equal(loaded.agentId, "codex");
   assert.equal(loaded.loaded, true);
-  assert.deepEqual(loaded.sessions.map((session) => session.id), ["session-a"]);
-  assert.strictEqual(reduce(loaded, {
+  assert.deepEqual(loaded.routingSessions.map((session) => session.id), ["session-a"]);
+  assert.equal(loaded.sessions, undefined);
+
+  // Full snapshots are authoritative and must run even when the fingerprint is
+  // unchanged so concurrent event reconciliation can stay correct.
+  const repeatedSnapshot = reduce(loaded, {
     type: "replace_snapshot",
     value: [working],
     nowMs: 1000,
-  }), loaded);
+  });
+  assert.notStrictEqual(repeatedSnapshot, loaded);
+  assert.equal(repeatedSnapshot.fingerprint, loaded.fingerprint);
+  assert.deepEqual(repeatedSnapshot.routingSessions, loaded.routingSessions);
+
+  // Identical non-authoritative events do not cause Context churn.
+  const eventState = reduce(loaded, {
+    type: "apply_event",
+    value: working,
+    nowMs: 1000,
+  });
+  assert.equal(eventState.authoritativeSnapshot, false);
+  assert.strictEqual(reduce(eventState, {
+    type: "apply_event",
+    value: working,
+    nowMs: 1000,
+  }), eventState);
 });
 
-test("Session feed preserves an explicit done transition for 60 seconds and then expires it", () => {
+test("Session feed preserves an explicit done transition while the device queue expires it after 60 seconds", () => {
   const working = reduce(AGENT_SESSION_FEED_INITIAL_STATE, {
     type: "apply_event",
     value: {
@@ -128,13 +155,35 @@ test("Session feed preserves an explicit done transition for 60 seconds and then
     nowMs: 2000,
   });
 
-  assert.equal(done.sessions.length, 1);
-  assert.equal(done.sessions[0].state, "done");
-  assert.equal(deviceSessionTerminalUntilMs(done.sessions[0]), 62_000);
+  // The reducer keeps the routing row; only the multi-Agent queue assigns the
+  // terminal deadline and drops the card later.
+  assert.equal(done.routingSessions.length, 1);
+  assert.equal(done.routingSessions[0].state, "done");
+  assert.equal(done.sessions, undefined);
 
-  const expired = reduce(done, { type: "tick_terminal", nowMs: 62_001 });
-  assert.deepEqual(expired.sessions, []);
-  assert.equal(expired.routingSessions[0].id, "session-a");
+  const activeQueue = buildMultiAgentDeviceQueue({
+    routingSessions: working.routingSessions,
+    previousQueue: [],
+    nowMs: 1000,
+    limit: 8,
+  });
+  const terminalQueue = buildMultiAgentDeviceQueue({
+    routingSessions: done.routingSessions,
+    previousQueue: activeQueue,
+    nowMs: 2000,
+    limit: 8,
+  });
+  assert.equal(terminalQueue.length, 1);
+  assert.equal(terminalQueue[0].state, "done");
+  assert.equal(deviceSessionTerminalUntilMs(terminalQueue[0]), 62_000);
+
+  const expired = buildMultiAgentDeviceQueue({
+    routingSessions: [],
+    previousQueue: terminalQueue,
+    nowMs: 62_001,
+    limit: 8,
+  });
+  assert.deepEqual(expired, []);
 });
 
 test("Session feed treats Claude idle after visible work as a 60-second completion", () => {
@@ -161,17 +210,36 @@ test("Session feed treats Claude idle after visible work as a 60-second completi
     nowMs: 11_000,
   });
 
-  assert.equal(idle.sessions.length, 1);
-  assert.equal(idle.sessions[0].state, "done");
-  assert.equal(deviceSessionTerminalUntilMs(idle.sessions[0]), 71_000);
+  // The routing store carries the raw idle snapshot...
+  assert.equal(idle.routingSessions.length, 1);
+  assert.equal(idle.routingSessions[0].state, "idle");
+  // ...while the device queue converts visible work -> idle into a done card
+  // that is retained for the normal 60-second hold.
+  const activeQueue = buildMultiAgentDeviceQueue({
+    routingSessions: working.routingSessions,
+    previousQueue: [],
+    nowMs: 10_000,
+    limit: 8,
+  });
+  const terminalQueue = buildMultiAgentDeviceQueue({
+    routingSessions: idle.routingSessions,
+    previousQueue: activeQueue,
+    nowMs: 11_000,
+    limit: 8,
+  });
+  assert.equal(terminalQueue.length, 1);
+  assert.equal(terminalQueue[0].state, "done");
+  assert.equal(deviceSessionTerminalUntilMs(terminalQueue[0]), 71_000);
 });
 
-test("Session feed gates stale Agent state and replaces ownership on the next snapshot", () => {
+test("Session feed replaces ownership on the next Agent snapshot and resets cleanly", () => {
   const codex = reduce(AGENT_SESSION_FEED_INITIAL_STATE, {
     type: "replace_snapshot",
     value: [{ id: "codex-a", name: "Codex task", state: "working", statusUpdatedAt: 1000 }],
     nowMs: 1000,
   });
+  // Terminal ticking moved to the multi-Agent queue; an obsolete action must
+  // not mutate the routing store or leak another Agent's rows into it.
   assert.strictEqual(
     agentSessionFeedReducer(codex, {
       type: "tick_terminal",
@@ -192,7 +260,8 @@ test("Session feed gates stale Agent state and replaces ownership on the next sn
     dismissedSessions: {},
   });
   assert.equal(claude.agentId, "claude-code");
-  assert.deepEqual(claude.sessions.map((session) => session.id), ["claude-a"]);
+  assert.deepEqual(claude.routingSessions.map((session) => session.id), ["claude-a"]);
+  assert.equal(claude.sessions, undefined);
   assert.strictEqual(
     agentSessionFeedReducer(claude, { type: "reset" }),
     AGENT_SESSION_FEED_INITIAL_STATE,
@@ -210,7 +279,8 @@ test("Session feed keeps working lifecycle when a Codex metadata snapshot omits 
     },
     nowMs: 1000,
   });
-  assert.deepEqual(event.sessions, []);
+  assert.deepEqual(event.routingSessions.map((session) => session.id), ["codex-new"]);
+  assert.equal(event.routingSessions[0].state, "working");
 
   const snapshot = reduce(event, {
     type: "replace_snapshot",
@@ -222,5 +292,7 @@ test("Session feed keeps working lifecycle when a Codex metadata snapshot omits 
     nowMs: 2000,
   });
   assert.equal(snapshot.routingSessions[0].state, "working");
-  assert.deepEqual(snapshot.sessions.map((session) => session.id), ["codex-new"]);
+  assert.deepEqual(snapshot.routingSessions.map((session) => session.id), ["codex-new"]);
+  assert.equal(snapshot.routingSessions[0].summary, "Refactor the session router");
+  assert.equal(snapshot.sessions, undefined);
 });

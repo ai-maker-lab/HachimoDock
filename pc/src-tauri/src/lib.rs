@@ -631,6 +631,8 @@ struct SetP4SessionBindingInput {
 #[serde(rename_all = "camelCase")]
 struct P4SessionQueueInput {
     id: String,
+    #[serde(default)]
+    agent_id: String,
     title: String,
     #[serde(default)]
     cwd: String,
@@ -668,16 +670,29 @@ fn validate_p4_session_transition_metadata(
     Ok(())
 }
 
+fn p4_session_effective_agent<'a>(
+    session: &'a P4SessionQueueInput,
+    default_agent: &'a str,
+) -> &'a str {
+    let agent = session.agent_id.trim();
+    if agent.is_empty() { default_agent.trim() } else { agent }
+}
+
 fn p4_session_target_is_unique(
     session_title: &str,
     session_cwd: &str,
+    agent_id: &str,
     sessions: &[P4SessionQueueInput],
 ) -> bool {
     if session_title.is_empty() {
         return false;
     }
+    // Window titles only collide inside the selected Agent's application, so
+    // uniqueness must follow the same Agent scope as the PC composer target.
+    let selected_agent = agent_id.trim();
     let title_matches = sessions
         .iter()
+        .filter(|session| p4_session_effective_agent(session, selected_agent) == selected_agent)
         .filter(|session| session.title.trim() == session_title)
         .collect::<Vec<_>>();
     if title_matches.len() <= 1 {
@@ -1195,6 +1210,7 @@ fn voice_needs_current_composer(target: &P4SessionBinding, frontmost: bool, empt
     // Codex chats can have a visible composer before the session feed has an ID.
     // Let the existing AX bridge validate and pin the unique visible composer;
     // never synthesize an ID or navigate to another conversation here.
+    if device_voice_bound_target_is_addressable(empty_queue, target) { return false; }
     should_use_current_visible_session(frontmost, empty_queue, &target.agent_id)
         || (agent_uses_visible_composer(&target.agent_id) && target.session_id.trim().is_empty())
 }
@@ -1247,14 +1263,16 @@ fn device_voice_target_is_current(context: &DeviceVoiceContext) -> bool {
         return false;
     }
     if let Some(route) = &context.wireless_route {
-        return route.is_current() && resolve_usb_inject_agent_id() == context.target.agent_id;
+        if !route.is_current() || resolve_usb_inject_agent_id() != context.target.agent_id { return false; }
+        if context.target.session_id.is_empty() { return true; }
+        return lan_agent::voice_target(&context.board_device_id, &context.boot_id)
+            .is_some_and(|target| device_voice_binding_matches(&context.target, &target));
     }
     if !context.connection_id.is_empty() {
         let manager = context.emitter.state::<usb_serial::UsbSerialManager>();
         let status = manager.status();
         if !status.connected || status.board_device_id != context.board_device_id
             || status.connection_id != context.connection_id || status.boot_id != context.boot_id
-            || !manager.session_follow_target_is_current(&context.board_device_id, &context.connection_id, &context.target.agent_id)
         {
             return false;
         }
@@ -2336,7 +2354,6 @@ fn confirm_current_deepseek_draft(
             status.connected && status.board_device_id == expected.board_device_id
                 && status.connection_id == expected.connection_id && status.boot_id == expected.boot_id
                 && resolve_usb_inject_target(&expected.board_device_id).0 == AGENT
-                && manager.session_follow_target_is_current(&expected.board_device_id, &expected.connection_id, AGENT)
                 && CodexComposerBridge::is_agent_frontmost(AGENT)
         };
         let result = (|| -> Result<(), String> {
@@ -2455,8 +2472,9 @@ fn start_device_voice_context(
     session_queue_empty_at_start: bool,
     wireless_route: Option<lan_agent::voice::Route>,
     feedback_token: Option<u32>,
+    captured_target: Option<P4SessionBinding>,
 ) {
-    let target = if wireless_route.is_some() {
+    let target = captured_target.unwrap_or_else(|| if wireless_route.is_some() {
         P4SessionBinding {
             board_device_id: board_device_id.to_string(),
             agent_id: resolve_usb_inject_agent_id(),
@@ -2464,7 +2482,7 @@ fn start_device_voice_context(
         }
     } else {
         device_voice_target_snapshot(board_device_id)
-    };
+    });
     // Publish the capture before doing any desktop work. The USB reader can
     // then drain incoming PCM into the existing bounded pending queue.
     let use_current_visible_session = voice_needs_current_composer(
@@ -3679,6 +3697,17 @@ fn handle_incoming_usb_message_with_voice_feedback(
                 && event.get("ok").and_then(|value| value.as_bool()) == Some(true)
                 && event.get("duplicate").and_then(|value| value.as_bool()) != Some(true)
             {
+                let board = event["boardDeviceId"].as_str().unwrap_or_default();
+                let target = device_voice_target_snapshot(board);
+                if let Some(session) = payload["targetSessionId"].as_str() {
+                    if target.session_id != session || payload["targetAgentId"].as_str() != Some(target.agent_id.as_str()) {
+                        let _ = emitter.emit("voice-transcript", serde_json::json!({
+                            "phase": "error", "boardDeviceId": board,
+                            "error": "所选会话正在同步，请重新按住说话。"
+                        }));
+                        return;
+                    }
+                }
                 eprintln!("[device-voice] validated audio capture began");
                 start_device_voice_context(
                     emitter,
@@ -3697,6 +3726,7 @@ fn handle_incoming_usb_message_with_voice_feedback(
                     None,
                     device_voice_feedback::supported(&payload["_nativeUsbScope"])
                         .then(|| device_voice_feedback::token(&payload["voiceFeedbackToken"])),
+                    Some(target),
                 );
             } else if event["ok"] == false {
                 let active = active_device_voice_context()
@@ -4547,36 +4577,6 @@ async fn device_poll_pairing_result() -> Result<PairingStateResponse, String> {
 
 // ── Device availability via bridge ──
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct DispatchRemoteCliBindingInput {
-    #[serde(default)]
-    board_device_id: String,
-    expected_connection_id: String,
-    #[serde(default)]
-    expected_boot_id: String,
-    #[serde(default)]
-    target_device_id: String,
-    #[serde(default)]
-    target_source: String,
-    #[serde(default)]
-    previous_source: String,
-    #[serde(default)]
-    mqtt_namespace: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase", default)]
-struct DispatchRemoteCliBindingResponse {
-    ok: bool,
-    board_device_id: String,
-    target_device_id: String,
-    target_source: String,
-    usb_sent: bool,
-    sessions_reset: bool,
-    error: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HttpTextResponse {
@@ -4584,172 +4584,6 @@ struct HttpTextResponse {
     ok: bool,
     body: String,
     diagnostic: generation_diagnostics::Record,
-}
-
-// Pure scope admission: an IPC queued on generation A cannot become a fresh
-// follow intent merely because the same board reconnects as generation B.
-fn follow_connection_generation(
-    status: &usb_serial::UsbConnectionStatus, board: &str, expected_connection: &str, expected_boot: &str,
-) -> Result<u64, String> {
-    let generation = expected_connection.parse::<u64>().ok().filter(|n| *n > 0)
-        .ok_or_else(|| "follow connection identity missing; not submitted".to_string())?;
-    if !status.connected || status.board_device_id != board
-        || status.connection_id != generation.to_string() || status.boot_id != expected_boot
-        || (status.runtime.eq_ignore_ascii_case("esp-p4") && expected_boot.is_empty())
-    { return Err("follow USB scope changed; not submitted".into()); }
-    Ok(generation)
-}
-
-// The caller holds only the worker transaction gate. Clone metadata before IO;
-// RX/ASR callbacks must still be able to read the current binding during a send.
-fn reset_p4_session_binding_after_send(
-    binding: &Mutex<P4SessionBinding>, board: &str, source: &str,
-    send: impl FnOnce() -> Result<(), String>,
-) -> Result<bool, String> {
-    let mut next = binding.lock().map_err(|error| error.to_string())?.clone();
-    if !p4_session_agent_switch_required(&next, board, source) { return Ok(false); }
-    send()?;
-    let changed = reset_p4_session_binding_for_agent(&mut next, board, source);
-    *binding.lock().map_err(|error| error.to_string())? = next;
-    Ok(changed)
-}
-
-#[tauri::command]
-async fn dispatch_remote_cli_binding(
-    input: DispatchRemoteCliBindingInput,
-    usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
-) -> Result<DispatchRemoteCliBindingResponse, String> {
-    let usb_manager = usb_manager.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let _session_gate = p4_session_update_gate().lock().map_err(|_| "session update gate unavailable".to_string())?;
-        let namespace = normalize_topic_segment(
-            input
-                .mqtt_namespace
-                .unwrap_or_else(|| DEFAULT_NAMESPACE.to_string()),
-            DEFAULT_NAMESPACE,
-        );
-        let target_device_id = normalize_topic_segment(input.target_device_id, "");
-        let target_source_raw = input.target_source;
-        let target_source = normalize_agent_id(&target_source_raw)
-            .unwrap_or_else(|| normalize_topic_segment(target_source_raw, ""));
-        let previous_source_raw = input.previous_source;
-        let previous_source = normalize_agent_id(&previous_source_raw)
-            .unwrap_or_else(|| normalize_topic_segment(previous_source_raw, ""));
-        let requested_board_device_id = normalize_topic_segment(input.board_device_id, "");
-        if target_device_id.is_empty() || target_source.is_empty() {
-            return Err("缺少目标桌面设备或渠道。".to_string());
-        }
-
-        require_detected_follow_target(&target_source)?;
-
-        let usb_status = usb_manager.status();
-        if !usb_status.connected {
-            return Err("切换跟随需要 USB 连接，请连接设备后重试。".to_string());
-        }
-        let board_device_id = normalize_topic_segment(usb_status.board_device_id.clone(), "");
-        if board_device_id.is_empty() {
-            return Err("当前 USB 设备身份尚未确认，请稍后重试。".to_string());
-        }
-        if !requested_board_device_id.is_empty()
-            && requested_board_device_id != board_device_id
-        {
-            return Err(format!(
-                "USB 设备已变化：当前连接的是 {board_device_id}，不是目标设备 {requested_board_device_id}。"
-            ));
-        }
-
-        let connection_generation = follow_connection_generation(
-            &usb_status, &board_device_id, &input.expected_connection_id, &input.expected_boot_id)?;
-
-        let payload = serde_json::json!({
-            "command": "remote_cli_binding.update",
-            "enabled": true,
-            "targetDeviceId": target_device_id.clone(),
-            "targetSource": target_source.clone(),
-            "mqttNamespace": namespace.clone(),
-            "updatedBy": "pet-manager",
-            "tsMs": current_timestamp_ms(),
-        });
-
-        let mut warning = None;
-        if !previous_source.is_empty() && previous_source != target_source {
-            let disabled_payload = build_disabled_usb_state_payload(&previous_source);
-            let disabled_topic = format!("state/{previous_source}");
-            if let Err(error) =
-                usb_manager.send_follow_change_for_connection(&board_device_id, connection_generation, &disabled_topic, &disabled_payload)
-            {
-                warning = Some(format!("USB 清理旧渠道失败: {error}"));
-            }
-        }
-        usb_manager
-            .send_follow_change_for_connection(
-                &board_device_id,
-                connection_generation,
-                "control/remote-cli-binding",
-                &payload,
-            )
-            .map_err(|error| format!("USB 下发渠道切换失败: {error}"))?;
-
-        // Establish the new lifecycle before clearing its session queue. Old
-        // DSH lifecycle/event labels must not survive an otherwise idle follow.
-        // This is one fresh status update, never an asset mutation replay.
-        usb_manager.send_follow_change_for_connection(&board_device_id, connection_generation, &format!("state/{target_source}"), &serde_json::json!({
-            "source": &target_source,
-            "state": "idle",
-            "event": "source.follow_changed",
-            "reason": "source.follow_changed",
-            "tsMs": current_timestamp_ms(),
-        })).map_err(|_| "跟随已提交，但新渠道状态尚未确认；请检查连接，不要重复发送。".to_string())?;
-
-        let mut sessions_reset = false;
-        if usb_status.runtime.eq_ignore_ascii_case("esp-p4") {
-            sessions_reset = reset_p4_session_binding_after_send(
-                p4_session_binding(), &board_device_id, &target_source, || {
-                    usb_manager.send_session_current_for_connection(
-                        &board_device_id, connection_generation,
-                        &serde_json::json!({
-                            "sessionId": "auto", "title": "", "index": 0, "count": 0,
-                            "sessions": [], "agentId": &target_source, "activeSessionIds": [],
-                            "displayEnabled": true, "notice": "",
-                        }),
-                    ).map_err(|error| format!("USB 清理旧 Agent 会话失败: {error}"))
-                },
-            )?;
-            if sessions_reset {
-                if target_source == "antigravity" {
-                    let generation = p4_session_binding()
-                        .lock()
-                        .map_err(|_| "session binding unavailable")?
-                        .generation;
-                    *antigravity_empty_snapshot().lock().map_err(|_| "session snapshot unavailable")? =
-                        Some(AntigravityEmptySnapshot {
-                            board: board_device_id.clone(),
-                            connection: connection_generation,
-                            boot: usb_status.boot_id.clone(),
-                            binding_generation: generation,
-                        });
-                }
-                if let Ok(mut audio_binding) = pc_audio_board_binding().lock() {
-                    if audio_binding.board_device_id == board_device_id {
-                        audio_binding.generation = audio_binding.generation.wrapping_add(1).max(1);
-                        audio_binding.active_capture_id = None;
-                    }
-                }
-            }
-        }
-
-        Ok(DispatchRemoteCliBindingResponse {
-            ok: true,
-            board_device_id,
-            target_device_id,
-            target_source,
-            usb_sent: true,
-            sessions_reset,
-            error: warning,
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
 }
 
 // ── Desktop device ID ──
@@ -5208,6 +5042,51 @@ async fn set_p4_session_binding(
         .map_err(|error| error.to_string())?
 }
 
+fn build_p4_device_sessions(
+    sessions: &[P4SessionQueueInput],
+    default_agent: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut device_sessions = Vec::with_capacity(sessions.len());
+    for session in sessions {
+        let id = session.id.trim();
+        let item_agent = p4_session_effective_agent(session, default_agent);
+        let title = session.title.trim();
+        let cwd = session.cwd.trim();
+        let content = session.content.trim();
+        let state = session.state.trim().to_ascii_lowercase();
+        if id.is_empty() || id.len() > 512 {
+            return Err("设备会话 ID 无效".to_string());
+        }
+        if title.len() > 1024 {
+            return Err("设备会话名称过长".to_string());
+        }
+        if cwd.len() > 2048 {
+            return Err("设备会话工作目录过长".to_string());
+        }
+        if content.len() > 2048 {
+            return Err("设备会话进展内容过长".to_string());
+        }
+        if state.len() > 32 {
+            return Err("设备会话状态过长".to_string());
+        }
+        validate_p4_session_transition_metadata(
+            &state,
+            session.transition_revision,
+            session.terminal_remaining_ms,
+        )?;
+        device_sessions.push(serde_json::json!({
+            "id": id,
+            "agentId": item_agent,
+            "title": title,
+            "content": content,
+            "state": if state.is_empty() { "idle" } else { state.as_str() },
+            "transitionRevision": session.transition_revision,
+            "terminalRemainingMs": session.terminal_remaining_ms,
+        }));
+    }
+    Ok(device_sessions)
+}
+
 fn set_p4_session_binding_blocking(
     input: SetP4SessionBindingInput,
     usb_manager: usb_serial::UsbSerialManager,
@@ -5276,48 +5155,14 @@ fn set_p4_session_binding_blocking(
         active_session_ids.push(session_id.to_string());
     }
     let session_title_unique = input.session_title_unique
-        && p4_session_target_is_unique(session_title, session_cwd, &input.sessions);
-    let mut device_sessions = Vec::with_capacity(input.sessions.len());
-    for session in &input.sessions {
-        let id = session.id.trim();
-        let title = session.title.trim();
-        let cwd = session.cwd.trim();
-        let content = session.content.trim();
-        let state = session.state.trim().to_ascii_lowercase();
-        if id.is_empty() || id.len() > 512 {
-            return Err("设备会话 ID 无效".to_string());
-        }
-        if title.len() > 1024 {
-            return Err("设备会话名称过长".to_string());
-        }
-        if cwd.len() > 2048 {
-            return Err("设备会话工作目录过长".to_string());
-        }
-        if content.len() > 2048 {
-            return Err("设备会话进展内容过长".to_string());
-        }
-        if state.len() > 32 {
-            return Err("设备会话状态过长".to_string());
-        }
-        validate_p4_session_transition_metadata(
-            &state,
-            session.transition_revision,
-            session.terminal_remaining_ms,
-        )?;
-        device_sessions.push(serde_json::json!({
-            "id": id,
-            "title": title,
-            "content": content,
-            "state": if state.is_empty() { "idle" } else { state.as_str() },
-            "transitionRevision": session.transition_revision,
-            "terminalRemainingMs": session.terminal_remaining_ms,
-        }));
-    }
+        && p4_session_target_is_unique(session_title, session_cwd, &agent_id, &input.sessions);
+    let device_sessions = build_p4_device_sessions(&input.sessions, &agent_id)?;
 
     // Validate authoritative native follow ownership BEFORE any UI navigation
-    // or PC voice-target changes. The same generation also owns the wire write.
-    let connection_id = usb_manager.check_session_follow_target(
-        &board_device_id, &agent_id, &input.expected_connection_id, &input.expected_boot_id)?;
+    // or PC voice-target changes. The top-level Agent stays the focused Agent,
+    // so state/speech scope still matches the physical follow target.
+    let connection_id = usb_manager.check_session_connection(
+        &board_device_id, &input.expected_connection_id, &input.expected_boot_id)?;
     let mut binding = p4_session_binding()
         .lock()
         .map_err(|error| error.to_string())?.clone();
@@ -6133,8 +5978,7 @@ fn load_agent_selection() -> Result<AgentSelectionResponse, String> {
     })
 }
 
-#[tauri::command]
-fn save_agent_selection(input: AgentSelectionInput) -> Result<AgentSelectionResponse, String> {
+fn write_agent_selection(input: AgentSelectionInput) -> Result<AgentSelectionResponse, String> {
     let _profile_gate = bridge_profile_write_gate().lock().map_err(|_| "profile update unavailable".to_string())?;
     let config_path = get_bridge_profile_path()?;
     let mut profile = read_bridge_profile(&config_path)?.unwrap_or_default();
@@ -6156,6 +6000,13 @@ fn save_agent_selection(input: AgentSelectionInput) -> Result<AgentSelectionResp
         has_saved_selection: true,
         config_path: config_path.display().to_string(),
     })
+}
+
+#[tauri::command]
+fn save_agent_selection(
+    input: AgentSelectionInput,
+) -> Result<AgentSelectionResponse, String> {
+    write_agent_selection(input)
 }
 
 fn bridge_runtime_lifecycle_lock() -> &'static Mutex<()> {
@@ -12928,7 +12779,6 @@ pub fn run() {
             dsh_pair_session,
             request_codex_accessibility_permission,
             set_p4_session_binding,
-            dispatch_remote_cli_binding,
             load_bridge_profile,
             save_bridge_profile,
             load_dsh_approval_timeout,
@@ -15950,45 +15800,6 @@ mod tests {
     }
 
     #[test]
-    fn follow_reset_io_keeps_metadata_readable_and_unknown_does_not_commit() {
-        let binding = Mutex::new(P4SessionBinding {
-            board_device_id: "test-board".into(), agent_id: "workbuddy".into(),
-            session_id: "old-session".into(), generation: 4, ..P4SessionBinding::default()
-        });
-        let mut attempts = 0;
-        let failed = reset_p4_session_binding_after_send(&binding, "test-board", "codex", || {
-            attempts += 1;
-            assert!(binding.try_lock().is_ok(), "RX/ASR metadata read must not wait on wire IO");
-            Err("unknown serial result".into())
-        });
-        assert!(failed.is_err());
-        assert_eq!(attempts, 1, "unknown send must not replay");
-        assert_eq!(binding.lock().unwrap().agent_id, "workbuddy");
-        assert_eq!(binding.lock().unwrap().session_id, "old-session");
-        assert!(reset_p4_session_binding_after_send(&binding, "test-board", "codex", || {
-            assert!(binding.try_lock().is_ok());
-            Ok(())
-        }).unwrap());
-        assert_eq!(binding.lock().unwrap().agent_id, "codex");
-        assert!(binding.lock().unwrap().session_id.is_empty());
-    }
-
-    #[test]
-    fn queued_follow_cannot_rebind_to_a_reconnected_generation_of_the_same_board() {
-        let mut status = usb_serial::UsbSerialManager::new().status();
-        status.connected = true; status.runtime = "esp-p4".into();
-        status.board_device_id = "test-board".into();
-        status.connection_id = "101".into(); status.boot_id = "0123456789abcdef".into();
-        assert_eq!(follow_connection_generation(&status, "test-board", "101", "0123456789abcdef"), Ok(101));
-        status.connection_id = "102".into();
-        assert!(follow_connection_generation(&status, "test-board", "101", "0123456789abcdef").is_err());
-        status.connection_id = "101".into(); status.boot_id = "ffffffffffffffff".into();
-        assert!(follow_connection_generation(&status, "test-board", "101", "0123456789abcdef").is_err());
-        assert!(follow_connection_generation(&status, "test-board", "", "ffffffffffffffff").is_err());
-        assert!(follow_connection_generation(&status, "test-board", "0", "ffffffffffffffff").is_err());
-    }
-
-    #[test]
     fn p4_agent_switch_resets_exact_session_and_voice_target() {
         let mut current = P4SessionBinding {
             board_device_id: "p4-board-a".to_string(),
@@ -16027,10 +15838,59 @@ mod tests {
     }
 
     #[test]
+    fn p4_device_sessions_serialize_per_item_agent_and_keep_cross_agent_ids() {
+        let sessions = vec![
+            P4SessionQueueInput {
+                id: "same-id".to_string(),
+                agent_id: "codex".to_string(),
+                title: "A".to_string(),
+                cwd: String::new(),
+                content: String::new(),
+                state: "working".to_string(),
+                transition_revision: 0,
+                terminal_remaining_ms: 0,
+            },
+            P4SessionQueueInput {
+                id: "same-id".to_string(),
+                agent_id: "claude-code".to_string(),
+                title: "B".to_string(),
+                cwd: String::new(),
+                content: String::new(),
+                state: "working".to_string(),
+                transition_revision: 0,
+                terminal_remaining_ms: 0,
+            },
+            P4SessionQueueInput {
+                id: "fallback-id".to_string(),
+                agent_id: String::new(),
+                title: "C".to_string(),
+                cwd: String::new(),
+                content: String::new(),
+                state: "working".to_string(),
+                transition_revision: 0,
+                terminal_remaining_ms: 0,
+            },
+        ];
+        let payload = build_p4_device_sessions(&sessions, "claude-code").unwrap();
+        let wire = serde_json::to_value(&payload).unwrap();
+        let rows = wire.as_array().unwrap();
+        assert_eq!(rows.len(), 3, "equal ids from two Agents must not merge");
+        assert_eq!(rows[0]["id"], "same-id");
+        assert_eq!(rows[0]["agentId"], "codex");
+        assert_eq!(rows[1]["id"], "same-id");
+        assert_eq!(rows[1]["agentId"], "claude-code");
+        assert_eq!(rows[2]["agentId"], "claude-code", "missing item Agent falls back to the focus");
+        assert!(rows.iter().all(|row| {
+            row["agentId"].as_str().is_some_and(|agent| !agent.is_empty())
+        }));
+    }
+
+    #[test]
     fn p4_session_title_uses_workspace_to_disambiguate_codex_tasks() {
         let sessions = vec![
             P4SessionQueueInput {
                 id: "one".to_string(),
+                agent_id: "codex".to_string(),
                 title: "修复语音".to_string(),
                 cwd: r"D:\code\one".to_string(),
                 content: String::new(),
@@ -16040,6 +15900,7 @@ mod tests {
             },
             P4SessionQueueInput {
                 id: "two".to_string(),
+                agent_id: "codex".to_string(),
                 title: "修复语音".to_string(),
                 cwd: r"D:\code\two".to_string(),
                 content: String::new(),
@@ -16052,9 +15913,10 @@ mod tests {
         assert!(p4_session_target_is_unique(
             "修复语音",
             r"D:\code\one",
+            "codex",
             &sessions
         ));
-        assert!(!p4_session_target_is_unique("修复语音", "", &sessions));
+        assert!(!p4_session_target_is_unique("修复语音", "", "codex", &sessions));
     }
 
     #[test]
@@ -16062,6 +15924,7 @@ mod tests {
         let sessions = vec![
             P4SessionQueueInput {
                 id: "one".to_string(),
+                agent_id: "codex".to_string(),
                 title: "修复语音".to_string(),
                 cwd: r"D:\code\one".to_string(),
                 content: String::new(),
@@ -16071,6 +15934,7 @@ mod tests {
             },
             P4SessionQueueInput {
                 id: "two".to_string(),
+                agent_id: "codex".to_string(),
                 title: "修复语音".to_string(),
                 cwd: r"D:\code\one".to_string(),
                 content: String::new(),
@@ -16083,6 +15947,87 @@ mod tests {
         assert!(!p4_session_target_is_unique(
             "修复语音",
             r"D:\code\one",
+            "codex",
+            &sessions
+        ));
+    }
+
+    #[test]
+    fn duplicate_titles_across_agents_do_not_block_voice_targeting() {
+        let sessions = vec![
+            P4SessionQueueInput {
+                id: "codex".to_string(),
+                agent_id: "codex".to_string(),
+                title: "修复语音".to_string(),
+                cwd: r"D:\code\shared".to_string(),
+                content: String::new(),
+                state: "working".to_string(),
+                transition_revision: 0,
+                terminal_remaining_ms: 0,
+            },
+            P4SessionQueueInput {
+                id: "claude".to_string(),
+                agent_id: "claude-code".to_string(),
+                title: "修复语音".to_string(),
+                cwd: r"D:\code\shared".to_string(),
+                content: String::new(),
+                state: "working".to_string(),
+                transition_revision: 0,
+                terminal_remaining_ms: 0,
+            },
+        ];
+
+        assert!(p4_session_target_is_unique(
+            "修复语音",
+            r"D:\code\shared",
+            "codex",
+            &sessions
+        ));
+        assert!(p4_session_target_is_unique(
+            "修复语音",
+            r"D:\code\shared",
+            "claude-code",
+            &sessions
+        ));
+    }
+
+    #[test]
+    fn empty_item_agent_falls_back_to_the_selected_agent() {
+        let sessions = vec![
+            P4SessionQueueInput {
+                id: "one".to_string(),
+                agent_id: "codex".to_string(),
+                title: "修复语音".to_string(),
+                cwd: r"D:\code\one".to_string(),
+                content: String::new(),
+                state: "working".to_string(),
+                transition_revision: 0,
+                terminal_remaining_ms: 0,
+            },
+            P4SessionQueueInput {
+                id: "legacy".to_string(),
+                agent_id: String::new(),
+                title: "修复语音".to_string(),
+                cwd: r"D:\code\one".to_string(),
+                content: String::new(),
+                state: "idle".to_string(),
+                transition_revision: 0,
+                terminal_remaining_ms: 0,
+            },
+        ];
+
+        // The legacy row belongs to the selected Agent, so Codex now has two
+        // identical targets; other Agents still see only the fallback row.
+        assert!(!p4_session_target_is_unique(
+            "修复语音",
+            r"D:\code\one",
+            "codex",
+            &sessions
+        ));
+        assert!(p4_session_target_is_unique(
+            "修复语音",
+            r"D:\code\one",
+            "claude-code",
             &sessions
         ));
     }

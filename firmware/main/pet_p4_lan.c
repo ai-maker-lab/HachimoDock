@@ -786,7 +786,19 @@ static void handle_peer(int fd, uint8_t *cipher, uint8_t *plain, bool *handed_of
   } else if (ok && mode == LAN_STATUS_MODE) {
     if (size == 1 && (plain[0] == 2 || plain[0] == 3))
       send_component_capabilities(fd, &gcm, header, cipher, plain, deadline, plain[0] == 3);
-    else if (!size || plain[0] == 1)
+    else if (size == 1 && (plain[0] == 4 || plain[0] == 5) && !wired && atomic_load(&control_trusted)) {
+      xSemaphoreTake(lock, portMAX_DELAY);
+      lan_selection_t selected = plain[0] == 4 ? manual_selection : pressed_selection;
+      xSemaphoreGive(lock);
+      cJSON *result = cJSON_CreateObject();
+      if (result && cJSON_AddStringToObject(result, "bootId", pet_p4_boot_identity()) &&
+          cJSON_AddNumberToObject(result, "sequence", selected.generation == request_generation ? selected.sequence : 0) &&
+          cJSON_AddStringToObject(result, "agentId", selected.generation == request_generation ? selected.agent : "") &&
+          cJSON_AddStringToObject(result, "sessionId", selected.generation == request_generation ? selected.session : "") &&
+          cJSON_PrintPreallocated(result, (char *)plain, LAN_MAX_BODY, false))
+        send_sealed_response(fd, &gcm, header, cipher, plain, strlen((char *)plain), deadline);
+      cJSON_Delete(result);
+    } else if (!size || plain[0] == 1)
       send_device_status(fd, &gcm, header, cipher, plain, deadline, size == 1);
   } else if (ok && (mode == LAN_VOLUME_REQUEST || mode == LAN_VOLUME_QUERY)) {
     plain[0] = volume_result;
@@ -982,6 +994,14 @@ void pet_p4_lan_process(pet_p4_runtime_state_t *state, uint64_t now_ms) {
     /* A realtime HUD publishes pixels on this control lane while the existing
      * audio connection owns its text. This envelope leaves Agent state alone. */
     if (!status && !sessions && !speech) goto retire_snapshot;
+    const cJSON *ack = cJSON_GetObjectItemCaseSensitive(sessions, "selectionSequence");
+    if (selection_pending_until && cJSON_IsNumber(ack) &&
+        manual_selection.generation == current_generation && now_ms < selection_pending_until &&
+        (ack->valuedouble != manual_selection.sequence ||
+         !cJSON_IsString(cJSON_GetObjectItemCaseSensitive(sessions, "sessionId")) ||
+         strcmp(cJSON_GetObjectItemCaseSensitive(sessions, "sessionId")->valuestring, manual_selection.session)))
+      goto retire_snapshot;
+    selection_pending_until = 0;
     const bool source_changed = last_source[0] && strcmp(last_source, source);
     if (source_changed || (!status && have_status)) {
       pet_p4_lan_expire(state);

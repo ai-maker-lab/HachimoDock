@@ -516,7 +516,7 @@ test("desktop sidebar stays viewport-bound instead of stretching with page heigh
   assert.match(styles, /@media\s*\(max-width:\s*1080px\)[\s\S]*\.app-sidebar\s*{[\s\S]*height:\s*auto/);
 });
 
-test("device dashboard remains the management surface with one desktop-pet assignment", () => {
+test("device dashboard remains the management surface with a multi-Agent focus queue", () => {
   const dashboard = readSource("src/DeviceDashboard.jsx");
   // Channel/appearance logic now lives in ChannelMatrixCard.
   const channelMatrix = readSource("src/dashboard/ChannelMatrixCard.jsx");
@@ -526,11 +526,14 @@ test("device dashboard remains the management surface with one desktop-pet assig
   assert.doesNotMatch(channelMatrix, /className="channel-row__thumb-wrap"/);
   assert.match(channelMatrix, /agentOptions\.filter\(\(agent\) => agent\?\.id\)/);
   assert.match(channelMatrix, /BUILTIN_TERRIER_APPEARANCE_ID/);
-  assert.match(channelMatrix, /saveAgentAppearance\(agentId, appearance\.id\)/);
-  assert.match(channelMatrix, /setPendingFollow\(\{ agentId, appearance \}\)/);
-  assert.match(channelMatrix, /applyDesktopPet\(agentId, appearance/);
+  assert.match(channelMatrix, /applyDesktopPet\(appearance, \{/);
+  assert.match(channelMatrix, /const activeAgentId = currentDisplay\.agentId/);
+  assert.doesNotMatch(channelMatrix, /saveAgentAppearance/);
+  assert.doesNotMatch(channelMatrix, /applyDesktopPet\(agentId, appearance/);
   assert.match(channelMatrix, /formosa-picker__grid/);
-  assert.match(channelMatrix, /usb\?\.connected/);
+  assert.match(channelMatrix, /enableQueuedAgent\(agentId\)/);
+  assert.match(channelMatrix, /removeQueuedAgent\(agentId\)/);
+  assert.match(channelMatrix, /enabledAgents\?\.has\?\.\(agent\.id\)/);
   assert.doesNotMatch(channelMatrix, /ChannelSwitchConfirmModal/);
   assert.doesNotMatch(channelMatrix, /desktop-pet-channel-expanded__apply/);
   // Guide modal stays in the orchestrator.

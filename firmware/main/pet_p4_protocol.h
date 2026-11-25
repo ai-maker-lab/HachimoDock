@@ -74,6 +74,7 @@ bool pet_p4_protocol_asset_query_io_configure(bool (*begin)(void *),
 
 typedef struct {
   char id[PET_P4_SESSION_QUEUE_ID_MAX];
+  char agent[PET_P4_AGENT_MAX];
   char title[PET_P4_SESSION_QUEUE_TITLE_MAX];
   char content[PET_P4_SESSION_QUEUE_CONTENT_MAX];
   char state[PET_P4_SESSION_QUEUE_STATE_MAX];

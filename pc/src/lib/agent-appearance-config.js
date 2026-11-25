@@ -62,7 +62,7 @@ export const FIXED_AGENT_OPTIONS = [
 export function loadEnabledAgents() {
   try {
     const raw = localStorage.getItem(ENABLED_AGENTS_STORAGE_KEY);
-    if (raw) return toSingleAgentSet(JSON.parse(raw));
+    if (raw) return toMultiAgentSet(JSON.parse(raw));
   } catch {}
   return null;
 }
@@ -90,6 +90,13 @@ export function toSingleAgentSet(value) {
   const values = typeof value === "string" ? [value] : Array.isArray(value) ? value : [...(value || [])];
   const first = values[0];
   return first ? new Set([first]) : new Set();
+}
+
+// Multi-Agent focus keeps every enabled Agent in insertion order. The first
+// entry remains the focused Agent for the existing single-focus UI.
+export function toMultiAgentSet(value) {
+  const values = typeof value === "string" ? [value] : Array.isArray(value) ? value : [...(value || [])];
+  return new Set(values.map((id) => String(id || "").trim()).filter(Boolean));
 }
 
 export function pickFirstDetectedAgentId(agents = [], preferredAgentId = "") {
@@ -139,6 +146,8 @@ export function saveAgentAppearanceMap(map) {
 }
 
 export function assignedAgentIds(agentAppearanceMap, enabledAgents = null) {
+  const enabled = enabledAgentIds(enabledAgents);
+  if (enabled.length > 0) return enabled;
   const active = activeDesktopAssignment(agentAppearanceMap, enabledAgents);
   return active.agentId ? [active.agentId] : [];
 }
@@ -155,18 +164,26 @@ export function firstAgentIdForAppearance(agentAppearanceMap, appearanceId) {
   return Object.entries(agentAppearanceMap || {}).find(([, id]) => id === appearanceId)?.[0] || "";
 }
 
-function firstEnabledAgentId(enabledAgents) {
-  if (!enabledAgents) return "";
+export function enabledAgentIds(enabledAgents) {
+  if (!enabledAgents) return [];
   const values = typeof enabledAgents === "string"
     ? [enabledAgents]
     : Array.isArray(enabledAgents)
       ? enabledAgents
       : [...enabledAgents];
-  return values[0] || "";
+  return [...new Set(values.map((id) => String(id || "").trim()).filter(Boolean))];
 }
 
-export function activeDesktopAssignment(agentAppearanceMap, enabledAgents = null) {
-  const enabledAgentId = firstEnabledAgentId(enabledAgents);
+function firstEnabledAgentId(enabledAgents) {
+  return enabledAgentIds(enabledAgents)[0] || "";
+}
+
+export function activeDesktopAssignment(agentAppearanceMap, enabledAgents = null, activeAgentId = "") {
+  const enabled = enabledAgentIds(enabledAgents);
+  const requested = String(activeAgentId || "").trim();
+  const enabledAgentId = requested && enabled.includes(requested)
+    ? requested
+    : firstEnabledAgentId(enabledAgents);
   if (enabledAgentId) {
     return {
       agentId: enabledAgentId,

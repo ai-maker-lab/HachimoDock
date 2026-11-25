@@ -1100,6 +1100,7 @@ static void send_input_event(
     const pet_p4_session_queue_item_t *selected =
       &state->session_queue[state->current_session_index - 1];
     cJSON_AddStringToObject(payload, "sessionId", selected->id);
+    cJSON_AddStringToObject(payload, "agentId", selected->agent);
     cJSON_AddStringToObject(payload, "sessionTitle", selected->title);
     cJSON_AddNumberToObject(payload, "sessionIndex", state->current_session_index);
     cJSON_AddNumberToObject(payload, "sessionCount", state->session_queue_count);
@@ -1276,10 +1277,18 @@ static bool apply_local_action(
       state->session_queue[selected].id
     );
     copy_text(
+      state->current_session_agent,
+      sizeof(state->current_session_agent),
+      state->session_queue[selected].agent
+    );
+    copy_text(
       state->current_session_title,
       sizeof(state->current_session_title),
       state->session_queue[selected].title
     );
+#if PET_P4_SYSTEM_WIFI
+    pet_p4_lan_select_session(state);
+#endif
     state->last_update_ms = ts_ms;
     return true;
   }
@@ -1647,7 +1656,7 @@ static void dispatch_binding_event(
       if (state && !strcmp(state->screen_page, "main")
           && pet_p4_state_usb_client_connected(state, now))
         token = pet_voice_feedback_begin(&state->voice_feedback, now);
-      handled_locally = pet_p4_audio_capture_start_button(state && state->session_queue_count == 0, token) == ESP_OK;
+      handled_locally = pet_p4_audio_capture_start_button(state, token) == ESP_OK;
       if (state) {
         state->session_voice_active = handled_locally;
         if (token && !handled_locally) {

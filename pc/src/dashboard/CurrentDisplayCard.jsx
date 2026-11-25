@@ -1,5 +1,5 @@
 /**
- * [Input] useDeviceContext for binding/usb/appearances/agentAppearanceMap/agentOptions/currentDisplay/applyDesktopPet; useToast for notices.
+ * [Input] useDeviceContext for binding/usb/appearances/agentOptions/currentDisplay/applyDesktopPet; useToast for notices.
  * [Output] Region 2 of the device dashboard: large preview + 渠道 dropdown (independent) + 「更换 ▾」 formosa picker; routes per spec § 渠道与形象的独立切换.
  * [Pos] component node in pc/src/dashboard
  * [Sync] If this file changes, update `pc/src/dashboard/.folder.md`.
@@ -8,17 +8,9 @@
 import React, { useCallback, useState } from "react";
 import { ChevronDown, ImagePlus, Loader, UploadCloud, X, CheckCircle } from "lucide-react";
 import AppearancePreview from "../AppearancePreview.jsx";
-import ChannelSwitchConfirmModal from "../ChannelSwitchConfirmModal.jsx";
 import { resolveDashboardPreviewMedia } from "../lib/appearance-preview.js";
-import {
-  appearanceById,
-  channelLabelForId,
-  shouldConfirmChannelSwitch,
-} from "../lib/agent-appearance-config.js";
-import {
-  APPEARANCE_CHANGE_USB_REQUIRED_MESSAGE,
-  CHANNEL_SWITCH_DEVICE_REQUIRED_MESSAGE,
-} from "../lib/desktop-pet-assignment.js";
+import { appearanceById } from "../lib/agent-appearance-config.js";
+import { APPEARANCE_CHANGE_USB_REQUIRED_MESSAGE } from "../lib/desktop-pet-assignment.js";
 import { useDeviceContext } from "../shell/DeviceContext.jsx";
 import { useToast } from "../shell/ToastStack.jsx";
 
@@ -26,7 +18,6 @@ export default function CurrentDisplayCard() {
   const {
     usb,
     appearances,
-    agentAppearanceMap,
     agentOptions,
     currentDisplay,
     applyDesktopPet,
@@ -34,7 +25,6 @@ export default function CurrentDisplayCard() {
   const { push } = useToast();
 
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [pendingChannel, setPendingChannel] = useState(null);
   const [syncing, setSyncing] = useState(false);
 
   const currentAppearance = currentDisplay.appearance;
@@ -44,71 +34,14 @@ export default function CurrentDisplayCard() {
     (a) => a.detected || a.id === currentAgentId || a.id === "deepseek-harness",
   );
 
-  // --- Channel input -------------------------------------------------------
-  const performChannelChange = useCallback(
-    async (nextAgentId) => {
-      const nextAppearanceId =
-        agentAppearanceMap[nextAgentId] || currentDisplay.appearance?.id || "";
-      const nextAppearance = appearanceById(appearances, nextAppearanceId);
-      if (!nextAppearance) {
-        push({ tone: "warning", title: "请选择一个形象后再切换渠道" });
-        return;
-      }
-      setSyncing(true);
-      try {
-        const { notice } = await applyDesktopPet(nextAgentId, nextAppearance, {
-          onProgress: (p) => push({ tone: "info", title: p.text, ttl: 2000 }),
-        });
-        push({ tone: "success", title: notice });
-      } catch (err) {
-        const msg = err?.message || String(err);
-        const tone =
-          msg === APPEARANCE_CHANGE_USB_REQUIRED_MESSAGE ||
-          msg === CHANNEL_SWITCH_DEVICE_REQUIRED_MESSAGE
-            ? "warning"
-            : "error";
-        push({ tone, title: msg });
-      } finally {
-        setSyncing(false);
-      }
-    },
-    [agentAppearanceMap, appearances, applyDesktopPet, currentDisplay, push],
-  );
-
-  const handleChannelChange = useCallback(
-    (nextAgentId) => {
-      if (!nextAgentId || nextAgentId === currentAgentId) return;
-      // Row 3: if the target agent has no historical formosa, reuse the current
-      // appearance and skip the confirm modal. applyDesktopPet writes the
-      // fallback into agentAppearanceMap via assignAppearanceToAgent so future
-      // switches see it.
-      if (!agentAppearanceMap[nextAgentId]) {
-        performChannelChange(nextAgentId);
-        return;
-      }
-      // Existing path: rows 1 + 2 — fire confirm modal.
-      if (shouldConfirmChannelSwitch(agentAppearanceMap, nextAgentId, new Set([currentAgentId]))) {
-        setPendingChannel(nextAgentId);
-        return;
-      }
-      performChannelChange(nextAgentId);
-    },
-    [agentAppearanceMap, currentAgentId, performChannelChange],
-  );
-
-  const confirmPendingChannel = useCallback(() => {
-    if (pendingChannel) performChannelChange(pendingChannel);
-    setPendingChannel(null);
-  }, [pendingChannel, performChannelChange]);
-
   // --- Formosa input (independent) -----------------------------------------
   const performFormosaChange = useCallback(
     async (nextAppearanceId) => {
       const nextAppearance = appearanceById(appearances, nextAppearanceId);
-      if (!nextAppearance || !currentAgentId) return;
+      if (!nextAppearance) return;
       setSyncing(true);
       try {
-        const { notice } = await applyDesktopPet(currentAgentId, nextAppearance, {
+        const { notice } = await applyDesktopPet(nextAppearance, {
           onProgress: (p) => push({ tone: "info", title: p.text, ttl: 2000 }),
         });
         push({ tone: "success", title: notice });
@@ -121,7 +54,7 @@ export default function CurrentDisplayCard() {
         setSyncing(false);
       }
     },
-    [appearances, applyDesktopPet, currentAgentId, push],
+    [appearances, applyDesktopPet, push],
   );
 
   // Spec row 4: formosa change requires USB.
@@ -161,8 +94,9 @@ export default function CurrentDisplayCard() {
             <select
               className="dashboard-current-display__channel-select"
               value={currentAgentId}
-              onChange={(event) => handleChannelChange(event.target.value)}
-              disabled={syncing}
+              onChange={() => {}}
+              disabled
+              title="由当前显示的会话决定"
             >
               {detectedAgents.map((agent) => (
                 <option key={agent.id} value={agent.id}>
@@ -208,14 +142,6 @@ export default function CurrentDisplayCard() {
         />
       )}
 
-      {pendingChannel && (
-        <ChannelSwitchConfirmModal
-          currentLabel={channelLabelForId(agentOptions, currentAgentId)}
-          nextLabel={channelLabelForId(agentOptions, pendingChannel)}
-          onCancel={() => setPendingChannel(null)}
-          onConfirm={confirmPendingChannel}
-        />
-      )}
     </div>
   );
 }

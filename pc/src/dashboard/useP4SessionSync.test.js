@@ -14,6 +14,7 @@ import {
   formatDeviceSessionContent,
   formatDeviceSessionTitle,
   isDeviceSessionTargetUnique,
+  nextWifiSelectionAction,
 } from "./useP4SessionSync.js";
 
 test("empty-session notices suppress a continuous input burst until five quiet seconds", () => {
@@ -35,6 +36,27 @@ test("empty-session notice gate resets after navigation and separates device/Age
   gate.reset();
   assert.equal(gate.allow("other/b", 4), true);
   assert.equal(createMissingSessionNoticeGate().allow("other/b", 4), true);
+});
+
+test("a reported device card wins over the connection reset in the same update", () => {
+  assert.equal(nextWifiSelectionAction({
+    connectionChanged: true,
+    hasRow: true,
+    selectionKey: "board/boot/3",
+    lastSelectionKey: "",
+  }), "apply");
+  assert.equal(nextWifiSelectionAction({
+    connectionChanged: true,
+    hasRow: false,
+    selectionKey: "board/boot/3",
+    lastSelectionKey: "",
+  }), "reset");
+  assert.equal(nextWifiSelectionAction({
+    connectionChanged: false,
+    hasRow: true,
+    selectionKey: "board/boot/3",
+    lastSelectionKey: "board/boot/3",
+  }), "ignore");
 });
 
 test("P4 Session lease refreshes safely inside the firmware timeout", () => {

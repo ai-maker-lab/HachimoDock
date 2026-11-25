@@ -69,6 +69,16 @@ function normalizedSessionId(session) {
   return typeof session?.id === "string" ? session.id.trim() : "";
 }
 
+// Device-visible identity is the pair `(agentId, sessionId)`. The id alone is
+// only unique inside one Agent; merged queues must never collapse two Agents
+// that happen to report the same raw id.
+export function deviceSessionIdentity(session) {
+  const id = normalizedSessionId(session);
+  if (!id) return "";
+  const agentId = typeof session?.agentId === "string" ? session.agentId.trim() : "";
+  return `${agentId}\u0000${id}`;
+}
+
 function deviceSessionVisualIdentity(session) {
   const title = [session?.name, session?.displayTitle, session?.summary]
     .map(normalizedSessionText)
@@ -84,7 +94,9 @@ function deviceSessionVisualIdentity(session) {
   // or transcript paths; none of those fields are visible on the board. When
   // there is no body text the renderer falls back to the lifecycle state, so
   // use that same fallback here instead of disabling deduplication.
-  return JSON.stringify([title, content]);
+  // The merging layer may combine several Agents; identical title/content from
+  // two Agents are still distinct cards.
+  return JSON.stringify([session?.agentId || "", title, content]);
 }
 
 function deviceSessionSourceFreshness(session) {
@@ -194,33 +206,43 @@ export function reconcileDeviceSessionQueue(
   incomingSessions,
   nowMs = Date.now(),
   limit = 8,
-  { authoritativeSnapshot = false } = {},
+  { authoritativeSnapshot = false, authoritativeAgentIds = null } = {},
 ) {
   const now = Number(nowMs);
   const currentTime = Number.isFinite(now) ? now : Date.now();
   const queueLimit = Math.max(0, Math.floor(Number(limit) || 0));
   if (queueLimit === 0) return [];
+  const authoritativeAgents = authoritativeAgentIds
+    ? authoritativeAgentIds instanceof Set
+      ? authoritativeAgentIds
+      : new Set(authoritativeAgentIds)
+    : null;
+  const authoritativeForAgent = (session) => {
+    if (authoritativeSnapshot) return true;
+    const agentId = typeof session?.agentId === "string" ? session.agentId.trim() : "";
+    return Boolean(agentId && authoritativeAgents?.has(agentId));
+  };
 
   const incoming = Array.isArray(incomingSessions) ? incomingSessions : [];
   const incomingById = new Map();
   for (const session of incoming) {
-    const id = normalizedSessionId(session);
-    if (id && !incomingById.has(id)) incomingById.set(id, session);
+    const identity = deviceSessionIdentity(session);
+    if (identity && !incomingById.has(identity)) incomingById.set(identity, session);
   }
 
   const candidates = [];
   const addedIds = new Set();
   const append = (session) => {
-    const id = normalizedSessionId(session);
-    if (!id || addedIds.has(id)) return;
-    addedIds.add(id);
+    const identity = deviceSessionIdentity(session);
+    if (!identity || addedIds.has(identity)) return;
+    addedIds.add(identity);
     candidates.push(session);
   };
 
   for (const previous of Array.isArray(previousSessions) ? previousSessions : []) {
-    const id = normalizedSessionId(previous);
-    if (!id) continue;
-    const current = incomingById.get(id);
+    const identity = deviceSessionIdentity(previous);
+    if (!identity) continue;
+    const current = incomingById.get(identity);
     if (isActiveDeviceSession(current)) {
       append(withTransitionMetadata(previous, current, currentTime));
       continue;
@@ -260,7 +282,7 @@ export function reconcileDeviceSessionQueue(
     // freshly-created transcript for a few passes, so require continuous
     // absence before removing an otherwise active card.
     if (isActiveDeviceSession(previous) && !current) {
-      if (!authoritativeSnapshot) {
+      if (!authoritativeForAgent(previous)) {
         append(previous);
         continue;
       }
@@ -334,11 +356,11 @@ export function reconcileDeviceSessionQueue(
     dedupedCandidates
       .filter(isActiveDeviceSession)
       .slice(0, queueLimit)
-      .map(normalizedSessionId),
+      .map(deviceSessionIdentity),
   );
   for (const session of dedupedCandidates) {
     if (selectedIds.size >= queueLimit) break;
-    selectedIds.add(normalizedSessionId(session));
+    selectedIds.add(deviceSessionIdentity(session));
   }
-  return dedupedCandidates.filter((session) => selectedIds.has(normalizedSessionId(session)));
+  return dedupedCandidates.filter((session) => selectedIds.has(deviceSessionIdentity(session)));
 }

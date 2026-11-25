@@ -479,7 +479,7 @@ def test_session_cache_signature_tracks_pixel_arrival_without_text_change(tmp_pa
 #include <stddef.h>
 #include <string.h>
 #define PET_P4_SESSION_QUEUE_MAX 4
-typedef struct {char id[16],title[16],content[16],state[16];} pet_p4_session_queue_item_t;
+typedef struct {char id[16],agent[16],title[16],content[16],state[16];} pet_p4_session_queue_item_t;
 typedef struct {unsigned session_queue_count,current_session_index;bool session_voice_active;char current_session_agent[64];pet_p4_session_queue_item_t session_queue[4];} pet_p4_runtime_state_t;
 static uint32_t revision;
 static uint32_t pet_bubble_pixels_revision(void){return revision;}
@@ -493,7 +493,7 @@ int main(void){
  assert(session_overlay_signature(&state)==old);
  revision++;uint64_t arrived=session_overlay_signature(&state);
  assert(arrived!=old&&session_overlay_signature(&state)==arrived);
- strcpy(state.current_session_agent,"other");
+ strcpy(state.session_queue[0].agent,"other");
  assert(session_overlay_signature(&state)!=arrived);
  return 0;
 }

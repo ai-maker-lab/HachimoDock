@@ -7567,26 +7567,6 @@ select:focus-visible {
   width: min(520px, 100%) !important;
 }
 
-.channel-switch-confirm-modal {
-  width: min(620px, 100%);
-}
-
-.channel-switch-confirm-modal__body {
-  padding: 18px 20px 10px;
-}
-
-.channel-switch-confirm-modal__message {
-  margin-top: 0;
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-}
-
-.channel-switch-confirm-modal__message svg {
-  flex: 0 0 auto;
-  margin-top: 3px;
-}
-
 .channel-switch-confirm-modal__actions {
   display: flex;
   justify-content: flex-end;
@@ -13860,27 +13840,61 @@ select:focus-visible {
   min-width: 0;
 }
 
-.channel-row__follow-current {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted);
-}
-
-.channel-row__unavailable {
+.channel-row__toggle {
   display: inline-flex;
   align-items: center;
-  min-height: 28px;
-  padding: 0 8px;
+  padding: 3px;
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-pill);
   background: var(--surface-muted);
-  color: var(--text-faint);
-  font-size: 11px;
-  font-weight: 650;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
-.channel-row__follow-button {
-  min-width: 64px;
+.channel-row__toggle:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+.channel-row__toggle.is-on {
+  border-color: color-mix(in srgb, var(--accent) 38%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.channel-row__toggle-track {
+  position: relative;
+  display: inline-block;
+  width: 30px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--line-strong);
+  transition: background 0.15s ease;
+}
+
+.channel-row__toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgba(20, 21, 26, 0.28);
+  transition: transform 0.15s ease;
+}
+
+.channel-row__toggle.is-on .channel-row__toggle-track {
+  background: var(--accent);
+}
+
+.channel-row__toggle.is-on .channel-row__toggle-thumb {
+  transform: translateX(12px);
+}
+
+.channel-row__toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .channel-row__action-change {

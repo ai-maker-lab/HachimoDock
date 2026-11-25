@@ -18,6 +18,34 @@ static struct {
 } lan_voice;
 static atomic_uint voice_mic_token;
 
+typedef struct {
+  char agent[PET_P4_AGENT_MAX];
+  char session[PET_P4_SESSION_QUEUE_ID_MAX];
+  uint32_t sequence, generation;
+} lan_selection_t;
+static lan_selection_t manual_selection, pressed_selection;
+/* UI task only. Bound a local encoder selection until the PC acknowledges it. */
+static uint64_t selection_pending_until;
+
+static void capture_selection(lan_selection_t *target, const pet_p4_runtime_state_t *state) {
+  memcpy(target->agent, state->current_session_agent, sizeof(target->agent));
+  memcpy(target->session, state->current_session_id, sizeof(target->session));
+  target->generation = generation;
+}
+
+void pet_p4_lan_select_session(const pet_p4_runtime_state_t *state) {
+  if (!lock || atomic_load(&usb_client_active)) return;
+  xSemaphoreTake(lock, portMAX_DELAY);
+  if (paired && atomic_load(&control_trusted) && client_seen_ms &&
+      clock_ms() - client_seen_ms < LAN_LEASE_MS) {
+    capture_selection(&manual_selection, state);
+    manual_selection.sequence++;
+    selection_pending_until = clock_ms() + LAN_LEASE_MS;
+  }
+  xSemaphoreGive(lock);
+}
+
+
 bool pet_p4_lan_voice_press(const pet_p4_runtime_state_t *state, uint8_t button, uint64_t now) {
   if (!lock || xSemaphoreTake(lock, 0) != pdTRUE) return false;
   bool allowed = paired && !atomic_load(&forget_pending) &&
@@ -28,6 +56,8 @@ bool pet_p4_lan_voice_press(const pet_p4_runtime_state_t *state, uint8_t button,
   if (allowed) {
     if (!++lan_voice.token) ++lan_voice.token;
     lan_voice.generation = generation;
+    capture_selection(&pressed_selection, state);
+    pressed_selection.sequence = lan_voice.token;
     lan_voice.button = button;
     lan_voice.pressed = now;
     lan_voice.released = lan_voice.confirmed = 0;

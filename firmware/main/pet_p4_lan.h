@@ -48,6 +48,7 @@ bool pet_p4_lan_app_event(uint32_t token, const cJSON *event);
 void pet_p4_lan_start(void);
 void pet_p4_lan_add_diagnostics(cJSON *out);
 void pet_p4_lan_usb_active(void);
+void pet_p4_lan_select_session(const pet_p4_runtime_state_t *state);
 bool pet_p4_lan_realtime_press(const pet_p4_runtime_state_t *state, uint64_t pressed_ms, uint64_t now_ms);
 bool pet_p4_lan_voice_press(const pet_p4_runtime_state_t *state, uint8_t button, uint64_t now_ms);
 void pet_p4_lan_voice_button(uint8_t button, bool held);

@@ -75,7 +75,7 @@ esp_err_t pet_p4_audio_set_enabled(bool enabled);
  * prevents new admitted background FS work, not hard preemption of in-flight
  * flash calls, and does not alter audio format/DSP scheduling parameters. */
 esp_err_t pet_p4_audio_capture_start(bool session_queue_empty);
-esp_err_t pet_p4_audio_capture_start_button(bool session_queue_empty, uint32_t feedback_token);
+esp_err_t pet_p4_audio_capture_start_button(const pet_p4_runtime_state_t *state, uint32_t feedback_token);
 void pet_p4_audio_feedback_sync(pet_p4_runtime_state_t *state, uint64_t now_ms);
 esp_err_t pet_p4_audio_capture_stop(void);
 esp_err_t pet_p4_audio_capture_start_owned(bool session_queue_empty,const char *owner);
