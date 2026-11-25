@@ -1,6 +1,7 @@
 /** Short, shared voice instructions; key names follow the current device mapping. */
 import React from "react";
 import { useUsageHelp } from "./shell/DeviceContext.jsx";
+import DisclosurePanel from "./shell/DisclosurePanel.jsx";
 
 export default function UsageHelp({ mode = "chat", help: override, onOpenApiSettings }) {
   const current = useUsageHelp();
@@ -11,8 +12,7 @@ export default function UsageHelp({ mode = "chat", help: override, onOpenApiSett
       <p>{help.voice} {help.confirm}</p>
     </> : <p>{help.chat} 首次使用，请先配置语音服务和对话大模型。</p>}
     {help.pending && <p className="usage-help__notice">按键配置有修改，以上提示在同步到设备后生效。</p>}
-    <details>
-      <summary>如何使用</summary>
+    <DisclosurePanel summary="如何使用">
       <p>请保持设备连接电脑，并让 Pet Manager 持续运行。</p>
       {mode === "voice" ? <>
         <p>Agent 已在前台时，输入到当前对话；未在前台时，会打开 Agent，并优先进入设备选中的会话。设备没有会话时，使用 Agent 当前对话。</p>
@@ -25,6 +25,6 @@ export default function UsageHelp({ mode = "chat", help: override, onOpenApiSett
         <p>派发时会把本次语音对话上下文同步到目标 Agent 聊天中，用于理解后续补充与确认。宠物说“已派发”应以实际任务回执为准；完成通知后的“好的”不会作为重新执行的要求。</p>
       </>}
       {onOpenApiSettings && <button type="button" className="btn-ghost btn-sm" onClick={onOpenApiSettings}>去配置</button>}
-    </details>
+    </DisclosurePanel>
   </div>;
 }

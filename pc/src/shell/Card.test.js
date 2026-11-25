@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, "Card.jsx"), "utf8");
+const regionSource = readFileSync(join(here, "RegionCard.jsx"), "utf8");
 
 test("Card exports a default React component", () => {
   assert.match(source, /export default function Card\s*\(/);
@@ -23,15 +24,15 @@ test("Card exposes Collapsible as a static property", () => {
 });
 
 test("Card uses the documented class names", () => {
-  assert.match(source, /className="card"/);
-  assert.match(source, /className="card__header"/);
-  assert.match(source, /className="card__title"/);
-  assert.match(source, /className="card__body"/);
+  assert.match(source, /<RegionCard/);
+  assert.match(regionSource, /className="region-card__header card__header"/);
+  assert.match(regionSource, /className="region-card__title card__title"/);
+  assert.match(regionSource, /className="region-card__body card__body"/);
 });
 
 test("Card only renders header when title/subtitle/actions provided", () => {
   // The header should be conditionally rendered to keep cards tight when used as plain containers.
-  assert.match(source, /title\s*\|\|\s*subtitle\s*\|\|\s*actions/);
+  assert.match(regionSource, /title\s*\|\|\s*subtitle\s*\|\|\s*actions/);
 });
 
 test("Card does not accept a tone/variant prop (status lives in body banners/chips)", () => {

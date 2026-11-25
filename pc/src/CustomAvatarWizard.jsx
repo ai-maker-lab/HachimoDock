@@ -472,7 +472,7 @@ export function AvatarWizardStep1({
   const imageImport = useReferenceImageImport(onFileChange);
   const pickFile = () => imageImport.native ? imageImport.action("file") : onPickClick();
   return (
-    <div className="ca-card">
+    <div className="ca-card region-card">
       <h3>{title}</h3>
       <div
         className="dropzone"
@@ -600,7 +600,7 @@ export function AvatarWizardStep2({
   const [modelReady, setModelReady] = useState(false);
 
   return (
-    <div className="ca-card">
+    <div className="ca-card region-card">
       <h3>{title}</h3>
       <div className="provider-grid">
         {VIDEO_PROVIDERS.map((item) => (

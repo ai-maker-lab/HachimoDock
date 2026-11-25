@@ -104,7 +104,7 @@ export default function SmartHome() {
       <button className="btn btn-primary" disabled={busy} onClick={() => run(async () => { const r = await request("login"); setLogin(r.url); await invoke("open_external_url", { url: r.url }); })}>连接米家账号</button>
       {login && <div className="home-auth"><p>在浏览器完成米家授权，然后将授权结果粘贴到下方。</p><button className="btn" onClick={() => invoke("open_external_url", { url: login }).catch(e => setError(String(e)))}>重新打开授权页</button><label htmlFor="home-authorization-result">授权结果或回调链接</label><input {...secretInputProps} id="home-authorization-result" aria-label="授权结果" value={payload} onChange={e => setPayload(e.target.value)} placeholder="粘贴授权结果或回调链接（仅用于本次连接）" /><button className="btn btn-primary" disabled={busy || !payload.trim()} onClick={() => run(async () => { await request("authorize", { payload }); setPayload(""); setLogin(""); await refresh(); await request("sync"); })}>完成连接</button></div>}
     </div></Card> : <>
-      <section className="home-connection" aria-label="家庭连接状态">
+      <section className="home-connection region-card" aria-label="家庭连接状态">
         <div className="home-connection-row">
           <div className="home-connection-status">
             <strong>家庭已连接</strong>

@@ -9,7 +9,7 @@
  */
 
 import React, { useState } from "react";
-import { ChevronDown, UploadCloud, Mic, Usb } from "lucide-react";
+import { UploadCloud, Mic, Usb } from "lucide-react";
 import {
   BUTTON_FUNCTION_OPTIONS,
   VOICE_KEY_PRESETS,
@@ -340,37 +340,30 @@ export default function BoardButtonPanel({
                             {allowedOptions[0]?.label || actionOptionById(row.defaultAction).label}
                           </span>
                         ) : (
-                          <span className="voice-button-action-select-shell">
-                            <select
-                              id={fieldId}
-                              className="voice-button-action-select"
-                              value={currentActionId}
-                              aria-label={`${friendlyControlLabel(group.label)}${gestureLabel(row, group)}功能`}
-                              onChange={(event) => onButtonActionChange(row, event.target.value)}
-                            >
-                              {allowedOptions.map((option) => {
-                                const requiresLongPress = option.id === "voice_ptt" && isShortPress;
-                                const disabledReason = requiresLongPress
-                                  ? "需要长按"
-                                  : "";
-                                return (
-                                  <option
-                                    key={option.id}
-                                    value={option.id}
-                                    disabled={Boolean(disabledReason)}
-                                    title={disabledReason || undefined}
-                                  >
-                                    {option.label}{disabledReason ? `（${disabledReason}）` : ""}
-                                  </option>
-                                );
-                              })}
-                            </select>
-                            <ChevronDown
-                              className="voice-button-action-select-shell__chevron"
-                              size={14}
-                              aria-hidden="true"
-                            />
-                          </span>
+                          <select
+                            id={fieldId}
+                            className="ui-control"
+                            value={currentActionId}
+                            aria-label={`${friendlyControlLabel(group.label)}${gestureLabel(row, group)}功能`}
+                            onChange={(event) => onButtonActionChange(row, event.target.value)}
+                          >
+                            {allowedOptions.map((option) => {
+                              const requiresLongPress = option.id === "voice_ptt" && isShortPress;
+                              const disabledReason = requiresLongPress
+                                ? "需要长按"
+                                : "";
+                              return (
+                                <option
+                                  key={option.id}
+                                  value={option.id}
+                                  disabled={Boolean(disabledReason)}
+                                  title={disabledReason || undefined}
+                                >
+                                  {option.label}{disabledReason ? `（${disabledReason}）` : ""}
+                                </option>
+                              );
+                            })}
+                          </select>
                         )}
                         {row.id === "p4_sw3_long" && currentActionId !== row.defaultAction && (
                           <div className="board-button-control-field__prompt">
@@ -388,7 +381,7 @@ export default function BoardButtonPanel({
                         {currentActionId === "voice_key_forward" && (
                           <label className="board-button-control-field__prompt">
                             <span>电脑语音快捷键</span>
-                            <select value={(VOICE_KEY_PRESETS.some(preset => preset.id === buttonValues[row.id]) || decodeBluetoothShortcut(buttonValues[row.id])) ? buttonValues[row.id] : defaultVoiceKeyPreset()}
+                            <select className="ui-control" value={(VOICE_KEY_PRESETS.some(preset => preset.id === buttonValues[row.id]) || decodeBluetoothShortcut(buttonValues[row.id])) ? buttonValues[row.id] : defaultVoiceKeyPreset()}
                               onChange={event => onButtonValueChange(row, event.target.value)}>
                               {decodeBluetoothShortcut(buttonValues[row.id]) && <option value={buttonValues[row.id]}>旧版自定义组合键</option>}
                               {VOICE_KEY_PRESETS.map(preset => <option key={preset.id} value={preset.id}>{preset.label}</option>)}

@@ -203,7 +203,7 @@ test("voice button configuration groups physical controls before device sync", (
 
   assert.match(source, /board-button-control-groups/);
   assert.match(source, /groupControlRows/);
-  assert.match(source, /voice-button-action-select/);
+  assert.match(source, /className="ui-control"/);
   assert.match(source, /buttonControlRowsForRuntime\(runtime\)/);
   assert.match(source, /controlGroups\.map/);
   assert.match(source, /group\.rows\.map/);

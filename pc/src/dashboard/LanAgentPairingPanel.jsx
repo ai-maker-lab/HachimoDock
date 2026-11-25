@@ -3,6 +3,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { useDeviceContext } from "../shell/DeviceContext.jsx";
 import Card from "../shell/Card.jsx";
+import DisclosurePanel from "../shell/DisclosurePanel.jsx";
 import "./wifi-pairing.css";
 import { boundedLanRead, matchesUsbPeer, publishLanAgentPairing } from "./lanAgentPairing.js";
 import { useExitProtection } from "../lib/exit-protection.js";
@@ -290,14 +291,13 @@ export default function LanAgentPairingPanel({ usb, active = true, maintenanceRe
         {busy === "pair" && <p role="status">正在建立连接并保存配对。</p>}
       </section>
 
-      <details>
-        <summary>如何连接设备</summary>
+      <DisclosurePanel summary="如何连接设备">
         <ol>
           <li>在设备上长按 3 键，或从组件中心打开系统设置。</li>
           <li>进入 Wi-Fi 配置，选择网络并输入密码。</li>
           <li>让电脑加入同一局域网，在上方选择设备并确认配对。下次启动时，没有 USB 连接就会自动连接上次配对的设备。</li>
         </ol>
-      </details>
+      </DisclosurePanel>
 
       {(address || maintenanceRequest > 0) && <details ref={maintenance}>
         <summary>设备维护与配对管理</summary>

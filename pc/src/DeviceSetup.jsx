@@ -152,7 +152,7 @@ export default function DeviceSetup({ onComplete, onOpenPairing } = {}) {
   if (!hasTauriRuntime()) {
     return (
       <div className="setup--wizard usb-setup">
-        <section className="usb-setup-card">
+        <section className="usb-setup-card region-card">
           <span className="usb-setup-card__icon">
             <Usb size={28} />
           </span>
@@ -168,7 +168,7 @@ export default function DeviceSetup({ onComplete, onOpenPairing } = {}) {
 
   return (
     <div className="setup--wizard usb-setup">
-      <section className="usb-setup-card" aria-live="polite">
+      <section className="usb-setup-card region-card" aria-live="polite">
         <div className={`usb-setup-card__icon usb-setup-card__icon--${phase}`}>
           {phase === "connected"
             ? <CheckCircle2 size={30} />

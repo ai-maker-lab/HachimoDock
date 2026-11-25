@@ -58,9 +58,9 @@ body,.app-shell,.app-main,.app-content {
   gap:4px;
 }
 .sidebar-nav__item {
-  border-radius:4px;
+  border-radius:8px;
   font-size:13px;
-  min-height:40px;
+  min-height:36px;
 }
 .sidebar-nav__item.is-active {
   box-shadow:none!important;
@@ -491,6 +491,12 @@ dialog.devin-config-dialog {
   color: var(--accent-ink);
   background-color: var(--accent-soft);
 }
+.app-shell .candidate-card__select:hover:not(:disabled):not([aria-disabled="true"]) {
+  background-color: transparent;
+}
+.app-shell .appearance-card-main[role="button"]:hover:not(:disabled):not([aria-disabled="true"]) {
+  background-color: transparent;
+}
 .app-shell :is(.btn-primary, .button--primary, .btn--primary, .companion-hero .action):hover:not(:disabled),
 .modal-backdrop :is(.btn-primary, .button--primary):hover:not(:disabled) {
   color: var(--text-on-accent);
@@ -530,7 +536,8 @@ dialog.devin-config-dialog {
   background-color: var(--accent-soft);
 }
 .app-shell .app-sidebar .sidebar-nav button[aria-current="page"] {
-  background-color: rgb(0 0 0 / 3%);
+  background-color: rgb(0 0 0 / 7%);
+  border-radius: 8px;
 }
 .app-sidebar .sidebar-nav button[aria-current="page"] svg {
   color: var(--accent);

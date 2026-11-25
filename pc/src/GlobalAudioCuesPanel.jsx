@@ -88,7 +88,7 @@ export default function GlobalAudioCuesPanel({usb,wifi,boardDeviceId,currentFami
  }
  return <section className="detail-side-section detail-side-section--audio"><div className="detail-audio-config">
   <div className="detail-audio-config__header"><span><Volume2 size={15}/>全局提示音</span><span className="muted small">所有形象通用</span></div>
-  <select className="ui-control ui-control--select" aria-label="提示音状态" value={family} disabled={busy} onChange={e=>setFamily(e.target.value)}>{GLOBAL_AUDIO_STATES.map(f=><option key={f} value={f}>{appearanceStateLabel(f)}</option>)}</select>
+  <select className="ui-control" aria-label="提示音状态" value={family} disabled={busy} onChange={e=>setFamily(e.target.value)}>{GLOBAL_AUDIO_STATES.map(f=><option key={f} value={f}>{appearanceStateLabel(f)}</option>)}</select>
   {url?<audio className="detail-audio-config__player" src={url} controls/>:<div className="muted small">此状态未设置提示音</div>}
   <div className="detail-audio-config__actions"><input id={id} type="file" accept=".wav,audio/wav" className="detail-audio-config__input" disabled={busy} onChange={upload}/>
    <label className={`btn-ghost${busy?' is-disabled':''}`} htmlFor={busy?undefined:id}><Upload size={14}/>上传 WAV</label>

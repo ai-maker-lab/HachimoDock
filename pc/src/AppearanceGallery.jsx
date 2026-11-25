@@ -520,7 +520,7 @@ export default function AppearanceGallery({ binding, onEnterWizard, onOpenDetail
           </div>
         </div>
       ) : (
-        <div className="appearance-grid">
+        <div className="appearance-grid region-card">
           {items.map((row) => (
             <AppearanceCard
               key={row.id}

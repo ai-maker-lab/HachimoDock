@@ -121,7 +121,7 @@ test("The editable rows come from the connected runtime and keep the shared acti
   assert.match(source, /group\.rows\.map/);
   assert.match(source, /BUTTON_FUNCTION_OPTIONS\.filter/);
   assert.match(source, /board-button-control-groups/);
-  assert.match(source, /voice-button-action-select/);
+  assert.match(source, /className="ui-control"/);
 });
 
 test("Every physical control and all twelve gestures stay visible at once", () => {
