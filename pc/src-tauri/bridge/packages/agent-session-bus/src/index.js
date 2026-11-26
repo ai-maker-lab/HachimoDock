@@ -11,6 +11,7 @@ const { MiMoCodeAdapter } = require("./adapters/mimocode");
 const { WorkBuddyAdapter } = require("./adapters/workbuddy");
 const { DevinAdapter } = require("./adapters/devin");
 const { DshAdapter } = require("./adapters/dsh");
+const { CursorAgentAdapter } = require("./adapters/cursor-agent");
 const { defaultLog } = require("./log");
 const { readPort } = require("./env");
 
@@ -62,4 +63,5 @@ module.exports = {
   WorkBuddyAdapter,
   DevinAdapter,
   DshAdapter,
+  CursorAgentAdapter,
 };

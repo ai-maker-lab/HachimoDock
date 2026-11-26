@@ -120,7 +120,9 @@ function mapCodexStateToStatus(state, event, completedWork) {
 
 function normalizeAgentId(value) {
   if (typeof value !== "string" || !value.trim()) return "claude-code";
-  return normalizeTopicPart(value.trim().toLowerCase(), "claude-code");
+  const normalized = normalizeTopicPart(value.trim().toLowerCase(), "claude-code");
+  if (normalized === "cursor" || normalized === "cursor-agent") return "cursor-agent";
+  return normalized;
 }
 
 function mapClawdStateToStatus(state, event) {
@@ -1667,6 +1669,8 @@ function publishClawdState(config, payload) {
   const tokenUsage = extractTokenUsageFromPayload(payload);
   const display = source === "claude-code"
     ? buildClaudeHookDisplay(payload, status, event)
+    : source === "cursor-agent"
+      ? buildCursorHookDisplay(payload, status, event)
     : source === "mimocode"
       ? buildMiMoCodeHookDisplay(payload, status, event)
       : source === "workbuddy"
@@ -1718,6 +1722,24 @@ function publishClawdState(config, payload) {
 
   const enriched = enrichPayloadMetrics(config.metricsTracker, out);
   config.publisher.publishSource(enriched);
+}
+
+function buildCursorHookDisplay(payload, status, event) {
+  const cwd = typeof payload?.cwd === "string" ? payload.cwd : "";
+  const folder = cwd ? path.basename(cwd) : "";
+  const title = compactHookText(payload?.session_title, 120) || (folder ? `Cursor · ${folder}` : "Cursor");
+  const toolName = compactHookText(payload?.tool_name, 80);
+  let content = "";
+  if (event === "UserPromptSubmit") content = "正在思考";
+  else if (event === "PreToolUse" || event === "PostToolUse") content = toolName ? `正在执行 ${toolName}` : "正在执行任务";
+  else if (event === "Stop") content = "已完成";
+  else if (event === "StopFailure") content = "执行失败";
+  else if (status === "working") content = "正在处理";
+  else if (status === "done") content = "已完成";
+  else if (status === "error") content = "执行失败";
+  else if (status === "idle" || status === "sleeping") content = "等待任务";
+  if (!title && !content) return undefined;
+  return { title: compactHookText(title, 120), content, status, event, updatedAtMs: Date.now() };
 }
 
 function buildWorkBuddyHookDisplay(payload, status, event) {
@@ -1792,6 +1814,20 @@ function syncHooks(port, autoStart, options = {}) {
   });
   worker.unref();
   return worker;
+}
+
+function shouldPublishHookState(config, agentId) {
+  // Claude hook sync stays off unless Claude is enabled. Cursor still reports
+  // through the same hook endpoint, and that working state has to reach the
+  // device even when no other hook-based agent is selected.
+  const normalized = normalizeAgentId(agentId);
+  return Boolean(
+    config?.http?.syncHooks
+    || config?.mimocode?.enabled
+    || config?.workbuddy?.enabled
+    || normalized === "devin"
+    || normalized === "cursor-agent"
+  );
 }
 
 function isAgentBusyState(state) {
@@ -2353,8 +2389,7 @@ async function main() {
     strictPort: config.http.strictPort,
     publisher,
     onState: (payload) => {
-      if (config.http.syncHooks || config.mimocode.enabled || config.workbuddy.enabled
-          || normalizeAgentId(payload.agent_id) === "devin") {
+      if (shouldPublishHookState(config, payload.agent_id)) {
         publishClawdState({
           publisher,
           metricsTracker,
@@ -2538,6 +2573,7 @@ async function main() {
       MiMoCodeAdapter,
       WorkBuddyAdapter,
       DshAdapter,
+      CursorAgentAdapter,
     } = busModule;
     const busLog = (level, message, details) => log(level, `bus :: ${message}`, details);
     const adapters = [
@@ -2547,6 +2583,7 @@ async function main() {
       new MiMoCodeAdapter({ log: busLog }),
       new WorkBuddyAdapter({ log: busLog }),
       new DshAdapter({ log: busLog }),
+      new CursorAgentAdapter({ log: busLog }),
     ];
     agentBus = createAgentSessionBus({
       capability,
@@ -2658,6 +2695,7 @@ module.exports = {
   buildMiMoCodeHookDisplay,
   buildWorkBuddyHookDisplay,
   publishClawdState,
+  shouldPublishHookState,
   publishPermissionRequest,
   OpenClawStatusController,
   resolvePermissionDecision,

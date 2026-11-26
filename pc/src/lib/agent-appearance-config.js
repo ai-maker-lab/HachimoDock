@@ -1,6 +1,6 @@
 /**
  * [Input] Detected local coding agents, persisted appearance records, and localStorage bridge assignment state.
- * [Output] Fixed Agent display ordering including read-only Antigravity, explicit first-run selection, shared per-channel appearance mapping, and single active desktop-channel helpers used by setup, dashboard, and gallery.
+ * [Output] Fixed Agent display ordering including Cursor Agent and read-only Antigravity, explicit first-run selection, shared per-channel appearance mapping, and single active desktop-channel helpers used by setup, dashboard, and gallery.
  * [Pos] lib node in pc/src/lib
  * [Sync] If this file changes, update `pc/src/.folder.md` and consumers that persist agent assignments.
  */
@@ -41,6 +41,11 @@ export const FIXED_AGENT_OPTIONS = [
     id: "claude-code",
     label: "Claude",
     detail: "Claude 客户端与本地 CLI 渠道",
+  },
+  {
+    id: "cursor-agent",
+    label: "Cursor",
+    detail: "跟随 Cursor 会话状态；设备指令和语音通过本机 agent CLI 写入当前会话",
   },
   {
     id: "openclaw",
