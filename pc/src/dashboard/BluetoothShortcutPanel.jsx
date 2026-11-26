@@ -286,7 +286,7 @@ export default function BluetoothShortcutPanel({ usb, wifi, board, active = true
                     {group.gestures.map(gesture => (
                       <div className={`board-button-control-field${slot === gesture.slot ? " is-hovered" : ""}`} key={gesture.slot}>
                         <span className="board-button-control-field__head"><strong>{gesture.label}</strong></span>
-                        <Button size="small" aria-expanded={canEdit && slot === gesture.slot}
+                        <Button className="bluetooth-shortcut-trigger" size="small" aria-expanded={canEdit && slot === gesture.slot}
                           disabled={pending || ((dirty || capture) && slot !== gesture.slot)}
                           onClick={() => { if (slot !== gesture.slot) { setSlot(gesture.slot); setEdit(null); } }}>
                           {chordLabel(visibleKeys?.[gesture.slot])}
@@ -307,7 +307,7 @@ export default function BluetoothShortcutPanel({ usb, wifi, board, active = true
                               </label>)}
                             </div>
                             <label>主键
-                              <select aria-label="主键" value={usage} onChange={event => draft((mask << 8) | Number(event.target.value))}>
+                              <select className="ui-control" aria-label="主键" value={usage} onChange={event => draft((mask << 8) | Number(event.target.value))}>
                                 <option value={0}>{extended ? "空（只发送修饰键）" : "选择一个键"}</option>
                                 {keyOptions.map(key => <option key={key.usage} value={key.usage}>{key.label}</option>)}
                               </select>

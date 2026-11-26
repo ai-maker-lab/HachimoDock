@@ -27,12 +27,15 @@
   justify-content: space-between;
 }
 
-.wifi-pairing__current,
 .wifi-pairing__device,
-.wifi-pairing details {
+.wifi-pairing details:not(.disclosure-panel) {
   padding: 10px 12px;
   border: 1px solid var(--color-border, #e3e5e8);
   border-radius: 8px;
+}
+.wifi-pairing__current {
+  padding: 0;
+  border: 0;
 }
 
 .wifi-pairing__current p {
@@ -71,7 +74,7 @@
   cursor: pointer;
 }
 
-.wifi-pairing details[open] summary,
+.wifi-pairing details:not(.disclosure-panel)[open] summary,
 .wifi-pairing__actions {
   margin-bottom: 8px;
 }

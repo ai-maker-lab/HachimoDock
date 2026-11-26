@@ -804,7 +804,7 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", wif
             <strong>{appearanceStateLabel(activeRecord?.family) || "—"}</strong>
           </div>
           {activeRecord && (
-            <section className="detail-side-section detail-side-section--video">
+            <section className="detail-side-section detail-side-section--video region-card">
               <div className="detail-state-video-upload">
                 <div className="detail-audio-config__header">
                   <span>
@@ -871,7 +871,7 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", wif
             usb={device?.usb} wifi={device?.wifi} wifiConnected={wifiConnected}/>
 
           {activeRecord?.ok && (
-            <section className="detail-side-section detail-side-section--regenerate">
+            <section className="detail-side-section detail-side-section--regenerate region-card">
               <div className="detail-state-regenerate-entry">
                 <div className="detail-state-regenerate-entry__header">
                   <span className="detail-state-regenerate-entry__title">

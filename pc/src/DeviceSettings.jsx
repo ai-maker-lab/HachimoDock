@@ -13,10 +13,14 @@ export default function DeviceSettings({ usb, wifi, active, wirelessMaintenanceR
   const locationState = useSyncExternalStore(locationController.subscribe, locationController.getSnapshot, locationController.getSnapshot);
   useExitProtection(locationState.saving ? "位置设置正在保存" : locationState.dirty ? "位置设置有未保存的修改" : "");
   useEffect(() => () => locationController.setActive(false), [locationController]);
-  return <section className="api-settings-page device-settings">
+  return <section className="api-settings-page device-settings settings-surface">
     <PageShell title="其它设置" subtitle="调整设备音量和提示音、设置所在地区，或管理 Wi-Fi 配对。">
-    <Card title="设备总音量"><DeviceVolumePanel usb={usb} wifi={wifi} active={active} /></Card>
-    <Card><SharedLocationPanel active={active} controller={locationController} /></Card>
+    <Card title="设备总音量" subtitle="调节设备扬声器的总音量。松开滑块后生效，并在设备空闲时保存。">
+      <DeviceVolumePanel usb={usb} wifi={wifi} active={active} />
+    </Card>
+    <Card title="时区设置" subtitle="设置所在城市。对话和组件会按这里查询当地时间与天气，可自动识别或手动填写。">
+      <SharedLocationPanel active={active} controller={locationController} />
+    </Card>
     <LanAgentPairingPanel usb={usb} wifi={wifi} active={active} maintenanceRequest={wirelessMaintenanceRequest} />
     </PageShell>
   </section>;

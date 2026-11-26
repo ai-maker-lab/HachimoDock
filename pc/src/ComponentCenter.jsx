@@ -62,6 +62,7 @@ import {
 } from "./lib/active-component-store.js";
 import { wifiDeviceControl, wifiDeviceControlReady } from "./lib/wifi-device-control.js";
 import PageShell from "./shell/PageShell.jsx";
+import DisclosurePanel from "./shell/DisclosurePanel.jsx";
 import PageOnboardingModal, {
   usePageOnboarding,
 } from "./shell/PageOnboardingModal.jsx";
@@ -1748,7 +1749,7 @@ export default function ComponentCenter({ active = true, onOpenWirelessMaintenan
           ? inventoryTargetKey(liveInventoryTarget) : ""}
         onImported={handleCommunityImport}
       >
-      {componentLibraryError&&<div role="alert" className="community-error">本机组件库暂未刷新。<button onClick={refreshComponentLibrary}>重新读取</button><details><summary>查看详情</summary>{componentLibraryError}</details></div>}
+      {componentLibraryError&&<div role="alert" className="community-error">本机组件库暂未刷新。<button onClick={refreshComponentLibrary}>重新读取</button><DisclosurePanel summary="查看详情">{componentLibraryError}</DisclosurePanel></div>}
       {deviceInventory.freshness !== 'live' && <p role="status">{deviceConnected
         ? '设备清单待核对；安装状态暂不确定。'
         : wifi ? '此固件暂未提供 Wi-Fi 组件清单。'
@@ -1758,7 +1759,7 @@ export default function ComponentCenter({ active = true, onOpenWirelessMaintenan
       <section
         ref={librarySectionRef}
         id="component-library"
-        className="component-library-section"
+        className="component-library-section region-card"
       >
         <div className="component-library-toolbar">
           <button className="btn-secondary btn-sm" onClick={()=>setTrashOpen(true)}><Trash2 size={14}/>回收站</button>

@@ -111,7 +111,7 @@ test("LLM scope explanation belongs to header and usage spacing is page-scoped",
   const page=readSource("ApiSettings.jsx");
   assert.match(page, /title="对话大模型" subtitle="[^"]*不影响 ChatGPT、Claude 等 Agent 的语音输入/);
   assert.doesNotMatch(page, /<p[^>]*>此配置用于和宠物聊天/);
-  assert.match(page, /className="api-settings-page"/);
+  assert.match(page, /className="api-settings-page settings-surface"/);
   assert.match(readSource("styles.css"), /\.api-settings-page \.usage-help \{ margin: 0; \}/);
   assert.match(readSource("styles.css"), /\.api-settings-page \.card__subtitle \{ max-width: none;/);
 });

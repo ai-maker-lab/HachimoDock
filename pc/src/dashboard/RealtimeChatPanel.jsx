@@ -16,6 +16,7 @@ import { personaSummaryLabel } from "../lib/persona-voice.js";
 import { realtimeReadiness } from "../lib/usage-help.js";
 import { API_CONFIGURATION_UPDATED_EVENT } from "../lib/api-configuration.js";
 import UsageHelp from "../UsageHelp.jsx";
+import DisclosurePanel from "../shell/DisclosurePanel.jsx";
 import { formatModelIssue } from "../lib/model-issue.js";
 import { isRecoveringAsr, realtimeErrorMessage, speechModelMessage } from "../lib/realtime-feedback.js";
 
@@ -126,8 +127,7 @@ export default function RealtimeChatPanel({ keyBound = false, onOpenApiSettings,
       {realtimeChat?.searchState === "searching" && <p className="muted small" role="status">正在联网检索…</p>}
       {realtimeChat?.searchState === "failed" && realtimeChat.searchError !== realtimeChat.error && <p className="muted small" role="status">{realtimeChat.searchError}</p>}
       {realtimeChat?.searchSources?.length > 0 && (
-        <details className="usage-help">
-          <summary>联网来源（{realtimeChat.searchSources.length}）{realtimeChat.searchProvider && ` · ${realtimeChat.searchProvider}`}</summary>
+        <DisclosurePanel summary={`联网来源（${realtimeChat.searchSources.length}）${realtimeChat.searchProvider ? ` · ${realtimeChat.searchProvider}` : ""}`}>
           <ul>
             {realtimeChat.searchSources.map(source => (
               <li key={source.url}>
@@ -137,10 +137,10 @@ export default function RealtimeChatPanel({ keyBound = false, onOpenApiSettings,
             ))}
           </ul>
           {realtimeChat.searchRetrievedAt && <p className="muted small">查询时间 {new Date(realtimeChat.searchRetrievedAt).toLocaleString()}</p>}
-        </details>
+        </DisclosurePanel>
       )}
       {error && <div role={recovering ? "status" : "alert"} className={recovering ? "usage-help" : "message-banner message-banner--error"}>{recovering ? "" : "实时对话失败："}{error}</div>}
-      <details className="usage-help"><summary>问题排查与日志</summary><p>遇到问题时，可提供报错信息及诊断日志。日志位于应用数据目录 / logs / realtime-chat.jsonl，不记录录音与完整对话。</p></details>
+      <DisclosurePanel summary="问题排查与日志"><p>遇到问题时，可提供报错信息及诊断日志。日志位于应用数据目录 / logs / realtime-chat.jsonl，不记录录音与完整对话。</p></DisclosurePanel>
       {!active && realtimeChat?.reason && realtimeChat.reason !== "ui" && (
         <div className="muted small">上次结束：{realtimeChat.reason === "idle" ? "60 秒无人说话" : realtimeChat.reason === "key" ? "按键结束" : realtimeChat.reason}</div>
       )}

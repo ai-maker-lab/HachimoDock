@@ -11,7 +11,7 @@ export default function KeyboardConfiguration({ usb, wifi, boardDeviceId, childr
   const id = useId();
   const wired = usb?.connected === true;
   const board = wired ? usb.boardDeviceId : wifi?.boardDeviceId || boardDeviceId || usb?.boardDeviceId;
-  return <PageShell title="键盘配置">
+  return <div className="settings-surface keyboard-settings"><PageShell title="键盘配置">
     <div className="keyboard-configuration-tabs" role="tablist" aria-label="键盘配置类别">
       {tabs.map(([key, label]) => <button key={key} type="button" role="tab"
         id={`${id}-tab-${key}`} aria-controls={`${id}-panel-${key}`}
@@ -30,5 +30,5 @@ export default function KeyboardConfiguration({ usb, wifi, boardDeviceId, childr
       <BluetoothShortcutPanel key={JSON.stringify([board, wired, wired ? usb.connectionId : null, wired ? usb.bootId : wifi?.bootId])}
         usb={usb} wifi={wifi} board={board} active={tab === "bluetooth"} />
     </div>
-  </PageShell>;
+  </PageShell></div>;
 }

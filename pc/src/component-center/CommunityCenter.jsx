@@ -552,19 +552,22 @@ export default function CommunityCenter({
   const unpublished = publicationItems.filter(item => !Object.hasOwn(owned, item.id));
   return (
     <div className="community-center">
-      <div className="community-tabs" role="tablist" aria-label="组件中心栏目">
-        {COMMUNITY_TABS.map(([id, label]) => (
-          <button
-            key={id}
-            role="tab"
-            aria-selected={tab === id}
-            tabIndex={tab === id ? 0 : -1}
-            onKeyDown={event => navigateTabs(event, COMMUNITY_TABS.map(([key]) => key), id, setTab)}
-            onClick={() => setTab(id)}
-          >
-            {label}
-          </button>
-        ))}
+      <div className="community-toolbar">
+        <div className="community-tabs" role="tablist" aria-label="组件中心栏目">
+          {COMMUNITY_TABS.map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={tab === id}
+              tabIndex={tab === id ? 0 : -1}
+              onKeyDown={event => navigateTabs(event, COMMUNITY_TABS.map(([key]) => key), id, setTab)}
+              onClick={() => setTab(id)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         <Button variant="secondary" size="small" onClick={() => setPublish({})}>
           <Upload size={14} />
           发布作品
@@ -584,7 +587,7 @@ export default function CommunityCenter({
           </Button>
         </div>
       )}
-      {["discover","favorites"].includes(tab) && <CommunityWeb capabilityTarget={capabilityTarget} key={tab} view={tab} localItems={localItems} inventory={inventory} deviceInstallTargetKey={deviceInstallTargetKey} onImported={onImported} onOpenLocal={onOpenLocal}/>}
+      {["discover","favorites"].includes(tab) && <div className="region-card"><CommunityWeb capabilityTarget={capabilityTarget} key={tab} view={tab} localItems={localItems} inventory={inventory} deviceInstallTargetKey={deviceInstallTargetKey} onImported={onImported} onOpenLocal={onOpenLocal}/></div>}
       {tab === "local" && (
         <section role="tabpanel" aria-label="我的组件">
           <div className="community-section-title">
@@ -610,7 +613,7 @@ export default function CommunityCenter({
             </Button>
           </div>
           <Notice resource={created}>
-            <div className="community-creations">
+            <div className="community-creations region-card">
               {created.data?.items?.filter(work => !isWithdrawnComponent(work)).map((work) => {
                 const local = publicationItems.find(
                   (item) => item.id === work.id && item.libraryPath,

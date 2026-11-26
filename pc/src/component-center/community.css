@@ -3,38 +3,63 @@
   min-width: 0;
   color: var(--text);
 }
-.community-tabs {
+.community-toolbar {
   display: flex;
   align-items: center;
-  gap: 26px;
-  border-bottom: 0;
-  margin-bottom: var(--workspace-section-gap, 12px);
-  overflow-x: auto;
+  gap: 12px;
+  min-width: 0;
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  margin-bottom: 0;
+  padding-block: 8px 12px;
+  background: var(--bg);
 }
-.community-tabs > button[role="tab"] {
+.community-tabs {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  width: max-content;
+  max-width: 100%;
+  margin: 0;
+  padding: 3px;
+  border-radius: 10px;
+  background: rgb(240, 240, 240);
+  box-shadow: 0 0 0 0.5px rgb(0 0 0 / 6%);
+}
+.app-shell .community-tabs > button[role="tab"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 4px 12px;
   border: 0;
-  background: none;
-  padding: 15px 0 17px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-soft);
+  font: 600 13px/1.3 var(--font-sans);
   white-space: nowrap;
-  font: 600 14px var(--font-sans);
-  color: var(--text-muted);
-  position: relative;
+  box-shadow: none;
   cursor: pointer;
 }
-.community-tabs > button[aria-selected="true"] {
+.app-shell .community-tabs > button[role="tab"]:hover {
+  border-color: transparent;
+  background: var(--surface);
   color: var(--text);
 }
-.community-tabs > button[aria-selected="true"]:after {
-  content: "";
-  height: 3px;
-  border-radius: 4px;
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  background: var(--accent);
+.app-shell .community-tabs > button[role="tab"][aria-selected="true"],
+.app-shell .community-tabs > button[role="tab"][aria-selected="true"]:hover {
+  background: var(--surface);
+  background-color: var(--surface);
+  color: var(--text);
+  box-shadow: 0 0 0 0.5px rgb(0 0 0 / 8%);
 }
-.community-tabs > .button {
+.app-shell .community-tabs > button[role="tab"]:focus-visible {
+  outline: 2px solid var(--accent-action);
+  outline-offset: 2px;
+}
+.community-toolbar > .button {
   margin-left: auto;
   flex-shrink: 0;
 }
@@ -753,11 +778,29 @@
 .community-error,
 .community-success {
   padding: 16px;
-  margin: 16px 24px;
+  margin: 16px 0;
   font-size: 12px;
   border-radius: var(--radius-md);
   line-height: 1.75;
   overflow-wrap: anywhere;
+}
+.community-center .community-error,
+.community-center .community-success {
+  margin: 8px 0;
+  padding: 8px 12px;
+  width: 100%;
+  box-sizing: border-box;
+  line-height: 1.45;
+}
+.community-center .community-error .disclosure-panel {
+  margin: 4px 0 0;
+}
+.community-center .community-error .disclosure-panel > summary {
+  min-height: 28px;
+  padding: 4px 8px;
+}
+.community-center .community-error .disclosure-panel__body {
+  padding: 0 8px 8px;
 }
 .community-error {
   color: var(--danger);
@@ -916,7 +959,7 @@
 }
 @media (max-width: 800px) {
   .community-tabs {
-    gap: 20px;
+    gap: 2px;
   }
   .community-heading h2 {
     font-size: 26px;
