@@ -77,7 +77,7 @@ static void send_input_event(pet_p4_runtime_state_t *s,pet_p4_send_line_fn f,voi
   else {assert(!strcmp(a,"media_stop"));assert(local);}
 }
 '''
-    harness += dispatch + "  normal_navigation++;\n}\n"
+    harness += dispatch + "  (void)atlas_exit; (void)atlas_short; normal_navigation++;\n}\n"
     harness += r'''
 int main(void) {
   pet_p4_runtime_state_t state={0};pet_p4_input_event_t event={42};
@@ -102,5 +102,53 @@ int main(void) {
     file = tmp_path / "home-back.c"
     file.write_text(harness)
     binary = tmp_path / "home-back"
+    subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", str(file), "-o", str(binary)], check=True)
+    subprocess.run([str(binary)], check=True)
+
+
+def test_atlas_shortcut_requires_authorized_runtime_and_compatible_global_profile(tmp_path):
+    source = (ROOT / "main/pet_p4_input.c").read_text()
+    shortcut = source[source.index("static const pet_p4_input_binding_t *atlas_sw3_back("):]
+    shortcut = shortcut[:shortcut.index("#endif")]
+    harness = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <string.h>
+#define PET_SETTINGS_ACTION "settings"
+typedef struct { const char *screen_page; } pet_p4_runtime_state_t;
+typedef struct { const char *action; } pet_p4_input_binding_t;
+static pet_p4_input_binding_t tap = { "page_back" }, hold = { PET_SETTINGS_ACTION };
+static bool authorized;
+static const pet_p4_input_binding_t *active_binding(const char *event_name) {
+  if (!strcmp(event_name, "button.sw3.short_press")) return &tap;
+  if (!strcmp(event_name, "button.sw3.long_press")) return &hold;
+  return NULL;
+}
+static bool pet_p4_wasm_atlas_shortcut_ready(void) { return authorized; }
+'''
+    harness += shortcut + r'''
+int main(void) {
+  pet_p4_runtime_state_t state = { "app" };
+  const char *short_press = "button.sw3.short_press", *long_press = "button.sw3.long_press";
+  assert(!atlas_sw3_back(&state, short_press));
+  authorized = true;
+  assert(atlas_sw3_back(&state, short_press) == &tap);
+  assert(atlas_sw3_back(&state, long_press) == &tap);
+  assert(!atlas_sw3_back(&state, "button.sw2.short_press"));
+  state.screen_page = "main";
+  assert(!atlas_sw3_back(&state, long_press));
+  state.screen_page = "app";
+  hold.action = "realtime_chat";
+  assert(!atlas_sw3_back(&state, short_press));
+  assert(!atlas_sw3_back(&state, long_press));
+  hold.action = "disabled";
+  assert(atlas_sw3_back(&state, long_press) == &tap);
+  tap.action = "realtime_chat";
+  assert(!atlas_sw3_back(&state, short_press));
+}
+'''
+    file = tmp_path / "atlas-shortcut.c"
+    file.write_text(harness)
+    binary = tmp_path / "atlas-shortcut"
     subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", str(file), "-o", str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

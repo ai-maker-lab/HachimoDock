@@ -258,6 +258,19 @@ set_property(SOURCE "pet_p4_miniapp.c" "pet_p4_app_host.c" "pet_p4_form_v2.c"
   "pet_p4_surface.c" "pet_p4_host_collection.c"
   APPEND PROPERTY COMPILE_OPTIONS "-fstack-usage")
 
+set(local_codex_usage_pubkey "$ENV{PET_P4_LOCAL_CODEX_USAGE_PUBKEY}")
+if(NOT local_codex_usage_pubkey STREQUAL "")
+  string(LENGTH "${local_codex_usage_pubkey}" pubkey_length)
+  if(NOT pubkey_length EQUAL 130 OR NOT local_codex_usage_pubkey MATCHES "^04[0-9a-f]+$")
+    message(FATAL_ERROR "Codex usage requires a lowercase, uncompressed P-256 public key")
+  endif()
+  if(NOT "$ENV{PET_P4_SYSTEM_WIFI}" STREQUAL "1" OR NOT "$ENV{PET_P4_CHIP_FAMILY}" STREQUAL "v3")
+    message(FATAL_ERROR "Signed local Codex usage is only supported on the WiFi6 v3 target")
+  endif()
+  set_property(SOURCE "pet_p4_protocol.c" "pet_p4_wasm_trial.c" "pet_p4_input.c" APPEND PROPERTY
+    COMPILE_DEFINITIONS "PET_P4_LOCAL_CODEX_USAGE_PUBKEY=\"${local_codex_usage_pubkey}\"")
+endif()
+
 foreach(layer body mallet)
   target_add_binary_data(${COMPONENT_LIB} "${CMAKE_CURRENT_LIST_DIR}/../assets/instruments/wooden_fish_${layer}.deflate" BINARY)
 endforeach()

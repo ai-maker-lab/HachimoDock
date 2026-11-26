@@ -34,3 +34,7 @@ void pet_p4_wasm_trial_tone(int hz, int ms, int volume);
 /* Queried and updated on the protocol thread. */
 bool pet_p4_wasm_uv_requested(uint64_t now_ms);
 void pet_p4_wasm_uv_update(const cJSON *value);
+#ifdef PET_P4_LOCAL_CODEX_USAGE_PUBKEY
+void pet_p4_wasm_codex_usage_update(const cJSON *payload);
+bool pet_p4_wasm_atlas_shortcut_ready(void);
+#endif

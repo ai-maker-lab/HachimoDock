@@ -26,6 +26,9 @@
 #include "pet_p4_conversation.h"
 #include "pet_p4_system_settings.h"
 #include "pet_p4_usb_native.h"
+#ifdef PET_P4_LOCAL_CODEX_USAGE_PUBKEY
+#include "pet_p4_wasm_trial.h"
+#endif
 #if PET_P4_SYSTEM_WIFI
 #include "pet_p4_lan.h"
 #include "pet_p4_ble_shortcut.h"
@@ -1399,20 +1402,37 @@ static const pet_p4_input_binding_t *active_global_priority_binding(
     && strcmp(binding->action, "page_back") == 0 ? binding : NULL;
 }
 
+#ifdef PET_P4_LOCAL_CODEX_USAGE_PUBKEY
+static const pet_p4_input_binding_t *atlas_sw3_back(
+  const pet_p4_runtime_state_t *state,
+  const char *event_name
+) {
+  if (!state || strcmp(state->screen_page, "app") ||
+      (strcmp(event_name, "button.sw3.short_press") && strcmp(event_name, "button.sw3.long_press"))) return NULL;
+  const pet_p4_input_binding_t *back = active_binding("button.sw3.short_press");
+  const pet_p4_input_binding_t *hold = active_binding("button.sw3.long_press");
+  if (!back || strcmp(back->action, "page_back") ||
+      (hold && strcmp(hold->action, "disabled") && strcmp(hold->action, PET_SETTINGS_ACTION))) return NULL;
+  return pet_p4_wasm_atlas_shortcut_ready() ? back : NULL;
+}
+#endif
+
 static bool dispatch_component_binding_event(
   pet_p4_runtime_state_t *state,
   pet_p4_send_line_fn send_line,
   void *ctx,
   const pet_p4_input_event_t *event,
   const char *event_name,
-  const char *gesture
+  const char *gesture,
+  const char *fixed_action
 ) {
   pet_p4_input_binding_t binding = {0};
   char component_action[PET_P4_MINIAPP_ACTION_MAX] = {0};
   char action_override[PET_P4_MINIAPP_ACTION_MAX] = {0};
   bool handled_locally;
   if (!state || strcmp(state->screen_page, "app") != 0) return false;
-  if (!pet_p4_miniapp_resolve_input(
+  if (fixed_action) copy_text(component_action, sizeof(component_action), fixed_action);
+  else if (!pet_p4_miniapp_resolve_input(
         event_name,
         component_action,
         sizeof(component_action)
@@ -1495,6 +1515,15 @@ static void dispatch_binding_event(
     send_ignored_component_event(state, send_line, ctx, event, event_name, gesture);
     return;
   }
+  const pet_p4_input_binding_t *atlas_exit = NULL;
+  bool atlas_short = false;
+#ifdef PET_P4_LOCAL_CODEX_USAGE_PUBKEY
+  const pet_p4_input_binding_t *atlas_back = atlas_sw3_back(state, event_name);
+  if (atlas_back && !strcmp(event_name, "button.sw3.long_press")) {
+    atlas_exit = atlas_back;
+    binding = atlas_exit;
+  } else atlas_short = atlas_back != NULL;
+#endif
 #if PET_P4_EVENTS
   if (state && !strcmp(state->screen_page, PET_ALARM_PAGE)) {
     if (!pet_p4_state_approval_pending(state,event->ts_ms)) {
@@ -1548,7 +1577,8 @@ static void dispatch_binding_event(
     send_input_event(state, send_line, ctx, event, event_name, gesture, binding, "media_stop", true);
     return;
   }
-  const pet_p4_input_binding_t *global_exit = active_global_priority_binding(state, event_name);
+  const pet_p4_input_binding_t *global_exit = atlas_exit ? atlas_exit :
+    (atlas_short ? NULL : active_global_priority_binding(state, event_name));
   if (state && !strcmp(state->screen_page, "touch_test")) {
     /* Diagnostic input is isolated; configured global Back/realtime wins. */
     if (binding && (!strcmp(binding->action, "page_back") || !strcmp(binding->action, "realtime_chat"))) {
@@ -1590,7 +1620,8 @@ static void dispatch_binding_event(
         ctx,
         event,
         event_name,
-        gesture
+        gesture,
+        atlas_short ? "lab.up" : NULL
       )) return;
   // While a component is open, its package owns optional gameplay buttons.
   // An unmapped system-navigation gesture must not fall through to the global

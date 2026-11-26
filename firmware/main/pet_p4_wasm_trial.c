@@ -20,6 +20,10 @@
 #include "hachi_runtime.h"
 #include "pet_p4_media.h"
 #include "pet_p4_miniapp.h"
+#ifdef PET_P4_LOCAL_CODEX_USAGE_PUBKEY
+#include "pet_p4_codex_auth.h"
+#include "pet_p4_codex_usage.h"
+#endif
 #if PET_P4_WASM_AUDIO
 #include "pet_p4_audio.h"
 #include "pet_p4_component_media.h"
@@ -29,6 +33,9 @@ typedef struct { unsigned session; int type, a, b; } input_t;
 typedef struct { unsigned session; int action; } command_t;
 
 static atomic_uint requested, requested_revision, failed_session;
+#ifdef PET_P4_LOCAL_CODEX_USAGE_PUBKEY
+static atomic_uint atlas_shortcut_session;
+#endif
 static atomic_bool worker_failed;
 static atomic_uint dropped_inputs;
 enum { INPUT_QUEUE_SIZE = 24, INPUT_EDGE_RESERVE = 4 };
@@ -157,6 +164,32 @@ static void apply_effects(const hachi_runtime_t *runtime, unsigned session) {
 }
 
 static portMUX_TYPE host_lock = portMUX_INITIALIZER_UNLOCKED;
+#ifdef PET_P4_LOCAL_CODEX_USAGE_PUBKEY
+static pet_codex_usage_t codex_usage;
+
+void pet_p4_wasm_codex_usage_update(const cJSON *payload) {
+  pet_codex_usage_sample_t sample;
+  if (!pet_codex_usage_parse(payload, esp_timer_get_time() / 1000, &sample)) return;
+  portENTER_CRITICAL(&host_lock);
+  pet_codex_usage_apply(&codex_usage, &sample);
+  portEXIT_CRITICAL(&host_lock);
+}
+
+static bool dispatch_codex_usage(hachi_runtime_t *runtime, uint64_t now_ms,
+                                 uint64_t *prior_day, uint64_t *prior_minute) {
+  int low, high;
+  portENTER_CRITICAL(&host_lock);
+  pet_codex_usage_advance(&codex_usage, now_ms);
+  bool fresh = pet_codex_usage_fresh(&codex_usage.latest, now_ms);
+  uint64_t day = fresh ? codex_usage.latest.total : UINT64_MAX;
+  uint64_t minute = fresh ? codex_usage.minute_total : UINT64_MAX;
+  portEXIT_CRITICAL(&host_lock);
+  if (pet_codex_usage_next(day, prior_day, &low, &high) &&
+      !hachi_event_run(runtime, PET_CODEX_DAY_TOKENS_EVENT, low, high)) return false;
+  return !pet_codex_usage_next(minute, prior_minute, &low, &high) ||
+         hachi_event_run(runtime, PET_CODEX_MINUTE_TOKENS_EVENT, low, high);
+}
+#endif
 static unsigned host_session, uv_session;
 static uint64_t uv_requested_at;
 static uint32_t uv_sample_seconds;
@@ -294,6 +327,10 @@ static void *worker(void *arg) {
   char active_id[48]="", active_hash[65]="";
   unsigned session=0, loaded_revision=0;
   uint64_t prior_ms=0,last_write_ms=0;
+#ifdef PET_P4_LOCAL_CODEX_USAGE_PUBKEY
+  bool codex_usage_allowed = false;
+  uint64_t prior_codex_day = UINT64_MAX, prior_codex_minute = UINT64_MAX;
+#endif
   while (true) {
     install_check_t *check;
     if (xQueueReceive(install_checks, &check, 0) == pdTRUE) check_install(check);
@@ -310,6 +347,11 @@ static void *worker(void *arg) {
         persisted=saves;
       }
       hachi_close(&runtime);
+#ifdef PET_P4_LOCAL_CODEX_USAGE_PUBKEY
+      atomic_store(&atlas_shortcut_session, 0);
+      codex_usage_allowed = false;
+      prior_codex_day = prior_codex_minute = UINT64_MAX - 1;
+#endif
       session=target;
       loaded_revision=revision;
       char id[48]="";
@@ -326,6 +368,10 @@ static void *worker(void *arg) {
         host_session = session;
         cJSON *policy = NULL;
         bool service_ready = pet_p4_wasm_network_policy(revision, &policy);
+#ifdef PET_P4_LOCAL_CODEX_USAGE_PUBKEY
+        codex_usage_allowed = service_ready && pet_codex_usage_authorized(
+          PET_P4_LOCAL_CODEX_USAGE_PUBKEY, id, binary, bytes, policy != NULL, radio);
+#endif
         if (service_ready && policy)
           service_ready = pet_net_device_activate(id, policy, &network_lease);
         cJSON_Delete(policy);
@@ -337,6 +383,10 @@ static void *worker(void *arg) {
                           read_host,esp_random,service,&network_lease,error,sizeof(error))){
           atomic_store(&failed_session,0);
           runtime.media_allowed=radio;
+#ifdef PET_P4_LOCAL_CODEX_USAGE_PUBKEY
+          if (codex_usage_allowed && !strcmp(id, "token-world-atlas"))
+            atomic_store(&atlas_shortcut_session, session);
+#endif
           ESP_LOGI(TAG,"opened %s",id);
         }else{
           pet_net_device_activate(NULL,NULL,&network_lease);
@@ -379,6 +429,10 @@ static void *worker(void *arg) {
         vTaskDelay(pdMS_TO_TICKS(10));
         continue;
       }
+#ifdef PET_P4_LOCAL_CODEX_USAGE_PUBKEY
+      if (ok && codex_usage_allowed)
+        ok = dispatch_codex_usage(&runtime, now_ms, &prior_codex_day, &prior_codex_minute);
+#endif
       if (ok && hachi_frame_run(&runtime, dt > 80 ? 80 : (int)dt)) {
         apply_effects(&runtime, session);
         xSemaphoreTake(frame_lock, portMAX_DELAY);
@@ -526,6 +580,14 @@ static unsigned active_trial(void) {
   unsigned revision=atomic_load(&requested_revision);
   return revision&&pet_p4_wasm_package(NULL,0,NULL,revision,NULL,NULL)?atomic_load(&requested):0;
 }
+
+#ifdef PET_P4_LOCAL_CODEX_USAGE_PUBKEY
+bool pet_p4_wasm_atlas_shortcut_ready(void) {
+  unsigned session = active_trial();
+  return session && atomic_load(&atlas_shortcut_session) == session &&
+    atomic_load(&failed_session) != session;
+}
+#endif
 
 static bool active_radio(void) {
   char id[48];
