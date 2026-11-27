@@ -24,6 +24,12 @@ function syncAllHooks(options = {}) {
       return registerCodeBuddyHooks({ silent: true });
     });
   }
+  if (options.syncKiro === true) {
+    run("kiro", () => {
+      const { registerKiroHooks } = require("./kiro-install.js");
+      return registerKiroHooks({ silent: true });
+    });
+  }
   if (options.syncMiMoCode === true) {
     run("mimocode", () => {
       const { syncMiMoCodePlugin } = require("./mimocode-install.js");

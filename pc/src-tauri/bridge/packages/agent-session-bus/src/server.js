@@ -327,6 +327,8 @@ class AgentSessionBus {
           }
           return session;
         });
+        // Kiro is intentionally absent: it runs in compact mode without device
+        // session cards (see publishKiroCompactCaption in headless-mqtt.js).
         if (agentId === "claude-code" || agentId === "codex" || agentId === "mimocode" || agentId === "workbuddy" || agentId === "devin") {
           for (const status of Array.isArray(statuses) ? statuses : []) {
             const id = normalizeStatusId(status?.id);
@@ -338,7 +340,7 @@ class AgentSessionBus {
               : "";
             const title = agentId === "codex"
               ? [statusTitle, displayTitle].find((value) => value && value !== "Codex 会话") || ""
-              : statusTitle || displayTitle || (agentId === "devin" ? "Devin 会话" : agentId === "workbuddy" ? "WorkBuddy 会话" : agentId === "mimocode" ? "MiMoCode 会话" : "Claude 会话");
+              : statusTitle || displayTitle || (agentId === "devin" ? "Devin 会话" : agentId === "workbuddy" ? "WorkBuddy 会话" : agentId === "mimocode" ? "MiMoCode 会话" : agentId === "kiro" ? "Kiro 会话" : "Claude 会话");
             const resolvedDisplayTitle = agentId === "codex" && displayTitle === "Codex 会话"
               ? title
               : displayTitle || title;

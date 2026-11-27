@@ -4054,7 +4054,7 @@ const BRIDGE_LAUNCH_AGENT_LABEL: &str = "com.petmanager.status-bridge";
 const BRIDGE_WINDOWS_STARTUP_SCRIPT_NAME: &str = "Pet Manager Status Bridge.cmd";
 const USB_STATE_MAX_AGE_MS: u64 = 10 * 60 * 1000;
 const USB_BRIDGE_SCAN_MAX_FILES: usize = 64;
-const KNOWN_USB_STATE_SOURCES: [&str; 8] = [
+const KNOWN_USB_STATE_SOURCES: [&str; 9] = [
     "claude-code",
     "codex",
     "openclaw",
@@ -4063,6 +4063,7 @@ const KNOWN_USB_STATE_SOURCES: [&str; 8] = [
     "workbuddy",
     "devin",
     "hermes",
+    "kiro",
 ];
 #[cfg(windows)]
 const CREATE_NO_WINDOW_FLAG: u32 = 0x08000000;
@@ -7895,6 +7896,95 @@ fn detect_dsh_with_home(home: Option<&Path>) -> DetectedAgent {
     }
 }
 
+const KIRO_HOOK_FILE_NAME: &str = "hachimodock-status.json";
+fn classify_kiro_detection(
+    has_install: bool,
+    hooks_registered: bool,
+) -> (bool, bool, &'static str, String) {
+    if !has_install {
+        return (
+            false,
+            false,
+            "not_found",
+            "当前没有发现 Kiro IDE、Kiro CLI 或 ~/.kiro 本地配置。".to_string(),
+        );
+    }
+    if hooks_registered {
+        // Hooks are Kiro's only transport, so registered hooks mean the
+        // channel is fully usable for state following.
+        return (
+            true,
+            true,
+            "ready",
+            "Kiro 状态 Hook 已就绪，可跟随状态与气泡；暂不支持按键语音输入。".into(),
+        );
+    }
+    (
+        true,
+        false,
+        "needs_hook",
+        "已检测到 Kiro。跟随后客户端会在 ~/.kiro/hooks 写入状态 Hook。".into(),
+    )
+}
+fn find_kiro_app(home: Option<&Path>) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut candidates = vec![PathBuf::from("/Applications/Kiro.app")];
+        if let Some(home) = home {
+            candidates.push(home.join("Applications/Kiro.app"));
+        }
+        if let Some(found) = candidates.into_iter().find(|path| path.is_dir()) {
+            return Some(found);
+        }
+    }
+    #[cfg(windows)]
+    if let Some(local) = env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+        let candidate = local.join("Programs").join("Kiro").join("Kiro.exe");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    let _ = home;
+    None
+}
+fn detect_kiro() -> DetectedAgent {
+    let home = get_home_dir().ok();
+    let kiro_dir = home.as_ref().map(|path| path.join(".kiro"));
+    let has_config_dir = kiro_dir.as_ref().is_some_and(|path| path.is_dir());
+    let hooks_path = kiro_dir
+        .as_ref()
+        .map(|path| path.join("hooks").join(KIRO_HOOK_FILE_NAME));
+    let hooks_registered = hooks_path.as_ref().is_some_and(|path| {
+        fs::read_to_string(path).is_ok_and(|text| text.contains("kiro-hook.js"))
+    });
+    let app = find_kiro_app(home.as_deref());
+    let cli = find_agent_executable(
+        "kiro-cli",
+        home.as_deref(),
+        &[".local/bin/kiro-cli", ".local/bin/kiro-cli.exe"],
+        "kiro-cli.exe",
+    );
+    let (detected, ready, status, detail) =
+        classify_kiro_detection(has_config_dir || app.is_some() || cli.is_some(), hooks_registered);
+    DetectedAgent {
+        id: "kiro".to_string(),
+        label: "Kiro".to_string(),
+        detected,
+        ready,
+        status: status.to_string(),
+        detail,
+        command_path: cli
+            .or_else(|| app.map(|path| path.to_string_lossy().into_owned()))
+            .unwrap_or_default(),
+        config_path: hooks_path
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        activity_path: kiro_dir
+            .map(|path| path.join("sessions").to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        can_sync_hook: has_config_dir,
+    }
+}
 fn detect_hermes() -> DetectedAgent {
     let path = std::env::var_os("HERMES_HOME").map(PathBuf::from)
         .or_else(|| get_home_dir().ok().map(|home| home.join(".hermes")))
@@ -7996,6 +8086,7 @@ fn detect_local_agents_inner(devin_cloud_enabled: bool) -> Result<AgentDiscovery
         detect_devin(devin_cloud_enabled),
         detect_hermes(),
         detect_antigravity(),
+        detect_kiro(),
     ];
 
     Ok(AgentDiscoveryResponse {
@@ -11279,6 +11370,7 @@ fn normalize_agent_id(value: &str) -> Option<String> {
         "copilot" | "copilot-cli" => Some("copilot-cli".to_string()),
         "gemini" | "gemini-cli" => Some("gemini-cli".to_string()),
         "cursor" => Some("cursor".to_string()),
+        "kiro" | "kiro-ide" | "kiro-cli" => Some("kiro".to_string()),
         _ => {
             if normalized.is_empty() {
                 None
@@ -11760,6 +11852,7 @@ fn score_usb_source(source: &str) -> i32 {
         "codex" => 30,
         "deepseek-harness" => 25,
         "claude-code" => 20,
+        "kiro" => 16,
         "mimocode" => 15,
         "workbuddy" => 15,
         "openclaw" => 10,
@@ -11801,6 +11894,7 @@ fn usb_source_display_name(source: &str) -> String {
         "devin" | "devin-desktop" | "devin desktop" => "Devin".to_string(),
         "hermes" => "Hermes Agent".to_string(),
         "antigravity" => "Antigravity".to_string(),
+        "kiro" | "kiro-ide" | "kiro-cli" => "Kiro".to_string(),
         other if !other.is_empty() => other.to_string(),
         _ => "桌宠".to_string(),
     }
@@ -13315,6 +13409,7 @@ fn selected_agent_to_channel_id(value: &str) -> String {
         "devin" => "devin".to_string(),
         "hermes" => "hermes".to_string(),
         "antigravity" => "antigravity".to_string(),
+        "kiro" => "kiro".to_string(),
         _ => DEFAULT_PET_CHANNEL_ID.to_string(),
     }
 }
@@ -13331,6 +13426,7 @@ fn normalize_pet_channel_id(value: String) -> String {
         "hermes" => "hermes".to_string(),
         "antigravity" => "antigravity".to_string(),
         "cursor" => "cursor".to_string(),
+        "kiro" | "kiro-ide" | "kiro-cli" => "kiro".to_string(),
         _ => DEFAULT_PET_CHANNEL_ID.to_string(),
     }
 }
@@ -15261,6 +15357,34 @@ mod tests {
     }
 
     #[test]
+    fn kiro_channel_uses_the_hook_id_and_stays_state_only() {
+        assert_eq!(normalize_agent_id("Kiro").as_deref(), Some("kiro"));
+        assert_eq!(normalize_agent_id("kiro-cli").as_deref(), Some("kiro"));
+        assert_eq!(selected_agent_to_channel_id("kiro"), "kiro");
+        assert_eq!(normalize_pet_channel_id("Kiro".into()), "kiro");
+        assert_eq!(usb_source_display_name("kiro"), "Kiro");
+        assert_eq!(usb_state_source_from_file_stem("kiro--session-abc"), "kiro");
+        assert!(KNOWN_USB_STATE_SOURCES.contains(&"kiro"));
+        assert!(!agent_uses_visible_composer("kiro"));
+        let (detected, ready, status, _) = classify_kiro_detection(false, false);
+        assert!(!detected);
+        assert!(!ready);
+        assert_eq!(status, "not_found");
+        let (detected, ready, status, detail) = classify_kiro_detection(true, false);
+        assert!(detected);
+        assert!(!ready);
+        assert_eq!(status, "needs_hook");
+        assert!(detail.contains("~/.kiro/hooks"));
+        let (detected, ready, status, _) = classify_kiro_detection(true, true);
+        assert!(detected);
+        assert!(ready);
+        assert_eq!(status, "ready");
+        let detected = detect_kiro();
+        assert_eq!(detected.id, "kiro");
+        assert_eq!(detected.label, "Kiro");
+    }
+
+    #[test]
     fn devin_channel_uses_current_visible_composer_and_cloud_source_identity() {
         assert_eq!(normalize_agent_id("Devin").as_deref(), Some("devin"));
         assert_eq!(normalize_agent_id("Devin Desktop").as_deref(), Some("devin"));
@@ -16732,6 +16856,7 @@ mod tests {
                 "deepseek-harness".to_string(),
                 "devin".to_string(),
                 "hermes".to_string(),
+                "kiro".to_string(),
                 "mimocode".to_string(),
                 "openclaw".to_string(),
                 "workbuddy".to_string()

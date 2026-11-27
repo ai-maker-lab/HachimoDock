@@ -47,13 +47,14 @@ test("the fixed Agent order preserves WorkBuddy as default and puts Antigravity 
       "openclaw",
       "hermes",
       "devin",
+      "kiro",
     ],
   );
   assert.deepEqual(
     FIXED_AGENT_OPTIONS.map((agent) => agent.label),
     [
       "WorkBuddy", "ChatGPT（Codex）", "DeepSeek Harness", "MiMo Desktop / MiMoCode",
-      "Antigravity", "Claude", "OpenClaw", "Hermes Agent", "Devin",
+      "Antigravity", "Claude", "OpenClaw", "Hermes Agent", "Devin", "Kiro",
     ],
   );
   assert.equal(
