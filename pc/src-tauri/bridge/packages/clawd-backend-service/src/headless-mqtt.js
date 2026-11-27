@@ -1667,6 +1667,8 @@ function publishClawdState(config, payload) {
   const tokenUsage = extractTokenUsageFromPayload(payload);
   const display = source === "claude-code"
     ? buildClaudeHookDisplay(payload, status, event)
+    : source === "kiro"
+      ? buildKiroHookDisplay(payload, status, event)
     : source === "mimocode"
       ? buildMiMoCodeHookDisplay(payload, status, event)
       : source === "workbuddy"
@@ -1720,6 +1722,24 @@ function publishClawdState(config, payload) {
   config.publisher.publishSource(enriched);
 }
 
+function buildKiroHookDisplay(payload, status, event) {
+  const cwd = typeof payload?.cwd === "string" ? payload.cwd : "";
+  const folder = cwd ? path.basename(cwd) : "";
+  const title = compactHookText(payload?.session_title, 120) || (folder ? `Kiro · ${folder}` : "Kiro");
+  const toolLabel = compactHookText(payload?.tool_label || payload?.tool_name, 60);
+  let content = "";
+  if (event === "UserPromptSubmit") content = "正在思考";
+  else if (event === "PreToolUse" || event === "PostToolUse") content = toolLabel ? `正在执行 ${toolLabel}` : "正在执行任务";
+  else if (event === "SubagentStop") content = "子代理已返回，继续处理";
+  else if (event === "PreCompact") content = "正在整理上下文";
+  else if (event === "Stop") content = "已完成";
+  else if (event === "SessionEnd") content = "会话已结束";
+  else if (status === "working") content = "正在处理";
+  else if (status === "done") content = "已完成";
+  else if (status === "error") content = "执行失败";
+  else if (status === "idle" || status === "sleeping") content = "等待任务";
+  return { title, content, status, event, updatedAtMs: Date.now() };
+}
 function buildWorkBuddyHookDisplay(payload, status, event) {
   const { displayText } = require("../../../hooks/workbuddy-display");
   const sessionId = payload?.session_id;
@@ -1782,6 +1802,7 @@ function syncHooks(port, autoStart, options = {}) {
       port,
       autoStart: Boolean(autoStart),
       syncLegacyHooks: options.syncLegacyHooks !== false,
+      syncKiro: options.syncKiro === true,
       syncMiMoCode: options.syncMiMoCode === true,
       syncWorkBuddy: options.syncWorkBuddy === true,
     },
@@ -1794,6 +1815,18 @@ function syncHooks(port, autoStart, options = {}) {
   return worker;
 }
 
+function shouldPublishHookState(config, agentId) {
+  // Hook-only agents (Devin cloud status, Kiro) must reach the device even
+  // when no Claude/MiMo/WorkBuddy hook sync is enabled.
+  const normalized = normalizeAgentId(agentId);
+  return Boolean(
+    config?.http?.syncHooks
+    || config?.mimocode?.enabled
+    || config?.workbuddy?.enabled
+    || normalized === "devin"
+    || normalized === "kiro"
+  );
+}
 function isAgentBusyState(state) {
   return state === "working" || state === "speaking" || state === "waiting_user";
 }
@@ -2353,8 +2386,7 @@ async function main() {
     strictPort: config.http.strictPort,
     publisher,
     onState: (payload) => {
-      if (config.http.syncHooks || config.mimocode.enabled || config.workbuddy.enabled
-          || normalizeAgentId(payload.agent_id) === "devin") {
+      if (shouldPublishHookState(config, payload.agent_id)) {
         publishClawdState({
           publisher,
           metricsTracker,
@@ -2434,9 +2466,12 @@ async function main() {
     mockButtonInjectPath: "http://127.0.0.1:" + port + "/mock-button-inject",
   });
 
-  if (config.http.syncHooks || config.mimocode.enabled || config.workbuddy.enabled) {
+  const syncKiro = [config.localPublisher.selectedSource, ...config.localPublisher.enabledSources]
+    .some((source) => normalizeAgentId(source) === "kiro");
+  if (config.http.syncHooks || config.mimocode.enabled || config.workbuddy.enabled || syncKiro) {
     syncHooks(port, config.http.autoStartHook, {
       syncLegacyHooks: config.http.syncHooks,
+      syncKiro,
       syncMiMoCode: config.mimocode.enabled,
       syncWorkBuddy: config.workbuddy.enabled,
     });
@@ -2538,6 +2573,7 @@ async function main() {
       MiMoCodeAdapter,
       WorkBuddyAdapter,
       DshAdapter,
+      KiroAdapter,
     } = busModule;
     const busLog = (level, message, details) => log(level, `bus :: ${message}`, details);
     const adapters = [
@@ -2547,6 +2583,7 @@ async function main() {
       new MiMoCodeAdapter({ log: busLog }),
       new WorkBuddyAdapter({ log: busLog }),
       new DshAdapter({ log: busLog }),
+      new KiroAdapter({ log: busLog }),
     ];
     agentBus = createAgentSessionBus({
       capability,
@@ -2658,6 +2695,7 @@ module.exports = {
   buildMiMoCodeHookDisplay,
   buildWorkBuddyHookDisplay,
   publishClawdState,
+  shouldPublishHookState,
   publishPermissionRequest,
   OpenClawStatusController,
   resolvePermissionDecision,

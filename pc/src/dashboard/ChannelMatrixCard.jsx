@@ -14,6 +14,7 @@ import {
   AudioLines,
   Braces,
   Code,
+  Ghost,
   Loader,
   Terminal,
   UploadCloud,
@@ -48,6 +49,7 @@ const AGENT_ICONS = {
   workbuddy: Code,
   devin: Code,
   "deepseek-harness": Braces,
+  kiro: Ghost,
 };
 
 function appearanceKindLabel(appearance) {
