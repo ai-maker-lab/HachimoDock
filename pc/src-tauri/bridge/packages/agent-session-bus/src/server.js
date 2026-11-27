@@ -327,7 +327,9 @@ class AgentSessionBus {
           }
           return session;
         });
-        if (agentId === "claude-code" || agentId === "codex" || agentId === "mimocode" || agentId === "workbuddy" || agentId === "devin" || agentId === "kiro") {
+        // Kiro is intentionally absent: it runs in compact mode without device
+        // session cards (see publishKiroCompactCaption in headless-mqtt.js).
+        if (agentId === "claude-code" || agentId === "codex" || agentId === "mimocode" || agentId === "workbuddy" || agentId === "devin") {
           for (const status of Array.isArray(statuses) ? statuses : []) {
             const id = normalizeStatusId(status?.id);
             if (!id || seen.has(id)) continue;

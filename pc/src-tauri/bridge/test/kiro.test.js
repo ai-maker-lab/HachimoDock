@@ -122,10 +122,14 @@ test("sync-all registers Kiro hooks only when Kiro is followed", () => {
     process.env.HOME = previousHome;
   }
 });
-test("Kiro hook state is published to the local device state with a Kiro bubble", () => {
+test("Kiro hook state is published to the local device state with a Kiro bubble", (t) => {
   const config = { http: { syncHooks: false }, mimocode: { enabled: false }, workbuddy: { enabled: false } };
   assert.equal(shouldPublishHookState(config, "kiro"), true);
   const stateDir = tempHome();
+  // The speech channel lives under os.tmpdir(); keep it away from a running client.
+  const previousTmp = process.env.TMPDIR;
+  process.env.TMPDIR = tempHome();
+  t.after(() => { process.env.TMPDIR = previousTmp; });
   const publisher = new LocalStatePublisher({ enabledSources: ["kiro"], localStateDir: stateDir });
   publishClawdState({ publisher }, {
     state: "working",
@@ -149,6 +153,35 @@ test("Kiro hook state is published to the local device state with a Kiro bubble"
   const done = JSON.parse(fs.readFileSync(path.join(stateDir, "kiro.json"), "utf8"));
   assert.equal(done.state, "done");
   assert.equal(done.display.content, "已完成");
+  // Compact mode: every Kiro update also clears the device caption, so the
+  // firmware shows its small status badge instead of the full session card.
+  const caption = JSON.parse(fs.readFileSync(path.join(os.tmpdir(), "pet-manager-bridge-speech", "kiro.json"), "utf8"));
+  assert.equal(caption.source, "kiro");
+  assert.equal(caption.displayContent, "");
+  assert.equal(caption.sessionId, undefined);
+  assert.ok(Number.isFinite(caption.tsMs));
+});
+test("Kiro sessions are not offered as device session cards", async () => {
+  const { AgentSessionBus } = require("../packages/agent-session-bus/src/server");
+  const { AdapterRegistry } = require("../packages/agent-session-bus/src/registry");
+  const adapter = new KiroAdapter({ home: tempHome(), env: {} });
+  const bus = new AgentSessionBus({
+    port: 0,
+    registry: new AdapterRegistry({ adapters: [adapter], log: () => {} }),
+    capability: { authorize: () => true, headers: () => ({}), publish() {}, clear() {} },
+    sessionStatusProvider: () => [{ id: "kiro:sess_a", state: "working", title: "Busy chat", displayContent: "正在思考" }],
+    log: () => {},
+  });
+  const captured = {};
+  const res = {
+    writeHead(status) { captured.status = status; },
+    setHeader() {},
+    end(body) { captured.body = body; },
+  };
+  await bus._handleSessions({ headers: {} }, res, new URL("http://127.0.0.1/agent/sessions?agentId=kiro"));
+  const body = JSON.parse(captured.body);
+  assert.equal(body.ok, true);
+  assert.deepEqual(body.sessions, []);
 });
 test("the Kiro bus adapter is state-only and refuses voice injection", async () => {
   const adapter = new KiroAdapter({ home: tempHome(), env: {} });

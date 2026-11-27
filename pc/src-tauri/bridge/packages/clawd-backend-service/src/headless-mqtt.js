@@ -1720,6 +1720,20 @@ function publishClawdState(config, payload) {
 
   const enriched = enrichPayloadMetrics(config.metricsTracker, out);
   config.publisher.publishSource(enriched);
+  if (source === "kiro") publishKiroCompactCaption(config.publisher, enriched.tsMs);
+}
+
+/**
+ * Kiro compact mode. Session cards and non-empty captions use the firmware's
+ * fixed 556x120 card, which covers the pet during long Kiro turns. Kiro sends
+ * no session cards (see agent-session-bus/src/server.js) and an empty caption
+ * on every update, so the device falls back to its small status badge
+ * ("工作中"), and shows nothing once the turn is done. tsMs is included so
+ * the caption is re-sent after a device reconnect clears it.
+ */
+function publishKiroCompactCaption(publisher, tsMs) {
+  if (!publisher || typeof publisher.publishSpeech !== "function") return;
+  publisher.publishSpeech("kiro", { displayContent: "", tsMs: Number.isFinite(tsMs) ? tsMs : Date.now() });
 }
 
 function buildKiroHookDisplay(payload, status, event) {
