@@ -15,3 +15,12 @@ idf_component_register(
   REQUIRES pthread lwip esp_timer
 )
 target_compile_options(${COMPONENT_LIB} PRIVATE "-Wno-format" "-Os")
+if(NOT "$ENV{PET_P4_MIRUI_STACK_ARCHIVE}" STREQUAL "")
+  set(stack_archive "$ENV{PET_P4_MIRUI_STACK_ARCHIVE}")
+  if(NOT IS_ABSOLUTE "${stack_archive}" OR NOT EXISTS "${stack_archive}")
+    message(FATAL_ERROR "PET_P4_MIRUI_STACK_ARCHIVE must point to the built RISC-V archive")
+  endif()
+  add_prebuilt_library(pet_mirui_stack "${stack_archive}")
+  target_compile_definitions(${COMPONENT_LIB} PUBLIC HACHI_STACK_ENABLED=1)
+  target_link_libraries(${COMPONENT_LIB} PRIVATE pet_mirui_stack)
+endif()

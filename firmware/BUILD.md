@@ -21,7 +21,7 @@ WiFi6 目标覆盖普通版 C6 和 DB 版 C5。构建与验收细节见 [Wi-Fi 6
 
 只想使用设备，可从 [发布页](https://github.com/ai-maker-lab/HachimoDock/releases/latest) 下载与板型及芯片匹配的完整烧录包。包内工具要求 Python **3.10+**，使用 **esptool 5.4.0**。首次安装或恢复出厂使用完整烧录，日常升级优先使用客户端 OTA。
 
-自行构建需要 Git、Python 3.10+、PlatformIO Core **6.1.19**、Node.js 22、pytest 和 Pillow。Core 6.1.18 不支持当前 v3 平台。资源使用普通 Git，不依赖 Git LFS。建议使用独立 Python 环境。
+自行构建需要 Git、Python 3.12+、PlatformIO Core **6.1.19**、Node.js 22、pytest 和 Pillow。Core 6.1.18 不支持当前 v3 平台。资源使用普通 Git，不依赖 Git LFS。建议使用独立 Python 环境。默认的 Mirui 3D 渲染器还需要 Rust 1.97.0 和 `riscv32imafc-unknown-none-elf` 目标，参见 [Mirui 构建说明](native/sprite-stack/README.md)。
 
 固件的 [WAMR 组件](components/hachi_wamr/CMakeLists.txt) 需要 `WAMR_ROOT` 指向相容的 WebAssembly Micro Runtime 源码根目录，其中应有 `build-scripts/runtime_lib.cmake`；编译选项见 [wamr-options.cmake](components/hachi_wamr/wamr-options.cmake)，许可见 [第三方声明](../THIRD_PARTY_NOTICES.md)。工具链、SDK 和 WAMR 必须由构建者准备，公开源码不包含开发者机器的依赖缓存或凭据。更换依赖版本后需要重新验证，不能据此保证与已发布镜像逐字节一致。
 

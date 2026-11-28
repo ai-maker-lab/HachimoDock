@@ -35,7 +35,7 @@ description: Generate, validate, and publish ESP32-P4 desktop-pet games, tools, 
 - 先判断能否用有界 WASM 表达，再以声明式限制否决需求。需要维护棋盘数组、记录撤销历史或自定义移动规则的小游戏（例如 5×5 滑块拼图），走 WASM 路径。设备能力尚未读取时可以先离线编译和自测，等握手确认后再同步。
 - 需要 WASM 时按 [hachiapp.md](references/hachiapp.md) 的 SDK 流程走。实际设备须宣告 `widgetWasm=hachi-wasm-v1` 才能同步 WASM；该能力与 `widgetProgram` 无关。
 - 新 WASM 组件使用 640×480 原生画布，设备须宣告 `widgetWasmCanvas=640x480-v1`。交付前用实际组件检查首屏和主操作。按需要覆盖交互、结束等关键状态，若已有确认稿则对照检查。在素材、字号或画布需要调整时，先向用户说明；不能静默缩小素材再放大。
-- 从第一张图开始，用 `petui sprite source.png sprite.h` 生成 WASM 精灵。该命令接受 RGB、RGBA 和索引色 PNG，用固件同源解码器检查实际产物。在 app.c 中包含生成的头文件，使用其中的宽高和字节数组调用 `hachi_sprite`。
+- WASM 使用 PNG 精灵时，用 `petui sprite source.png sprite.h` 生成 WASM 精灵。该命令接受 RGB、RGBA 和索引色 PNG，用固件同源解码器检查实际产物。在 app.c 中包含生成的头文件，使用其中的宽高和字节数组调用 `hachi_sprite`。
 - 打包时必须执行最终 WASM 的启动和连续帧检查。带交互的组件在项目根目录提供 `game.trace`，让 `构建并试玩` 自动回放；使用命令行时传 `--trace game.trace`。
 - 实体键的 `buttons.json.action` 必须使用固件的 `lab.*` 动作，用户可见文字写在 `label`。在回放中按设备事件验收全部绑定。承诺可点按的 WASM 游戏声明 `"wasmTouch": true`，验收真实首屏、触点和画面响应。见 [实体键和触屏](references/hachiapp.md#验收实体键和触屏)。
 - WASM 验收要通过固件同源 WAMR 的执行预算，覆盖首帧、首次解包、页面切换和密集输入。检查器、回放格式和命令见 [hachiapp.md](references/hachiapp.md#wasm-执行预算验收)。需要验收实体按键、触屏或屏幕实际表现时，用目标设备核对。
@@ -53,6 +53,7 @@ description: Generate, validate, and publish ESP32-P4 desktop-pet games, tools, 
 
 - 格子状态与包内文本表：读取 [cells-texts.md](references/cells-texts.md)，分别核验 `widgetCells`、`widgetTexts`。
 - 新图形预算：读取 [graphics-v2.md](references/graphics-v2.md)，不能全局提高旧包预算。
+- WASM 3D 分层模型、高度场、贴图迷宫或程序星场：读取 [Mirui 3D 渲染接口](references/mirui-3d.md)。按实际导入选择接口，并核对设备对应的 USB 能力和同源检查器。
 - 粒子与关键帧背景：读取 [particles.md](references/particles.md)、[keyframe-background.md](references/keyframe-background.md)，分别核验能力；静态背景不要求关键帧能力。
 - 多刚体与旋转精灵：读取 [bodies-preview.md](references/bodies-preview.md)，核验 `widgetBodies`；不把单角色 motion 的能力当成多刚体能力。
 - 多页应用、文本表单、集合、长文、通知和 PC HTTP 数据：读取 [d-host-and-surfaces.md](references/d-host-and-surfaces.md)，逐项核验能力与宿主配置；旧表单限制不用于描述显式 v3 表单。
@@ -115,7 +116,7 @@ description: Generate, validate, and publish ESP32-P4 desktop-pet games, tools, 
    - 每一项需求分别由哪个 runtime 原语实现。
    - 哪些动作适合摇杆上/下/左/右，游戏的 SW1 开始/重开动作，以及 SW2 的题材专属动作；退出由设备全局设置负责（出厂默认 SW3，但用户可以改绑或不绑定），组件不得定义退出动作或占用出厂默认退出键。
    - 开始界面设计前读 [references/ui-design.md](references/ui-design.md)，确定首屏焦点、主操作和与题材匹配的布局。控件使用动作名，键位提示以实际绑定为准。按设备尺寸渲染，再选用真实画面作封面。
-   - 游戏先设计核心 PNG 素材：玩家角色、主要敌人和最重要的动态物件优先使用透明背景 PNG / 横向 sprite sheet。矩形、方块和内置 shape 只用于平台、子弹、金币、碰撞区等次要几何元素，或确实更符合极简题材时使用；不能因为省事让主体退化成色块。
+   - 游戏先设计核心角色和场景素材。二维组件的角色、主要敌人和重要动态物件优先使用透明背景 PNG 或横向 sprite sheet。三维组件可用 SSK1 模型和索引贴图。矩形、方块和内置 shape 只用于平台、子弹、金币、碰撞区等次要几何元素，或确实更符合极简题材时使用；不能因为省事让主体退化成色块。
 6. 读取 [references/patterns.md](references/patterns.md) 检查机制是否完整。该文件只有抽象检查项，不是组件模板。
 7. 在正式组件库之外准备独立工作包：
    - 新建组件必须从空目录开始，不要复制或改名任何既有组件。

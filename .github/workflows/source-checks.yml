@@ -200,6 +200,8 @@ jobs:
           /usr/lib/llvm-20/bin/wasm-ld --version
           echo /usr/lib/llvm-20/bin >> "$GITHUB_PATH"
       - run: python -m pip install Pillow pytest platformio==6.1.19
+      - name: Install the Rust target for the default P4 renderer
+        run: rustup toolchain install 1.97.0 --profile minimal --target riscv32imafc-unknown-none-elf
       - name: Check PetUI authoring and package handling
         run: python -m pytest -q pc/skills/petui/scripts pc/tests/test_petui_package_traversal.py
       - name: Restore locked SDK downloads

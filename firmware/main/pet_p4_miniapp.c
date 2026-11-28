@@ -3300,6 +3300,10 @@ static bool wasm_declaration_valid(const cJSON *root, const pet_p4_miniapp_sprit
   const cJSON *audio=cJSON_GetObjectItemCaseSensitive(root,"hachiAudio");
   const cJSON *audio_hash=cJSON_GetObjectItemCaseSensitive(root,"hachiAudioSha256");
   const cJSON *network=cJSON_GetObjectItemCaseSensitive(root,"hachiNetwork");
+  const cJSON *stack = cJSON_GetObjectItemCaseSensitive(root, "hachiStack");
+  const cJSON *terrain = cJSON_GetObjectItemCaseSensitive(root, "hachiTerrain");
+  const cJSON *world = cJSON_GetObjectItemCaseSensitive(root, "hachiWorld");
+  const cJSON *scene = cJSON_GetObjectItemCaseSensitive(root, "hachiScene");
   if(network){
 #if PET_COMPONENT_NETWORK_ENABLED
     pet_net_policy_t *policy=pet_net_alloc(sizeof *policy);
@@ -3311,7 +3315,7 @@ static bool wasm_declaration_valid(const cJSON *root, const pet_p4_miniapp_sprit
 #endif
   }
   if(!decl){
-    return !canvas && !host && !audio && !audio_hash && !network && bytes==0;
+    return !canvas && !host && !audio && !audio_hash && !network && !stack && !terrain && !world && !scene && bytes==0;
   }
   if(!cJSON_IsString(decl)||strlen(decl->valuestring)!=64||!bytes||bytes>HACHI_MAX_MODULE
       ||pack->data_length>sizeof(pack->pixels)-bytes)return false;
@@ -3320,6 +3324,13 @@ static bool wasm_declaration_valid(const cJSON *root, const pet_p4_miniapp_sprit
   bool native, services, uses_audio;
   if (!hachi_module_host_profile(module, bytes, &native, &services, &uses_audio)) return false;
   bool net=false;if(!hachi_module_network_profile(module,bytes,&net)||net!=(network!=NULL))return false;
+  bool uses_stack, uses_terrain, uses_world, uses_scene;
+  if (!hachi_module_stack_profile(module, bytes, &uses_stack, &uses_terrain, &uses_world, &uses_scene) ||
+      (uses_stack ? !cJSON_IsString(stack) || strcmp(stack->valuestring, HACHI_STACK_PROFILE) : stack != NULL) ||
+      (uses_terrain ? !cJSON_IsString(terrain) || strcmp(terrain->valuestring, HACHI_TERRAIN_PROFILE) : terrain != NULL) ||
+      (uses_world ? !cJSON_IsString(world) || strcmp(world->valuestring, HACHI_WORLD_PROFILE) : world != NULL) ||
+      (uses_scene ? !cJSON_IsString(scene) || strcmp(scene->valuestring, HACHI_SCENE_PROFILE) : scene != NULL))
+    return false;
   if (uses_audio) {
     if (!cJSON_IsString(audio) || strcmp(audio->valuestring, HACHI_AUDIO_PROFILE) ||
         !cJSON_IsString(audio_hash) || strlen(audio_hash->valuestring) != 64 ||
@@ -3348,7 +3359,7 @@ static bool __attribute__((optimize("Oz"))) parse_runtime_impl(
 ) {
   PET_WIDGET_TRACE_SCOPE(trace_parse, PET_WTRACE_PARSE);
   static const char *const allowed[] = {
-    "accessory", "hardware", "schema_version", "vars", "states", "initial_state", "pages", "initial_page", "hachiWasm", "hachiCanvas", "hachiHost", "hachiNetwork",
+    "accessory", "hardware", "schema_version", "vars", "states", "initial_state", "pages", "initial_page", "hachiWasm", "hachiCanvas", "hachiHost", "hachiNetwork", "hachiStack", "hachiTerrain", "hachiWorld", "hachiScene",
 #if PET_P4_WASM_AUDIO
     "hachiAudio", "hachiAudioSha256",
 #endif

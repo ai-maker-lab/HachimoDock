@@ -5,6 +5,9 @@ Import("env")
 import os
 import re
 import atexit
+from pathlib import Path
+import subprocess
+import sys
 
 project_dir = env.subst("$PROJECT_DIR")
 # Keep exact per-environment SDK compilation contexts available to host checks.
@@ -15,8 +18,6 @@ env["ENV"]["PET_P4_SYSTEM_WIFI"] = env.GetProjectOption("custom_p4_system_wifi",
 if env["ENV"]["PET_P4_SYSTEM_WIFI"] == "1":
     # SCons can reuse a CMake database without reconfiguration. Regenerate even
     # with an unset input so a public incremental build drops candidate trust.
-    import subprocess
-    import sys
     config_input = os.environ.get("PETUI_COMMUNITY_CONFIG_INPUT", "")
     env["ENV"]["PETUI_COMMUNITY_CONFIG_INPUT"] = config_input
     subprocess.run([sys.executable, os.path.join(project_dir, "tools/community_build_config.py"),
@@ -29,6 +30,37 @@ env["ENV"]["PET_P4_PROJECT_VER_OVERRIDE"] = env.GetProjectOption(
 env["ENV"]["PET_P4_UART_BAUD_OVERRIDE"] = env.GetProjectOption(
     "custom_p4_uart_baud", "4000000"
 )
+
+toolchain_dir = env.PioPlatform().get_package_dir("toolchain-riscv32-esp")
+mirui_stack_archive = ""
+if os.environ.get("PET_P4_MIRUI_STACK", env.GetProjectOption("custom_p4_mirui_stack", "1")) == "1":
+    mirui_stack_archive = os.environ.get("PET_P4_MIRUI_STACK_ARCHIVE", "")
+    if not mirui_stack_archive:
+        suffix = ".exe" if os.name == "nt" else ""
+        archive_tool = f"riscv32-esp-elf-ar{suffix}"
+        if toolchain_dir:
+            archive_tool = os.path.join(toolchain_dir, "bin", archive_tool)
+        cache = os.environ.get("PETUI_MIRUI_CACHE") or os.path.join(env.subst("$PROJECT_BUILD_DIR"), "mirui-stack")
+        mirui_stack_archive = subprocess.check_output(
+            [sys.executable, os.path.join(project_dir, "native/sprite-stack/build.py"),
+             "--ensure", cache, "--archive-tool", archive_tool], text=True, cwd=project_dir,
+        ).strip()
+if mirui_stack_archive:
+    if not os.path.isabs(mirui_stack_archive) or not os.path.isfile(mirui_stack_archive):
+        raise RuntimeError("PET_P4_MIRUI_STACK_ARCHIVE must point to the built RISC-V archive")
+    # PlatformIO builds its own objects independently of CMake's Ninja graph.
+    env.AppendUnique(CPPDEFINES=[("HACHI_STACK_ENABLED", 1)])
+
+# The ESP-IDF builder starts CMake from os.environ and reuses its existing
+# code model until a build input changes. Invalidate it when the archive changes.
+os.environ["PET_P4_MIRUI_STACK_ARCHIVE"] = mirui_stack_archive
+env["ENV"]["PET_P4_MIRUI_STACK_ARCHIVE"] = mirui_stack_archive
+config_dir = Path(env.subst("$BUILD_DIR")) / "config"
+config_dir.mkdir(parents=True, exist_ok=True)
+stack_stamp = config_dir / "mirui-stack-archive"
+if not stack_stamp.is_file() or stack_stamp.read_text(encoding="utf-8") != mirui_stack_archive:
+    stack_stamp.write_text(mirui_stack_archive, encoding="utf-8")
+    os.utime(config_dir, None)
 
 # Use a linker that can resolve the vendor hardware-loop relocations in the
 # pre-v3 H.264 archives. Keep the v1 SDK and compiler for all compilation.
@@ -76,7 +108,6 @@ env.AddPostAction("$BUILD_DIR/${PROGNAME}.bin", normalize_component_lock)
 # unchanged. Interrupted/abrupt exits still require the normal source hash gate.
 atexit.register(normalize_component_lock,None,None,env)
 
-toolchain_dir = env.PioPlatform().get_package_dir("toolchain-riscv32-esp")
 if toolchain_dir:
     candidates = [
         os.path.join(toolchain_dir, "bin"),

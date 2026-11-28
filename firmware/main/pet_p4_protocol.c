@@ -3175,6 +3175,14 @@ __attribute__((optimize("Oz"))) void pet_p4_add_bundle_capabilities(cJSON *capab
       ? HACHI_MAX_MODULE : PET_P4_MINIAPP_SPRITE_PIXEL_BYTES_MAX);
   cJSON_AddNumberToObject(capabilities, "widgetWasmMemoryPages", HACHI_MAX_MEMORY_PAGES);
   cJSON_AddStringToObject(capabilities, "widgetWasmCanvas", "640x480-v1");
+  cJSON_AddStringToObject(capabilities, "widgetWasmFrameContinuation", HACHI_FRAME_CONTINUATION_PROFILE);
+#if HACHI_STACK_ENABLED
+  cJSON_AddStringToObject(capabilities, "widgetWasmSpriteStack", HACHI_STACK_PROFILE);
+  cJSON_AddStringToObject(capabilities, "widgetWasmStackTerrain", HACHI_TERRAIN_PROFILE);
+  cJSON_AddStringToObject(capabilities, "widgetWasmStackWorld", HACHI_WORLD_PROFILE);
+  cJSON_AddStringToObject(capabilities, "widgetWasmStackWorld160", HACHI_WORLD_160_PROFILE);
+  cJSON_AddStringToObject(capabilities, "widgetWasmScene", HACHI_SCENE_PROFILE);
+#endif
   cJSON_AddStringToObject(capabilities, "widgetWasmHost", HACHI_HOST_PROFILE);
 #if PET_COMPONENT_NETWORK_ENABLED
   cJSON_AddStringToObject(capabilities, "widgetWasmNetwork", PET_NETWORK_PROFILE);

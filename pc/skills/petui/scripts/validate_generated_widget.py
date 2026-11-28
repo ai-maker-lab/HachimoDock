@@ -2167,14 +2167,17 @@ def validate_widget(
         and "scene" not in runtime
         and "game" not in runtime
     )
+    from pack_hachiapp import RENDER_PROFILES
+
     wasm_canvas = False
     if verified_wasm_gameplay and isinstance(runtime, dict) and runtime.get("hachiWasm"):
         from pack_hachiapp import MAX_WASM_BYTES, AUDIO_ASSET, wasm_profile, validate_audio, validate_audio_ownership
         try:
             with (widget_dir / "runtime/app.wasm").open("rb") as file:
                 module = file.read(MAX_WASM_BYTES + 1)
-            canvas, host, audio, network = wasm_profile(
-                module, include_network=True, component_id=manifest.get("id") if isinstance(manifest, dict) else None)
+            canvas, host, audio, network, render = wasm_profile(
+                module, include_network=True, include_render=True,
+                component_id=manifest.get("id") if isinstance(manifest, dict) else None)
             if network:
                 from component_network import PROFILE, CREDENTIAL_PROFILE, validate as validate_network
                 policy = validate_network(runtime.get("hachiNetwork"))
@@ -2188,6 +2191,11 @@ def validate_widget(
                     or canvas != runtime.get("hachiCanvas") or host != runtime.get("hachiHost")
                     or audio != runtime.get("hachiAudio")):
                 raise ValueError("WASM 摘要、画布或宿主声明与模块不匹配")
+            for key, capability, _ in RENDER_PROFILES.values():
+                if runtime.get(key) != render.get(key) or (key not in render and key in runtime):
+                    raise ValueError(f"WASM {key} 声明与模块不匹配")
+                if key in render and negotiated and capabilities.get(capability) != render[key]:
+                    raise ValueError(f"设备未声明 {capability}={render[key]}")
             if audio:
                 validate_audio_ownership(runtime)
                 with (widget_dir / AUDIO_ASSET).open("rb") as file:
@@ -2203,6 +2211,8 @@ def validate_widget(
             wasm_owns_gameplay = False
     elif isinstance(runtime, dict) and "hachiNetwork" in runtime:
         errors.append("网络声明需要已验证的 WASM 模块和网络服务导入")
+    elif isinstance(runtime, dict) and any(key in runtime for key, _, _ in RENDER_PROFILES.values()):
+        errors.append("Mirui 渲染声明需要已验证的 WASM 模块和对应导入")
     elif (widget_dir / "assets/speech.hab").exists():
         errors.append("WASM 语音资源缺少已验证的模块声明")
     wasm_actions = frozenset({"lab.a", "lab.b", "lab.up", "lab.down", "lab.left", "lab.right"}) if wasm_owns_gameplay else frozenset()

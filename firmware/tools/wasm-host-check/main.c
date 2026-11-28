@@ -11,6 +11,7 @@ static hachi_snapshot_t local_clock, uv;
 static int uv_status;
 static uint16_t observed_pixels[HACHI_NATIVE_W * HACHI_NATIVE_H];
 static hachi_text_layer_t observed_text;
+static hachi_text_layer_t displayed_text;
 
 static int read_host(int kind, hachi_snapshot_t *out) {
     if (kind == HACHI_HOST_LOCAL && local_clock.time_ms) {
@@ -37,7 +38,12 @@ static uint32_t random_word(void) {
 
 static bool draw(hachi_runtime_t *runtime, int elapsed) {
     monotonic_ms += (unsigned)elapsed;
-    return hachi_frame_run(runtime, elapsed > 80 ? 80 : elapsed);
+    if (!hachi_frame_run(runtime, elapsed > 80 ? 80 : elapsed)) return false;
+    if (runtime->frame_continuation) {
+        if (runtime->frame_pending) runtime->text = displayed_text;
+        else displayed_text = runtime->text;
+    }
+    return true;
 }
 
 static bool contains_text(const hachi_text_layer_t *layer, const char *text) {

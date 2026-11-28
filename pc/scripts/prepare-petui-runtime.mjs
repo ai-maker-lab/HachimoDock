@@ -28,17 +28,30 @@ const WAMR = [
 ];
 const firmware = fileURLToPath(new URL("../../firmware/", import.meta.url));
 const checkerSource = join(firmware, "tools/wasm-host-check");
+const miruiTargets = {
+  "macos-arm64": "aarch64-apple-darwin",
+  "macos-x64": "x86_64-apple-darwin",
+  "windows-x64": process.platform === "win32" ? "x86_64-pc-windows-msvc" : "x86_64-pc-windows-gnu",
+};
 const checkerInputs = [
   fileURLToPath(import.meta.url),
   join(checkerSource, "CMakeLists.txt"), join(checkerSource, "main.c"),
-  ...["hachi_runtime.c", "hachi_runtime.h", "wamr-options.cmake"].map((name) =>
+  ...["hachi_runtime.c", "hachi_runtime.h", "hachi_sprite_stack.h", "wamr-options.cmake"].map((name) =>
     join(firmware, "components/hachi_wamr", name)),
 ];
-const checkerDigest = createHash("sha256").update(WAMR_REVISION);
-for (const input of checkerInputs) checkerDigest.update(readFileSync(input));
-const VERSION = `wasi27-v4-${checkerDigest.digest("hex").slice(0, 12)}`;
+function prepareMirui(cache, target) {
+  if (process.env.PETUI_MIRUI_STACK === "0") return "";
+  const override = process.env.PETUI_MIRUI_STACK_HOST_ARCHIVE;
+  if (override) return resolve(override);
+  const python = process.env.PETUI_PYTHON || (process.platform === "win32" ? "python" : "python3");
+  const native = join(firmware, "native/sprite-stack/build.py");
+  const archiveCache = resolve(process.env.PETUI_MIRUI_CACHE || join(cache, "mirui-stack"));
+  return execFileSync(python, [native, "--ensure", archiveCache, "--host", "--host-target", miruiTargets[target]], {
+    encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], timeout: 300_000,
+  }).trim();
+}
 
-async function buildChecker(cache, scratch, stage, target, name) {
+async function buildChecker(cache, scratch, stage, target, name, stackArchive) {
   const source = await archive(cache, ...WAMR);
   // The archive is content-pinned above. Extract outside the runtime bundle.
   execFileSync("tar", ["--exclude", "*/language-bindings/python/LICENSE", "-xf", source, "-C", scratch], { stdio: "inherit" });
@@ -64,7 +77,8 @@ async function buildChecker(cache, scratch, stage, target, name) {
       `-DWAMR_BUILD_TARGET=${arm ? "AARCH64" : "X86_64"}`);
   }
   execFileSync("cmake", ["-S", checkerSource, "-B", build, ...options], {
-    env: { ...process.env, WAMR_ROOT: wamr }, stdio: "inherit", timeout: 120_000,
+    env: { ...process.env, WAMR_ROOT: wamr, PET_P4_MIRUI_STACK_ARCHIVE: stackArchive },
+    stdio: "inherit", timeout: 120_000,
   });
   execFileSync("cmake", ["--build", build, "--config", "Release", "--parallel", "4"], {
     stdio: "inherit", timeout: 180_000,
@@ -73,6 +87,9 @@ async function buildChecker(cache, scratch, stage, target, name) {
   if (!candidate) throw new Error("找不到构建完成的固件同源 WASM 检查器");
   copyFileSync(candidate, join(stage, "bin", name));
   copyFileSync(join(wamr, "LICENSE"), join(stage, "WAMR-LICENSE.txt"));
+  if (stackArchive) {
+    copyFileSync(join(dirname(stackArchive), "MIRUI-LICENSE.txt"), join(stage, "MIRUI-LICENSE.txt"));
+  }
 }
 
 async function sha(path) {
@@ -128,16 +145,21 @@ async function prepare(target, output) {
   const suffix = windows ? ".exe" : "";
   const binaries = [`bin/clang${suffix}`, `bin/wasm-ld${suffix}`];
   const checker = `petui-wasm-check${suffix}`;
+  const cache = resolve(process.env.PETUI_AUTHORING_CACHE || join(homedir(), ".cache/petui-build"));
+  const stackArchive = prepareMirui(cache, target);
+  const checkerDigest = createHash("sha256").update(WAMR_REVISION);
+  for (const input of checkerInputs) checkerDigest.update(readFileSync(input));
+  if (stackArchive) checkerDigest.update(await sha(stackArchive));
+  const version = `wasi27-v4-${checkerDigest.digest("hex").slice(0, 12)}`;
   try {
     const manifest = JSON.parse(readFileSync(join(output, "manifest.json"), "utf8"));
-    if (manifest.version === VERSION && manifest.target === target
+    if (manifest.version === version && manifest.target === target
       && !existsSync(join(output, "python")) && [...binaries, `bin/${checker}`].every((name) => manifest.files[name])
       && JSON.stringify(await fingerprints(output)) === JSON.stringify(manifest.files)) return;
   } catch {
     // Missing, old or invalid stages are replaced only after a complete new stage.
   }
 
-  const cache = resolve(process.env.PETUI_AUTHORING_CACHE || join(homedir(), ".cache/petui-build"));
   mkdirSync(cache, { recursive: true });
   const sdk = await archive(cache, sdkUrl, sdkHash);
   const crt = windows ? await archive(cache, ...CRT) : null;
@@ -169,10 +191,10 @@ async function prepare(target, output) {
       extract(crt, dlls, scratch);
       for (const name of dlls) copyFileSync(join(scratch, name), join(stage, "bin", name));
     }
-    await buildChecker(cache, scratch, stage, target, checker);
+    await buildChecker(cache, scratch, stage, target, checker, stackArchive);
     writeFileSync(join(stage, "UPSTREAM.txt"), [sdkUrl, WAMR[0], ...(crt ? [CRT[0]] : [])].join("\n") + "\n");
     copyFileSync(fileURLToPath(new URL("./petui-llvm-LICENSE.txt", import.meta.url)), join(stage, "LLVM-LICENSE.txt"));
-    writeFileSync(join(stage, "manifest.json"), JSON.stringify({ version: VERSION, target, files: await fingerprints(stage) }));
+    writeFileSync(join(stage, "manifest.json"), JSON.stringify({ version, target, files: await fingerprints(stage) }));
     if (existsSync(output)) renameSync(output, join(scratch, "old"));
     try {
       renameSync(stage, output);

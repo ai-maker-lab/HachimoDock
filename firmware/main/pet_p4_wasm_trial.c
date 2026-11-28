@@ -14,6 +14,7 @@
 #include "esp_log.h"
 #include "esp_pthread.h"
 #include "esp_timer.h"
+#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -31,7 +32,9 @@ typedef struct { unsigned session; int action; } command_t;
 static atomic_uint requested, requested_revision, failed_session;
 static atomic_bool worker_failed;
 static atomic_uint dropped_inputs;
+static atomic_uint rendered_frames, frame_continuations;
 enum { INPUT_QUEUE_SIZE = 24, INPUT_EDGE_RESERVE = 4 };
+enum { FRAME_YIELD_MS = 2, MAX_FAST_CONTINUATIONS = 8 };
 static QueueHandle_t inputs, commands, install_checks;
 static pthread_mutex_t start_lock = PTHREAD_MUTEX_INITIALIZER;
 static portMUX_TYPE failure_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -69,6 +72,16 @@ void pet_p4_wasm_trial_diagnostics(cJSON *parent) {
   memcpy(error, last_failure_error, sizeof(error));
   portEXIT_CRITICAL(&failure_lock);
   cJSON_AddNumberToObject(parent, "wasmDroppedInputs", atomic_load(&dropped_inputs));
+  cJSON_AddNumberToObject(parent, "wasmFramesPublished", atomic_load(&rendered_frames));
+#if HACHI_STACK_ENABLED
+  uint32_t world_timing[3];
+  if (hachi_world_last_us(world_timing)) {
+    cJSON_AddNumberToObject(parent, "wasmWorldTerrainUs", world_timing[0]);
+    cJSON_AddNumberToObject(parent, "wasmWorldModelsUs", world_timing[1]);
+    cJSON_AddNumberToObject(parent, "wasmWorldResolveUs", world_timing[2]);
+  }
+#endif
+  cJSON_AddNumberToObject(parent, "wasmFrameContinuations", atomic_load(&frame_continuations));
   if (!id[0]) return;
   cJSON *failure = cJSON_AddObjectToObject(parent, "wasmLastFailure");
   if (!failure) return;
@@ -294,12 +307,17 @@ static void *worker(void *arg) {
   char active_id[48]="", active_hash[65]="";
   unsigned session=0, loaded_revision=0;
   uint64_t prior_ms=0,last_write_ms=0;
+  uint64_t frame_started_ms = 0;
+  unsigned fast_continuations = 0;
   while (true) {
     install_check_t *check;
     if (xQueueReceive(install_checks, &check, 0) == pdTRUE) check_install(check);
     unsigned target=atomic_load(&requested);
     unsigned revision=atomic_load(&requested_revision);
+    unsigned wait_ms = revision ? 30 : 80;
     if (target!=session) {
+      frame_started_ms = 0;
+      fast_continuations = 0;
       if (network_lease.generation) pet_net_device_activate(NULL, NULL, &network_lease);
       if(active_id[0]&&memcmp(&saves,&persisted,sizeof(saves))){
         if(!write_save(active_id,&saves)){
@@ -379,19 +397,40 @@ static void *worker(void *arg) {
         vTaskDelay(pdMS_TO_TICKS(10));
         continue;
       }
+      if (runtime.frame_continuation && !frame_started_ms) frame_started_ms = now_ms;
       if (ok && hachi_frame_run(&runtime, dt > 80 ? 80 : (int)dt)) {
         apply_effects(&runtime, session);
-        xSemaphoreTake(frame_lock, portMAX_DELAY);
-        uint16_t *old = shown;
-        shown = drawing;
-        drawing = old;
-        shown_width = runtime.width;
-        shown_text.count = runtime.text.count;
-        memcpy(shown_text.items, runtime.text.items, shown_text.count * sizeof(shown_text.items[0]));
-        shown_session = session;
-        shown_revision = revision;
-        xSemaphoreGive(frame_lock);
-        runtime.screen = drawing;
+        if (runtime.frame_pending) {
+          atomic_fetch_add(&frame_continuations, 1);
+          if (fast_continuations < MAX_FAST_CONTINUATIONS) {
+            ++fast_continuations;
+            wait_ms = FRAME_YIELD_MS;
+          } else {
+            // A package that never completes still pays a periodic full delay.
+            fast_continuations = 0;
+          }
+        } else {
+          xSemaphoreTake(frame_lock, portMAX_DELAY);
+          uint16_t *old = shown;
+          shown = drawing;
+          drawing = old;
+          shown_width = runtime.width;
+          shown_text.count = runtime.text.count;
+          memcpy(shown_text.items, runtime.text.items, shown_text.count * sizeof(shown_text.items[0]));
+          shown_session = session;
+          shown_revision = revision;
+          xSemaphoreGive(frame_lock);
+          runtime.screen = drawing;
+          atomic_fetch_add(&rendered_frames, 1);
+          if (runtime.frame_continuation) {
+            const uint64_t work_ms = esp_timer_get_time() / 1000 - frame_started_ms;
+            const unsigned period = CONFIG_PET_P4_MAIN_RENDER_INTERVAL_MS;
+            wait_ms = work_ms + FRAME_YIELD_MS < period
+                ? period - (unsigned)work_ms : FRAME_YIELD_MS;
+            frame_started_ms = 0;
+            fast_continuations = 0;
+          }
+        }
 #if PET_P4_WASM_AUDIO
         if (runtime.sample_index != HACHI_SAMPLE_NONE) sample_index = runtime.sample_index;
         if (runtime.music_index != HACHI_SAMPLE_NONE) music_index = runtime.music_index;
@@ -413,7 +452,8 @@ static void *worker(void *arg) {
         hachi_close(&runtime);
       }
     }
-    vTaskDelay(pdMS_TO_TICKS(revision ? 30 : 80));
+    const TickType_t wait_ticks = pdMS_TO_TICKS(wait_ms);
+    vTaskDelay(wait_ticks ? wait_ticks : 1);
   }
 }
 
@@ -425,7 +465,17 @@ static bool start(void) {
   esp_pthread_cfg_t saved;
   bool had_config = esp_pthread_get_cfg(&saved) == ESP_OK;
   esp_pthread_cfg_t config = esp_pthread_get_default_config();
-  config.stack_size = 16384;
+  // The synchronous Mirui renderer runs below the WAMR interpreter and
+  // keeps projection and tile state on this same native stack.
+  config.stack_size = HACHI_STACK_ENABLED ? 28672 : 16384;
+#if HACHI_STACK_ENABLED && !defined(CONFIG_FREERTOS_UNICORE)
+  // Keep long native raster calls off the LCD composition task's core.
+#if defined(CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1)
+  config.pin_to_core = 0;
+#else
+  config.pin_to_core = 1;
+#endif
+#endif
   config.thread_name = "pet_wasm";
   pthread_t thread;
   bool ready = inputs && commands && frame_lock && install_checks &&
