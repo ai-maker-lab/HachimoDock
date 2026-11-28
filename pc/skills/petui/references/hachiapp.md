@@ -81,6 +81,16 @@ void hachi_frame(int elapsed_ms) {
 同步前分别核验 `widgetWasm=hachi-wasm-v1` 和 `widgetWasmCanvas=640x480-v1`。
 不声明原生画布的旧模块仍使用 320×240 像素和旧触摸坐标。
 
+支持 `widgetWasmFrameContinuation=hachi-frame-continuation-v1` 的固件允许原生画布模块分批完成一张画面。模块声明同名的 WASM 自定义节，节名后不附加数据。固件在 `hachi_frame` 的毫秒参数中额外置位 `HACHI_FRAME_CONTINUATION_FLAG`。模块读取耗时前应清除此位。
+
+收到该位时，中间回调可直接返回并保留上一张完整画面。提交一张画面时，从黑色底图开始，绘制一整帧。需要提交纯黑时可绘制一个黑色矩形。每次回调的指令预算保持不变，连续分批回调次数由板端限制。旧固件传入普通毫秒参数，模块可继续按旧约定在每次回调绘制完整画面。
+
+### Mirui 3D 渲染
+
+需要分层模型、共享深度的地形与座舱、迷宫墙网格或程序星场时，使用
+[Mirui 3D 渲染接口](mirui-3d.md)。它列出四个 WASM 导入、对应设备能力、
+C/C++ 数据布局和 SSK1 资源配额。打包与测试使用链接了同一渲染器的 WAMR 检查器。
+
 ### WASM 执行预算验收
 
 固件的 WAMR 对 `init`、每个事件和每帧分别计量，当前每次调用限 160,000 条

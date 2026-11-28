@@ -3,6 +3,32 @@
 #include <stdio.h>
 #include <string.h>
 
+#if HACHI_STACK_ENABLED && defined(ESP_PLATFORM)
+#include "esp_heap_caps.h"
+#include "esp_timer.h"
+#include <stdatomic.h>
+static atomic_uint world_us[3];
+
+uint32_t pet_world_tick_us(void) {
+    return (uint32_t)esp_timer_get_time();
+}
+
+bool hachi_world_last_us(uint32_t timing[3]) {
+    for (size_t i = 0; i < 3; ++i) timing[i] = atomic_load_explicit(&world_us[i], memory_order_relaxed);
+    return timing[0] != 0;
+}
+
+void *pet_stack_alloc(size_t size, size_t alignment) {
+    const uint32_t caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+    return alignment <= sizeof(void *) ? heap_caps_malloc(size, caps) :
+        heap_caps_aligned_alloc(alignment, size, caps);
+}
+
+void pet_stack_free(void *pointer) {
+    heap_caps_free(pointer);
+}
+#endif
+
 #if !defined(ESP_PLATFORM) || (defined(PET_P4_COMPONENT_NETWORK) && PET_P4_COMPONENT_NETWORK)
 #define HACHI_NETWORK_ENABLED 1
 #else
@@ -28,13 +54,14 @@ static const uint8_t *read_name(const uint8_t **p, const uint8_t *end, uint32_t 
 }
 
 static bool module_profiles(const uint8_t *bytes, size_t size, bool *native_canvas,
-bool *host_services, bool *audio,bool *network) {
+    bool *host_services, bool *audio, bool *network, bool *frame_continuation, bool *sprite_stack, bool *terrain, bool *world, bool *half_resolution_world, bool *scene) {
     static const uint8_t header[] = {0, 'a', 's', 'm', 1, 0, 0, 0};
     if (size < sizeof(header) || size > HACHI_MAX_MODULE ||
         memcmp(bytes, header, sizeof(header)) != 0) return false;
     const uint8_t *p = bytes + sizeof(header);
     const uint8_t *end = bytes + size;
-    bool has_memory = false, has_imports = false;
+    bool has_memory = false, has_imports = false, continuation = false, stack = false, field = false, canvas = false;
+    bool half_resolution = false, expanded_scene = false;
     unsigned imports_seen = 0;
     static const char *const names[] = {
         "canvas640", "text", "rect", "blit", "sprite", "tone", "load", "save", "media_cmd",
@@ -43,6 +70,9 @@ bool *host_services, bool *audio,bool *network) {
 #if HACHI_NETWORK_ENABLED
         "service_submit", "service_poll", "service_read", "service_release",
 #endif
+#if HACHI_STACK_ENABLED
+        "stack_draw", "terrain_draw", "world_draw", "scene_draw",
+#endif
     };
     while (p < end) {
         unsigned id = *p++;
@@ -50,6 +80,22 @@ bool *host_services, bool *audio,bool *network) {
         if (!read_u32(&p, end, &length) || length > (size_t)(end - p) || id == 8)
             return false;
         const uint8_t *section_end = p + length;
+        if (id == 0) {
+            const uint8_t *name = read_name(&p, section_end, &length);
+            if (!name) return false;
+            if (length == sizeof(HACHI_FRAME_CONTINUATION_PROFILE) - 1 &&
+                memcmp(name, HACHI_FRAME_CONTINUATION_PROFILE, length) == 0) {
+                if (continuation || p != section_end) return false;
+                continuation = true;
+            }
+#if HACHI_STACK_ENABLED
+            if (length == sizeof(HACHI_WORLD_160_PROFILE) - 1 &&
+                memcmp(name, HACHI_WORLD_160_PROFILE, length) == 0) {
+                if (half_resolution || p != section_end) return false;
+                half_resolution = true;
+            }
+#endif
+        }
         if (id == 2) {
             uint32_t count;
             if (has_imports || !read_u32(&p, section_end, &count) || count > sizeof(names) / sizeof(names[0])) return false;
@@ -66,6 +112,12 @@ bool *host_services, bool *audio,bool *network) {
                     if (length != strlen(names[j]) || memcmp(name, names[j], length)) continue;
                     if (imports_seen & (1u << j)) return false;
                     imports_seen |= 1u << j;
+#if HACHI_STACK_ENABLED
+                    if (j == sizeof(names) / sizeof(names[0]) - 4) stack = true;
+                    if (j == sizeof(names) / sizeof(names[0]) - 3) field = true;
+                    if (j == sizeof(names) / sizeof(names[0]) - 2) canvas = true;
+                    if (j == sizeof(names) / sizeof(names[0]) - 1) expanded_scene = true;
+#endif
                     allowed = true;
                     break;
                 }
@@ -88,16 +140,26 @@ bool *host_services, bool *audio,bool *network) {
     }
     bool native = (imports_seen & 1u) != 0;
     bool has_audio = (imports_seen & (1u << 12)) != 0;
-    if (!has_memory || ((imports_seen & 2u) && !native)) return false;
+    if (!has_memory || (half_resolution && !canvas) ||
+        (((imports_seen & 2u) || continuation || stack || field || canvas || expanded_scene) && !native)) return false;
     if (native_canvas) *native_canvas = native;
     if (host_services) *host_services = ((imports_seen >> 9) & 7u) != 0;
     if (audio) *audio = has_audio;
-    if (network) *network=((imports_seen>>13)&15u)!=0;
+    if (network) *network = HACHI_NETWORK_ENABLED && ((imports_seen >> 13) & 15u) != 0;
+    if (frame_continuation) *frame_continuation = continuation;
+    if (sprite_stack) *sprite_stack = stack;
+    if (terrain) *terrain = field;
+    if (world) *world = canvas;
+    if (scene) *scene = expanded_scene;
+    if (half_resolution_world) *half_resolution_world = half_resolution;
     return true;
 }
 
-bool hachi_module_host_profile(const uint8_t *bytes,size_t size,bool *native,bool *host,bool *audio){return module_profiles(bytes,size,native,host,audio,NULL);}
-bool hachi_module_network_profile(const uint8_t *bytes,size_t size,bool *network){return module_profiles(bytes,size,NULL,NULL,NULL,network);}
+bool hachi_module_host_profile(const uint8_t *bytes,size_t size,bool *native,bool *host,bool *audio){return module_profiles(bytes,size,native,host,audio,NULL,NULL,NULL,NULL,NULL,NULL,NULL);}
+bool hachi_module_network_profile(const uint8_t *bytes,size_t size,bool *network){return module_profiles(bytes,size,NULL,NULL,NULL,network,NULL,NULL,NULL,NULL,NULL,NULL);}
+bool hachi_module_stack_profile(const uint8_t *bytes, size_t size, bool *stack, bool *terrain, bool *world, bool *scene) {
+    return module_profiles(bytes, size, NULL, NULL, NULL, NULL, NULL, stack, terrain, world, NULL, scene);
+}
 bool hachi_module_profile(const uint8_t *bytes, size_t size, bool *native_canvas) {
     return hachi_module_host_profile(bytes, size, native_canvas, NULL, NULL);
 }
@@ -107,6 +169,10 @@ bool hachi_valid_profile(const uint8_t *bytes, size_t size) {
 }
 
 typedef struct { int left, top, right, bottom; } region_t;
+
+static void clear_screen(hachi_runtime_t *rt) {
+    memset(rt->screen, 0, (size_t)rt->width * rt->height * sizeof(*rt->screen));
+}
 
 static bool region(hachi_runtime_t *rt, wasm_exec_env_t env, int x, int y,
                    int w, int h, region_t *box) {
@@ -121,11 +187,15 @@ static bool region(hachi_runtime_t *rt, wasm_exec_env_t env, int x, int y,
                       x + w > rt->width ? rt->width : x + w,
                       y + h > rt->height ? rt->height : y + h};
     if (box->right <= box->left || box->bottom <= box->top) return false;
-    rt->area += (unsigned)((box->right - box->left) * (box->bottom - box->top));
+    const unsigned area = (unsigned)((box->right - box->left) * (box->bottom - box->top));
+    rt->area += area;
     if (rt->area > (unsigned)(rt->width * rt->height) * 4u) {
         wasm_runtime_set_exception(wasm_runtime_get_module_inst(env), "drawing area limit");
         return false;
     }
+    // Continuations that do not draw leave the displayed frame intact.
+    if (rt->frame_continuation && rt->drawing_frame && rt->area == area)
+        clear_screen(rt);
     return true;
 }
 
@@ -142,6 +212,166 @@ static void rect(wasm_exec_env_t env, int32_t x, int32_t y,
             rt->screen[row * rt->width + column] = pixel;
     }
 }
+
+#if HACHI_STACK_ENABLED
+_Static_assert(sizeof(hachi_stack_scene_t) == 48, "Sprite Stack wire layout");
+_Static_assert(sizeof(hachi_stack_instance_t) == 60, "Sprite Stack instance wire layout");
+_Static_assert(sizeof(hachi_terrain_scene_t) == 56, "Terrain wire layout");
+_Static_assert(sizeof(hachi_world_scene_t) == 64, "World wire layout");
+_Static_assert(sizeof(hachi_scene_t) == 124, "Scene wire layout");
+_Static_assert(sizeof(hachi_billboard_t) == 24, "Billboard wire layout");
+
+static const void *stack_memory(wasm_module_inst_t module, uint32_t offset, uint32_t length) {
+    return wasm_runtime_validate_app_addr(module, offset, length) ?
+        wasm_runtime_addr_app_to_native(module, offset) : NULL;
+}
+
+static bool read_objects(wasm_module_inst_t module, uint32_t offset, uint32_t count,
+                         uint32_t limit, hachi_stack_object_t *objects) {
+    if (count > limit) return false;
+    if (!count) return true;
+    const uint8_t *wire = stack_memory(module, offset, count * sizeof(hachi_stack_instance_t));
+    if (!wire) return false;
+    for (uint32_t i = 0; i < count; ++i) {
+        hachi_stack_instance_t item;
+        memcpy(&item, wire + i * sizeof(item), sizeof(item));
+        if (!item.model_bytes || item.model_bytes > HACHI_STACK_MODEL_BYTES) return false;
+        const uint8_t *model = stack_memory(module, item.model, item.model_bytes);
+        if (!model) return false;
+        objects[i].model = model;
+        objects[i].model_bytes = item.model_bytes;
+        memcpy(objects[i].origin_q8, item.origin_q8, sizeof(item.origin_q8));
+        memcpy(objects[i].axes_q8, item.axes_q8, sizeof(item.axes_q8));
+        objects[i].scale_q8 = item.scale_q8;
+    }
+    return true;
+}
+
+static int32_t stack_draw(wasm_exec_env_t env, uint32_t offset) {
+    hachi_runtime_t *rt = wasm_runtime_get_user_data(env);
+    if (!rt->drawing_frame || rt->width != HACHI_NATIVE_W || rt->stack_drawn) return -2;
+    rt->stack_drawn = true;
+
+    wasm_module_inst_t module = wasm_runtime_get_module_inst(env);
+    const void *wire = stack_memory(module, offset, sizeof(hachi_stack_scene_t));
+    if (!wire) return -1;
+    hachi_stack_scene_t scene;
+    memcpy(&scene, wire, sizeof(scene));
+    if (!scene.count || scene.count > HACHI_STACK_OBJECTS ||
+        !scene.width || scene.width > 160 || !scene.height || scene.height > 120 ||
+        !scene.pixel_scale || scene.pixel_scale > 4) return -1;
+
+    hachi_stack_object_t objects[HACHI_STACK_OBJECTS];
+    if (!read_objects(module, scene.instances, scene.count, HACHI_STACK_OBJECTS, objects)) return -1;
+    if (!rt->stack_context) rt->stack_context = pet_stack_create();
+    if (!rt->stack_context) return -3;
+    region_t box;
+    if (!region(rt, env, scene.x, scene.y, scene.width * scene.pixel_scale,
+                scene.height * scene.pixel_scale, &box)) return -1;
+    return pet_stack_render(rt->stack_context, &scene, objects, rt->screen, rt->width, rt->height);
+}
+static int32_t terrain_draw(wasm_exec_env_t env, uint32_t offset) {
+    hachi_runtime_t *rt = wasm_runtime_get_user_data(env);
+    if (!rt->drawing_frame || rt->width != HACHI_NATIVE_W || rt->terrain_drawn) return -2;
+    rt->terrain_drawn = true;
+    wasm_module_inst_t module = wasm_runtime_get_module_inst(env);
+    const void *wire = stack_memory(module, offset, sizeof(hachi_terrain_scene_t));
+    if (!wire) return -1;
+    hachi_terrain_scene_t scene;
+    memcpy(&scene, wire, sizeof(scene));
+    const uint8_t *planes = stack_memory(module, scene.planes, HACHI_TERRAIN_BYTES);
+    const uint8_t *palette = stack_memory(module, scene.palette, HACHI_TERRAIN_COLORS * 3);
+    if (!planes || !palette) return -1;
+    if (!rt->terrain_context) rt->terrain_context = pet_terrain_create(false);
+    if (!rt->terrain_context) return -3;
+    region_t box;
+    if (!region(rt, env, 0, 0, HACHI_NATIVE_W, HACHI_NATIVE_H, &box)) return -1;
+    return pet_terrain_render(rt->terrain_context, &scene, planes, palette, rt->screen);
+}
+
+static int32_t world_draw(wasm_exec_env_t env, uint32_t offset) {
+    hachi_runtime_t *rt = wasm_runtime_get_user_data(env);
+    if (!rt->drawing_frame || rt->width != HACHI_NATIVE_W || rt->stack_drawn || rt->terrain_drawn)
+        return -2;
+    rt->stack_drawn = rt->terrain_drawn = true;
+    wasm_module_inst_t module = wasm_runtime_get_module_inst(env);
+    const void *wire = stack_memory(module, offset, sizeof(hachi_world_scene_t));
+    if (!wire) return -1;
+    hachi_world_scene_t scene;
+    memcpy(&scene, wire, sizeof(scene));
+    const uint8_t *planes = stack_memory(module, scene.terrain.planes, HACHI_TERRAIN_BYTES);
+    const uint8_t *palette = stack_memory(module, scene.terrain.palette, HACHI_TERRAIN_COLORS * 3);
+    hachi_stack_object_t objects[HACHI_STACK_OBJECTS];
+    if (!planes || !palette || !read_objects(module, scene.instances, scene.count, HACHI_STACK_OBJECTS, objects)) return -1;
+    void **context = rt->half_resolution_world ? &rt->world_160_context : &rt->terrain_context;
+    if (!*context) *context = pet_terrain_create(rt->half_resolution_world);
+    if (!*context) return -3;
+    region_t box;
+    if (!region(rt, env, 0, 0, HACHI_NATIVE_W, HACHI_NATIVE_H, &box)) return -1;
+    uint32_t timing[3];
+    int result = pet_world_render(*context, &scene.terrain, planes, palette,
+                                  objects, scene.count, rt->screen, timing);
+#if defined(ESP_PLATFORM)
+    if (result == 0) {
+        for (size_t i = 0; i < 3; ++i) atomic_store_explicit(&world_us[i], timing[i], memory_order_relaxed);
+    }
+#endif
+    return result;
+}
+
+static int32_t scene_draw(wasm_exec_env_t env, uint32_t offset) {
+    hachi_runtime_t *rt = wasm_runtime_get_user_data(env);
+    if (!rt->drawing_frame || rt->width != HACHI_NATIVE_W || rt->stack_drawn || rt->terrain_drawn)
+        return -2;
+    rt->stack_drawn = rt->terrain_drawn = true;
+    wasm_module_inst_t module = wasm_runtime_get_module_inst(env);
+    const void *wire = stack_memory(module, offset, sizeof(hachi_scene_t));
+    if (!wire) return -1;
+    hachi_scene_t scene;
+    memcpy(&scene, wire, sizeof(scene));
+    if (scene.mode > HACHI_SCENE_SPACE || scene.art_count > HACHI_SCENE_MAX_ART ||
+        scene.billboard_count > HACHI_SCENE_MAX_BILLBOARDS) return -1;
+
+    hachi_scene_assets_t assets = {0};
+    if (scene.mode == HACHI_SCENE_HEIGHT_FIELD) {
+        assets.planes = stack_memory(module, scene.terrain.planes, HACHI_TERRAIN_BYTES);
+        assets.terrain_palette = stack_memory(module, scene.terrain.palette, HACHI_TERRAIN_COLORS * 3);
+        if (!assets.planes || !assets.terrain_palette) return -1;
+    } else if (scene.mode == HACHI_SCENE_WALLS) {
+        if (!scene.map_width || scene.map_width > 32 || !scene.map_height || scene.map_height > 32) return -1;
+        assets.map = stack_memory(module, scene.map, scene.map_width * scene.map_height);
+        if (!assets.map) return -1;
+    }
+    assets.palette = stack_memory(module, scene.palette, 16 * 4);
+    if (!assets.palette) return -1;
+    if (scene.art_count) {
+        assets.art = stack_memory(module, scene.art, scene.art_count * 16 * 16);
+        if (!assets.art) return -1;
+    }
+    hachi_billboard_t billboards[HACHI_SCENE_MAX_BILLBOARDS];
+    if (scene.billboard_count) {
+        uint32_t size = scene.billboard_count * sizeof(*billboards);
+        wire = stack_memory(module, scene.billboards, size);
+        if (!wire) return -1;
+        memcpy(billboards, wire, size);
+        assets.billboards = billboards;
+    }
+    hachi_stack_object_t objects[HACHI_SCENE_MAX_STACKS];
+    if (!read_objects(module, scene.instances, scene.count, HACHI_SCENE_MAX_STACKS, objects)) return -1;
+    if (!rt->scene_context) rt->scene_context = pet_terrain_create(true);
+    if (!rt->scene_context) return -3;
+    region_t box;
+    if (!region(rt, env, 0, 0, HACHI_NATIVE_W, HACHI_NATIVE_H, &box)) return -1;
+    uint32_t timing[3];
+    int result = pet_scene_render(rt->scene_context, &scene, &assets, objects, rt->screen, timing);
+#if defined(ESP_PLATFORM)
+    if (result == 0) {
+        for (size_t i = 0; i < 3; ++i) atomic_store_explicit(&world_us[i], timing[i], memory_order_relaxed);
+    }
+#endif
+    return result;
+}
+#endif
 
 static void blit(wasm_exec_env_t env, int32_t x, int32_t y,
                  int32_t w, int32_t h, uint32_t offset) {
@@ -388,6 +618,12 @@ static NativeSymbol imports[] = {
 #if HACHI_AUDIO_ENABLED
     {"sample", (void *)sample, "(i)", NULL},
 #endif
+#if HACHI_STACK_ENABLED
+    {"stack_draw", (void *)stack_draw, "(i)i", NULL},
+    {"terrain_draw", (void *)terrain_draw, "(i)i", NULL},
+    {"world_draw", (void *)world_draw, "(i)i", NULL},
+    {"scene_draw", (void *)scene_draw, "(i)i", NULL},
+#endif
 };
 
 bool hachi_runtime_init(void *pool, uint32_t size) {
@@ -455,6 +691,9 @@ static bool run(hachi_runtime_t *rt, wasm_function_inst_t fn, uint32_t count, ui
     rt->tone_count = rt->operations = rt->area = rt->writes = rt->service_calls = 0;
     rt->media_command = 0;
     rt->sample_index = rt->music_index = HACHI_SAMPLE_NONE;
+#if HACHI_STACK_ENABLED
+    rt->stack_drawn = rt->terrain_drawn = false;
+#endif
     wasm_runtime_set_instruction_count_limit(rt->env, 160000);
     if (wasm_runtime_call_wasm(rt->env, fn, count, args)) return true;
     *rt->saves = original;
@@ -480,7 +719,8 @@ bool hachi_open_services(hachi_runtime_t *rt, uint8_t *wasm, uint32_t size, uint
                      uint32_t (*random)(void),hachi_service_fn service,void *context, char *error, size_t error_size) {
     *rt = (hachi_runtime_t){.service=service,.service_context=context,.host_read = read, .host_random = random, .screen = screen, .saves = saves};
     bool native;
-    if (!hachi_module_profile(wasm, size, &native)) {
+    if (!module_profiles(wasm, size, &native, NULL, NULL, NULL, &rt->frame_continuation, NULL, NULL, NULL,
+                         &rt->half_resolution_world, NULL)) {
         snprintf(error, error_size, "invalid module profile");
         return false;
     }
@@ -530,19 +770,30 @@ bool hachi_event_run(hachi_runtime_t *rt, int type, int a, int b) {
 
 bool hachi_frame_run(hachi_runtime_t *rt, int elapsed_ms) {
     uint32_t args[] = {(uint32_t)elapsed_ms};
+    if (rt->frame_continuation) args[0] |= HACHI_FRAME_CONTINUATION_FLAG;
+    rt->frame_pending = false;
     rt->text.count = rt->text_work = 0;
-    if (rt->width == HACHI_NATIVE_W)
-        memset(rt->screen, 0, (size_t)rt->width * rt->height * sizeof(*rt->screen));
+    if (rt->width == HACHI_NATIVE_W && !rt->frame_continuation) clear_screen(rt);
     rt->drawing_frame = true;
     rt->sample_event = true;
     bool ok = run(rt, rt->frame, 1, args);
     rt->sample_event = false;
     rt->drawing_frame = false;
     if (!ok) rt->text.count = 0;
+    else if (rt->frame_continuation && !rt->area) {
+        if (rt->text.count) clear_screen(rt);
+        else rt->frame_pending = true;
+    }
     return ok;
 }
 
 void hachi_close(hachi_runtime_t *rt) {
+#if HACHI_STACK_ENABLED
+    pet_stack_destroy(rt->stack_context);
+    pet_terrain_destroy(rt->terrain_context);
+    pet_terrain_destroy(rt->world_160_context);
+    pet_terrain_destroy(rt->scene_context);
+#endif
     if (rt->env) wasm_runtime_destroy_exec_env(rt->env);
     if (rt->instance) wasm_runtime_deinstantiate(rt->instance);
     if (rt->module) wasm_runtime_unload(rt->module);

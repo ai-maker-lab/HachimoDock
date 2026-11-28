@@ -137,15 +137,21 @@ MAX_WASM_BYTES = 192 * 1024
 CANVAS_PROFILE = "640x480-v1"
 HOST_PROFILE = "hachi-host-v1"
 AUDIO_PROFILE = "hachi-audio-v2"
+RENDER_PROFILES = {
+    b"stack_draw": ("hachiStack", "widgetWasmSpriteStack", "mirui-sprite-stack-v1"),
+    b"terrain_draw": ("hachiTerrain", "widgetWasmStackTerrain", "mirui-height-field-v1"),
+    b"world_draw": ("hachiWorld", "widgetWasmStackWorld", "mirui-world-canvas-v1"),
+    b"scene_draw": ("hachiScene", "widgetWasmScene", "mirui-scene-v1"),
+}
 AUDIO_ASSET = "assets/speech.hab"
 NETWORK_IMPORTS = {b"service_submit", b"service_poll", b"service_read", b"service_release"}
 HOST_IMPORTS = {b"clock_read", b"uv_read", b"random_u32"}
-WASM_IMPORTS = HOST_IMPORTS | NETWORK_IMPORTS | {
-    b"canvas640", b"text", b"rect", b"blit", b"sprite", b"tone", b"sample", b"load", b"save", b"media_cmd"
+WASM_IMPORTS = HOST_IMPORTS | NETWORK_IMPORTS | RENDER_PROFILES.keys() | {
+    b"canvas640", b"text", b"rect", b"blit", b"sprite", b"tone", b"sample", b"load", b"save", b"media_cmd",
 }
 
 
-def wasm_profile(module, include_network=False, *, component_id=None):
+def wasm_profile(module, include_network=False, *, include_render=False, component_id=None):
     """Return the profiles selected by imports."""
     if not 8 <= len(module) <= MAX_WASM_BYTES or not module.startswith(b"\0asm\x01\0\0\0"):
         raise ValueError("WASM 模块格式不正确或超过 192 KiB")
@@ -203,14 +209,19 @@ def wasm_profile(module, include_network=False, *, component_id=None):
                 raise ValueError("WASM 必须使用固定的两页或四页内存")
             saw_memory = True
         at = end
-    if not saw_memory or b"text" in imports and b"canvas640" not in imports:
+    if not saw_memory or (imports & ({b"text"} | RENDER_PROFILES.keys()) and b"canvas640" not in imports):
         raise ValueError("WASM 缺少固定内存或原生画布声明")
     if component_id is not None and b"media_cmd" in imports and component_id != "city-radio":
         raise ValueError("media_cmd 仅用于旧电台兼容")
     canvas = CANVAS_PROFILE if b"canvas640" in imports else None
     services = HOST_PROFILE if imports & HOST_IMPORTS else None
     audio = AUDIO_PROFILE if b"sample" in imports else None
-    return (canvas, services, audio, bool(imports & NETWORK_IMPORTS)) if include_network else (canvas, services, audio)
+    profiles = (canvas, services, audio)
+    if include_network:
+        profiles += (bool(imports & NETWORK_IMPORTS),)
+    if include_render:
+        profiles += ({key: version for name, (key, _, version) in RENDER_PROFILES.items() if name in imports},)
+    return profiles
 
 
 def validate_audio_ownership(runtime):
@@ -325,13 +336,16 @@ def write_package(destination, files, module=None, *, require_cover=True, device
             f"runtime/widget.json.transitions[{index}].from 必须是已声明的状态或 '*'"
         )
     if module is not None:
-        canvas, services, audio, network = wasm_profile(module, include_network=True, component_id=component_id)
+        canvas, services, audio, network, render = wasm_profile(
+            module, include_network=True, include_render=True, component_id=component_id)
         if network:
             from component_network import validate as validate_network
             validate_network(widget.get("hachiNetwork"))
         elif "hachiNetwork" in widget:
             raise ValueError("Unused component network declaration")
-        for key, profile in (("hachiCanvas", canvas), ("hachiHost", services), ("hachiAudio", audio)):
+        profiles = [("hachiCanvas", canvas), ("hachiHost", services), ("hachiAudio", audio)]
+        profiles.extend((key, render.get(key)) for key, _, _ in RENDER_PROFILES.values())
+        for key, profile in profiles:
             if profile:
                 widget[key] = profile
             else:
@@ -348,7 +362,8 @@ def write_package(destination, files, module=None, *, require_cover=True, device
         widget["hachiWasm"] = hashlib.sha256(module).hexdigest()
         files["runtime/widget.json"] = json_bytes(widget)
         files["runtime/app.wasm"] = module
-    elif AUDIO_ASSET in files or any(key in widget for key in ("hachiWasm", "hachiCanvas", "hachiHost", "hachiAudio", "hachiAudioSha256", "hachiNetwork")):
+    elif AUDIO_ASSET in files or any(key in widget for key in ("hachiWasm", "hachiCanvas", "hachiHost", "hachiAudio", "hachiAudioSha256", "hachiNetwork")) or any(
+            key in widget for key, _, _ in RENDER_PROFILES.values()):
         raise ValueError("声明了 WASM 但包内缺少 runtime/app.wasm")
     dashboard = initial_host_dashboard(widget)
     if dashboard is not None:

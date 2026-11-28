@@ -1,6 +1,8 @@
 #ifndef HACHI_RUNTIME_H
 #define HACHI_RUNTIME_H
 
+#include "hachi_sprite_stack.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -48,6 +50,8 @@ typedef struct {
 enum { HACHI_HOST_LOCAL, HACHI_HOST_MONOTONIC, HACHI_HOST_UV };
 enum { HACHI_HOST_UNAVAILABLE, HACHI_HOST_READY, HACHI_HOST_STALE };
 #define HACHI_HOST_PROFILE "hachi-host-v1"
+#define HACHI_FRAME_CONTINUATION_PROFILE "hachi-frame-continuation-v1"
+enum { HACHI_FRAME_CONTINUATION_FLAG = 1 << 16 };
 typedef int (*hachi_host_read_fn)(int kind, hachi_snapshot_t *out);
 
 typedef int (*hachi_service_fn)(void *,unsigned,const void *,unsigned,void *,unsigned);
@@ -63,6 +67,12 @@ typedef struct {
     hachi_text_layer_t text;
     unsigned text_work;
     bool drawing_frame;
+    bool frame_continuation, half_resolution_world;
+    bool frame_pending;
+#if HACHI_STACK_ENABLED
+    void *stack_context, *terrain_context, *world_160_context, *scene_context;
+    bool stack_drawn, terrain_drawn;
+#endif
     hachi_saves_t *saves;
     hachi_tone_t tones[8];
     unsigned tone_count;
@@ -93,6 +103,10 @@ bool hachi_open_host(hachi_runtime_t *runtime, uint8_t *wasm, uint32_t size,
 bool hachi_open_services(hachi_runtime_t *,uint8_t *,uint32_t,uint16_t *,size_t,hachi_saves_t *,
                         hachi_host_read_fn,uint32_t (*)(void),hachi_service_fn,void *,char *,size_t);
 bool hachi_module_network_profile(const uint8_t *,size_t,bool *);
+bool hachi_module_stack_profile(const uint8_t *, size_t, bool *, bool *, bool *, bool *);
+#if HACHI_STACK_ENABLED && defined(ESP_PLATFORM)
+bool hachi_world_last_us(uint32_t timing[3]);
+#endif
 bool hachi_event_run(hachi_runtime_t *runtime, int type, int a, int b);
 bool hachi_frame_run(hachi_runtime_t *runtime, int elapsed_ms);
 void hachi_close(hachi_runtime_t *runtime);

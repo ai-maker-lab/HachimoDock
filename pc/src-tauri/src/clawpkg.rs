@@ -55,6 +55,11 @@ impl ComponentSyncRequirements {
         }
         if runtime.get("hachiWasm").is_some() {result.usb_capabilities.insert("widgetWasm","hachi-wasm-v1");}
         if runtime["hachiCanvas"] == HACHI_NATIVE_CANVAS {result.usb_capabilities.insert("widgetWasmCanvas",HACHI_NATIVE_CANVAS);}
+        for profile in HACHI_RENDER_PROFILES {
+            if runtime[profile.declaration] == profile.version {
+                result.usb_capabilities.insert(profile.capability, profile.version);
+            }
+        }
         if runtime["hachiAudio"] == crate::wasm_audio::PROFILE {
             result.usb_capabilities.insert("widgetWasmAudio", crate::wasm_audio::PROFILE);
         }
@@ -2477,6 +2482,28 @@ fn validate_clawpkg_collected(
 pub(crate) const HACHI_MAX_MODULE_BYTES: usize = 192 * 1024;
 pub(crate) const HACHI_NATIVE_CANVAS: &str = "640x480-v1";
 pub(crate) const HACHI_HOST_PROFILE: &str = "hachi-host-v1";
+#[derive(Clone, Copy)]
+pub(crate) struct WasmRenderProfile {
+    import: &'static [u8],
+    pub(crate) declaration: &'static str,
+    capability: &'static str,
+    pub(crate) version: &'static str,
+}
+
+const HACHI_RENDER_PROFILES: [WasmRenderProfile; 4] = [
+    WasmRenderProfile { import: b"stack_draw", declaration: "hachiStack",
+        capability: "widgetWasmSpriteStack", version: "mirui-sprite-stack-v1" },
+    WasmRenderProfile { import: b"terrain_draw", declaration: "hachiTerrain",
+        capability: "widgetWasmStackTerrain", version: "mirui-height-field-v1" },
+    WasmRenderProfile { import: b"world_draw", declaration: "hachiWorld",
+        capability: "widgetWasmStackWorld", version: "mirui-world-canvas-v1" },
+    WasmRenderProfile { import: b"scene_draw", declaration: "hachiScene",
+        capability: "widgetWasmScene", version: "mirui-scene-v1" },
+];
+
+pub(crate) fn has_wasm_render_declaration(widget: &serde_json::Map<String, serde_json::Value>) -> bool {
+    HACHI_RENDER_PROFILES.iter().any(|profile| widget.get(profile.declaration).is_some())
+}
 
 fn wasm_u32(bytes: &mut &[u8]) -> Option<u32> {
     let mut value = 0;
@@ -2501,6 +2528,15 @@ pub(crate) fn wasm_profile(bytes: &[u8]) -> Option<(bool, bool, u8)> {
     wasm_profile_details(bytes).map(|(native,services,pages,_,_)|(native,services,pages))
 }
 pub(crate) fn wasm_profile_details(bytes: &[u8]) -> Option<(bool, bool, u8, bool, bool)> {
+    let (pages, imports) = wasm_imports(bytes)?;
+    let native = imports.contains(b"canvas640".as_slice());
+    let services = [b"clock_read".as_slice(), b"uv_read", b"random_u32"]
+        .iter().any(|name| imports.contains(name));
+    Some((native, services, pages, imports.contains(b"media_cmd".as_slice()),
+          imports.contains(b"sample".as_slice())))
+}
+
+fn wasm_imports(bytes: &[u8]) -> Option<(u8, std::collections::HashSet<&[u8]>)> {
     if bytes.len() > HACHI_MAX_MODULE_BYTES { return None; }
     let mut cursor = bytes.strip_prefix(b"\0asm\x01\0\0\0")?;
     let mut pages = None;
@@ -2515,13 +2551,18 @@ pub(crate) fn wasm_profile_details(bytes: &[u8]) -> Option<(bool, bool, u8, bool
             8 => return None,
             2 => {
                 let count = wasm_u32(&mut section)?;
-                 if saw_imports || count > 17 { return None; }
+                if saw_imports || count > 21 { return None; }
                 saw_imports = true;
                 for _ in 0..count {
                     if wasm_name(&mut section)? != b"hachi" { return None; }
                     let name = wasm_name(&mut section)?;
                     if !matches!(name, b"canvas640" | b"text" | b"rect" | b"blit" | b"sprite" |
-                        b"tone" | b"load" | b"save" | b"media_cmd" | b"clock_read" | b"uv_read" | b"random_u32" | b"sample" | b"service_submit" | b"service_poll" | b"service_read" | b"service_release") || !imports.insert(name) {
+                        b"tone" | b"load" | b"save" | b"media_cmd" | b"clock_read" | b"uv_read" | b"random_u32" | b"sample" | b"service_submit" | b"service_poll" | b"service_read" | b"service_release")
+                        && !HACHI_RENDER_PROFILES.iter().any(|profile| profile.import == name)
+                    {
+                        return None;
+                    }
+                    if !imports.insert(name) {
                         return None;
                     }
                     section = section.strip_prefix(&[0])?;
@@ -2540,32 +2581,34 @@ pub(crate) fn wasm_profile_details(bytes: &[u8]) -> Option<(bool, bool, u8, bool
             _ => {}
         }
     }
-    let native = imports.contains(b"canvas640".as_slice());
-    let services = [b"clock_read".as_slice(), b"uv_read", b"random_u32"]
-        .iter().any(|name| imports.contains(name));
-    (native || !imports.contains(b"text".as_slice())).then_some((native, services, pages?, imports.contains(b"media_cmd".as_slice()), imports.contains(b"sample".as_slice())))
+    if !imports.contains(b"canvas640".as_slice()) && (imports.contains(b"text".as_slice())
+        || HACHI_RENDER_PROFILES.iter().any(|profile| imports.contains(profile.import))) {
+        return None;
+    }
+    Some((pages?, imports))
 }
 
-/// Parse import names after the ordinary profile validator has accepted the module.
 pub(crate) fn wasm_network_profile(bytes: &[u8]) -> Option<bool> {
-    wasm_profile_details(bytes)?;
-    let mut cursor = &bytes[8..];
-    while let Some((&id, rest)) = cursor.split_first() {
-        cursor = rest;
-        let size = wasm_u32(&mut cursor)? as usize;
-        let mut section = cursor.get(..size)?;
-        cursor = &cursor[size..];
-        if id == 2 {
-            for _ in 0..wasm_u32(&mut section)? {
-                wasm_name(&mut section)?;
-                let name = wasm_name(&mut section)?;
-                section = section.strip_prefix(&[0])?;
-                wasm_u32(&mut section)?;
-                if matches!(name, b"service_submit" | b"service_poll" | b"service_read" | b"service_release") { return Some(true); }
-            }
+    let (_, imports) = wasm_imports(bytes)?;
+    Some([b"service_submit".as_slice(), b"service_poll", b"service_read", b"service_release"]
+        .iter().any(|name| imports.contains(name)))
+}
+
+pub(crate) fn wasm_render_profiles(bytes: &[u8]) -> Option<impl Iterator<Item = (WasmRenderProfile, bool)> + '_> {
+    let (_, imports) = wasm_imports(bytes)?;
+    Some(HACHI_RENDER_PROFILES.into_iter().map(move |profile| (profile, imports.contains(profile.import))))
+}
+
+pub(crate) fn validate_wasm_render_declarations(widget: &serde_json::Value, module: Option<&[u8]>) -> Result<(), String> {
+    let imports = module.and_then(wasm_imports).map(|(_, imports)| imports).unwrap_or_default();
+    for profile in HACHI_RENDER_PROFILES {
+        match (imports.contains(profile.import), widget.get(profile.declaration)) {
+            (false, None) => {}
+            (true, Some(value)) if value == profile.version => {}
+            _ => return Err(format!("WASM {} 声明与模块不匹配", profile.declaration)),
         }
     }
-    Some(false)
+    Ok(())
 }
 
 pub(crate) fn validate_network_declaration(widget: &serde_json::Value, module: Option<&[u8]>) -> Result<(), String> {
@@ -2646,6 +2689,9 @@ fn validate_hachiapp_files(files: &HashMap<String, Vec<u8>>, errors: &mut Vec<St
     if let Err(error) = validate_network_declaration(&widget, files.get("runtime/app.wasm").map(Vec::as_slice)) {
         errors.push(error);
     }
+    if let Err(error) = validate_wasm_render_declarations(&widget, files.get("runtime/app.wasm").map(Vec::as_slice)) {
+        errors.push(error);
+    }
     use crate::wasm_audio;
     let uses_audio = files.get("runtime/app.wasm").and_then(|b| wasm_profile_details(b)).is_some_and(|p| p.4);
     let declares_audio = widget["hachiAudio"] == wasm_audio::PROFILE;
@@ -2704,6 +2750,44 @@ pub fn render_component_dashboard_payload(dashboard: &HashMap<String, String>) -
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mirui_imports_require_canvas_and_exact_manifest_and_device_profiles() {
+        use serde_json::json;
+        use super::{validate_wasm_render_declarations, wasm_render_profiles, HACHI_RENDER_PROFILES};
+
+        let module_with = |names: &[&[u8]]| {
+            let mut imports = vec![names.len() as u8];
+            for name in names {
+                imports.extend_from_slice(b"\x05hachi");
+                imports.push(name.len() as u8);
+                imports.extend_from_slice(name);
+                imports.extend_from_slice(&[0, 0]);
+            }
+            let mut module = b"\0asm\x01\0\0\0".to_vec();
+            module.extend_from_slice(&[2, imports.len() as u8]);
+            module.extend(imports);
+            module.extend_from_slice(&[5, 4, 1, 1, 2, 2]);
+            module
+        };
+
+        for profile in HACHI_RENDER_PROFILES {
+            assert!(wasm_render_profiles(&module_with(&[profile.import])).is_none());
+            let module = module_with(&[b"canvas640", profile.import]);
+            assert!(validate_wasm_render_declarations(&json!({}), Some(&module)).is_err());
+            let mut widget = json!({});
+            widget[profile.declaration] = json!(profile.version);
+            validate_wasm_render_declarations(&widget, Some(&module)).unwrap();
+            assert!(validate_wasm_render_declarations(&widget, None).is_err());
+            let requirements = ComponentSyncRequirements::from_runtime(&widget);
+            assert!(requirements.check_unnegotiated_transport().is_err());
+            let mut capabilities = json!({});
+            capabilities[profile.capability] = json!("wrong-profile");
+            assert!(requirements.check_usb(&capabilities).is_err());
+            capabilities[profile.capability] = json!(profile.version);
+            requirements.check_usb(&capabilities).unwrap();
+        }
+    }
+
     #[test]
     fn accessory_panels_require_individual_device_capability() {
         use serde_json::json;

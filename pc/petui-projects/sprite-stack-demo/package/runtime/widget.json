@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "engine": "p4-bounded-runtime-v4",
+  "vars": {},
+  "states": ["ready"],
+  "initial_state": "ready",
+  "dashboard": {"title":"Mirui Sprite Stack","headline":"原生双机渲染","visualStyle":"pixel","visualPalette":"ocean","visualLayout":"arcade"},
+  "transitions": [{"on":"lab.a","from":"ready","to":"ready"}],
+  "tick": []
+}

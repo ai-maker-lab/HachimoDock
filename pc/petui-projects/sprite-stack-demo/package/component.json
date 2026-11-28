@@ -1,0 +1,7 @@
+{
+  "id": "mirui-sprite-stack",
+  "name": "Mirui Sprite Stack",
+  "version": "0.1.0",
+  "kind": "game",
+  "description": "两架来自 Pixel Flight 的战机，使用固件内置的 Mirui 渲染。按 SW1 切换旋转方向。"
+}

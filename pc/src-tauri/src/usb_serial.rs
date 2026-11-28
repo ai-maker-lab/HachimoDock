@@ -6099,8 +6099,12 @@ impl UsbSerialManager {
             .map(|(_, bytes)| bytes.as_slice())
             .ok_or_else(|| "component package is missing runtime/widget.json".to_string())?;
         let widget_definition: serde_json::Value = serde_json::from_slice(widget_source).map_err(|e| e.to_string())?;
-        crate::clawpkg::validate_network_declaration(&widget_definition,
-            entries.iter().find(|(path, _)| path == "runtime/app.wasm").map(|(_, bytes)| bytes.as_slice()))?;
+        let wasm = entries.iter().find(|(path, _)| path == "runtime/app.wasm").map(|(_, bytes)| bytes.as_slice());
+        crate::clawpkg::validate_network_declaration(&widget_definition, wasm)?;
+        crate::clawpkg::validate_wasm_render_declarations(&widget_definition, wasm)?;
+        if capabilities.is_none() && widget_definition.as_object().is_some_and(crate::clawpkg::has_wasm_render_declaration) {
+            return Err("Mirui 组件需要设备握手确认渲染能力，请通过 USB 同步".into());
+        }
         if widget_definition.get("hachiNetwork").is_some() && capabilities.is_none() {
             return Err("联网组件需要设备握手确认网络和凭据能力，请通过 USB 同步".into());
         }

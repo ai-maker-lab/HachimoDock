@@ -563,11 +563,20 @@ fn pack_with_trace(
         } else {
             widget.remove("hachiAudioSha256");
         }
+        for (profile, enabled) in clawpkg::wasm_render_profiles(&module).ok_or("WASM 渲染导入无效")? {
+            if enabled {
+                widget.insert(profile.declaration.into(), json!(profile.version));
+            } else {
+                widget.remove(profile.declaration);
+            }
+        }
         widget.insert(
             "hachiWasm".into(),
             json!(format!("{:x}", Sha256::digest(&module))),
         );
         files.insert(WASM.into(), module);
+    } else if clawpkg::has_wasm_render_declaration(&widget) {
+        return Err("Mirui 渲染声明需要 WASM 模块".into());
     }
     if share_default.is_some() {
         files.insert("share.json".into(), serde_json::to_vec(&share).map_err(|e| e.to_string())?);

@@ -1109,6 +1109,30 @@ PC to board:
   The `hachi.text` import is available only to this profile, in the frame
   callback, with bounded single-line UTF-8, coordinates, size, and per-frame
   work. Legacy WASM modules retain the 320×240 coordinate system.
+  `widgetWasmFrameContinuation="hachi-frame-continuation-v1"` supports the
+  same-named empty WebAssembly custom section on native-canvas modules.
+  Supporting hosts set bit 16 in the `hachi_frame` argument. The low bits
+  retain the elapsed milliseconds. A callback that draws neither pixels nor
+  text retains the previous completed image. The worker uses a short RTOS
+  yield for up to eight consecutive continuation callbacks and then applies
+  the ordinary delay. Successful complete frames are paced to the display
+  interval with a minimum yield. Instruction limits apply to every callback.
+  `wasmFrameContinuations` and `wasmFramesPublished` report completed callback
+  types in USB diagnostics since boot.
+  A build linking the Mirui archive advertises the following USB capabilities.
+  The packer derives the manifest fields from the corresponding WASM imports.
+
+  | Import | Runtime field | USB capability | Value |
+  | --- | --- | --- | --- |
+  | `hachi.stack_draw` | `hachiStack` | `widgetWasmSpriteStack` | `mirui-sprite-stack-v1` |
+  | `hachi.terrain_draw` | `hachiTerrain` | `widgetWasmStackTerrain` | `mirui-height-field-v1` |
+  | `hachi.world_draw` | `hachiWorld` | `widgetWasmStackWorld` | `mirui-world-canvas-v1` |
+  | `hachi.scene_draw` | `hachiScene` | `widgetWasmScene` | `mirui-scene-v1` |
+
+  `widgetWasmStackWorld160=mirui-world-canvas-160-v1` selects support for the
+  optional same-named custom section on world modules. See the
+  [Mirui 3D ABI](../pc/skills/petui/references/mirui-3d.md) for layout, quotas,
+  camera conventions and compatibility.
   Imports `hachi.clock_read`, `hachi.uv_read`, and `hachi.random_u32`
   require `runtime/widget.json.hachiHost="hachi-host-v1"` and device
   capability `widgetWasmHost="hachi-host-v1"`. The manifest and module must
@@ -1266,6 +1290,13 @@ keep the original envelope and uncertain-write behavior.
   `retainedSessionCount`, firmware, `buildId`, `gitSha`, `buildDirty`,
   `protocolSchema`, and running partition on
   `diagnostics/status`.
+  An opt-in Pixel Flight firmware reports `runtime.screenPage: "pixel_flight"`
+  while the game is open from the device's component center. The same snapshot
+  includes the raster, panel rotation and LCD submission timings in microseconds,
+  plus the count of direct LCD framebuffer submissions.
+  `pixelFlightCodeMemory` reports where the frame entry point runs.
+  Combat diagnostics report wave, shot and kill counters, plus each aircraft's
+  remaining hull.
   `memory` additionally separates `freeInternalBytes`, `minimumFreeInternalBytes`,
   `largestInternalBlockBytes`, `freeDmaBytes`, `largestDmaBlockBytes` and
   `largestPsramBlockBytes`: free PSRAM is not interchangeable with internal/DMA RAM.
