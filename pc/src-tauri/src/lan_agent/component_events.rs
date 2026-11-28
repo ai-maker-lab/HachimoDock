@@ -100,7 +100,7 @@ fn parse_poll(bytes: &[u8]) -> Option<(bool, u32, Option<Value>)> {
 
 impl EventTarget {
     pub fn usb(usb: &UsbSerialManager) -> Option<Self> {
-        let s = usb.status();
+        let s = usb.link_status();
         let connection = s.connection_id.parse().ok()?;
         (s.connected && connection != 0 && !s.board_device_id.is_empty()).then(|| Self {
             route: Route::Usb {
@@ -139,7 +139,7 @@ impl EventTarget {
         match &self.wifi {
             None => Self::usb(usb).is_some_and(|t| self.same(&t)),
             Some(session) => {
-                !usb.status().connected && session.pairing == PAIR_REVISION.load(Ordering::Acquire)
+                !usb.link_status().connected && session.pairing == PAIR_REVISION.load(Ordering::Acquire)
             }
         }
     }

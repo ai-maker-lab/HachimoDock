@@ -164,6 +164,7 @@ mod realtime_chat;
 mod acoustic_acceptance;
 #[cfg(test)]
 mod graphics_acceptance;
+mod ble_transport;
 #[cfg(test)]
 mod background_acceptance;
 mod desktop_agent;
@@ -4642,9 +4643,9 @@ async fn dispatch_remote_cli_binding(
 
         require_detected_follow_target(&target_source)?;
 
-        let usb_status = usb_manager.status();
+        let usb_status = usb_manager.link_status();
         if !usb_status.connected {
-            return Err("切换跟随需要 USB 连接，请连接设备后重试。".to_string());
+            return Err("切换跟随需要 USB 或蓝牙连接，请连接设备后重试。".to_string());
         }
         let board_device_id = normalize_topic_segment(usb_status.board_device_id.clone(), "");
         if board_device_id.is_empty() {
@@ -5418,7 +5419,7 @@ fn set_p4_session_binding_blocking(
     }
     let result = binding;
 
-    let status = usb_manager.status();
+    let status = usb_manager.link_status();
     if !status.connected || status.board_device_id != board_device_id || status.connection_id != connection_id.to_string() {
         return Err("USB session scope changed; binding not committed".into());
     }
@@ -5593,9 +5594,9 @@ async fn button_config_signal(
     expectedConnectionId: Option<String>,
     usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
 ) -> Result<serde_json::Value, String> {
-    let usb_status = usb_manager.status();
+    let usb_status = usb_manager.link_status();
     if !usb_status.connected {
-        return Err("USB 未连接,无法通过 USB OTA 下发按钮配置".to_string());
+        return Err("设备未连接,无法下发按钮配置".to_string());
     }
     if bindings.is_empty() {
         return Err("按钮配置为空,无法下发".to_string());
@@ -8311,7 +8312,7 @@ async fn usb_send_speech(
     request_receipt: Option<bool>,
 ) -> Result<(), String> {
     // Snapshot the latest known active state before injecting transient test speech.
-    let owner = usb_manager.status();
+    let owner = usb_manager.link_status();
     if !owner.connected
         || expected_boot_id.as_ref().is_some_and(|boot| boot != &owner.boot_id)
         || expected_board_device_id.as_ref().is_some_and(|board| board != &owner.board_device_id)
@@ -8441,7 +8442,146 @@ async fn usb_audio_capture_control(
 async fn usb_get_status(
     usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
 ) -> Result<usb_serial::UsbConnectionStatus, String> {
-    Ok(usb_manager.status())
+    Ok(usb_manager.link_status())
+}
+
+#[cfg(target_os = "macos")]
+static BLE_TRANSPORT: OnceLock<Arc<ble_transport::imp::BleTransport>> = OnceLock::new();
+#[cfg(target_os = "macos")]
+static LAST_BLE_BIND_AT_MS: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "macos")]
+const BLE_BIND_RETRY_MS: u64 = 3_000;
+
+#[cfg(target_os = "macos")]
+fn send_ble_bind_for_generation(usb: &usb_serial::UsbSerialManager, generation: u64) {
+    if usb.status().connected || generation == 0 {
+        return;
+    }
+    let desktop_id = sync_usb_desktop_device_id(usb).unwrap_or_default();
+    let bind = serde_json::json!({
+        "topic": "bind",
+        "payload": { "desktopDeviceId": desktop_id },
+    });
+    if let (Some(t), Ok(line)) = (BLE_TRANSPORT.get(), serde_json::to_string(&bind)) {
+        LAST_BLE_BIND_AT_MS.store(current_timestamp_ms(), Ordering::Release);
+        if let Err(err) = t.send_line_bound(generation, &line) {
+            eprintln!("[ble] bind send failed: {err}");
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_ble_bind_when_usb_idle(usb: &usb_serial::UsbSerialManager, now_ms: u64) {
+    if usb.status().connected {
+        return;
+    }
+    if let Some(t) = BLE_TRANSPORT.get() {
+        let status = t.status();
+        if status.secure_bonded && status.generation != 0 && status.hello.is_none() {
+            let last_ms = LAST_BLE_BIND_AT_MS.load(Ordering::Acquire);
+            if now_ms.saturating_sub(last_ms) >= BLE_BIND_RETRY_MS {
+                send_ble_bind_for_generation(usb, status.generation);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct MacBleBackend(Arc<ble_transport::imp::BleTransport>);
+
+#[cfg(target_os = "macos")]
+impl usb_serial::BleLinkBackend for MacBleBackend {
+    fn status(&self) -> usb_serial::UsbConnectionStatus {
+        let s = self.0.status();
+        if !s.secure_bonded {
+            return usb_serial::UsbSerialManager::ble_status_from_hello(0, &serde_json::Value::Null);
+        }
+        match s.hello.as_ref() {
+            Some(hello) => usb_serial::UsbSerialManager::ble_status_from_hello(s.generation, hello),
+            None => usb_serial::UsbSerialManager::ble_status_from_hello(0, &serde_json::Value::Null),
+        }
+    }
+
+    fn send_line_bound(&self, generation: u64, line: &str) -> Result<(), String> {
+        self.0.send_line_bound(generation, line)
+    }
+
+    fn verify_current_board(&self, board: &str, generation: u64) -> Result<(), String> {
+        self.0.verify_current_board(board, generation)
+    }
+
+    fn clear_tx_queue(&self) {
+        self.0.clear_tx_queue();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn start_ble_transport(
+    app_handle: tauri::AppHandle,
+    usb_manager: usb_serial::UsbSerialManager,
+) {
+    let emitter_line = app_handle.clone();
+    let usb_line = usb_manager.clone();
+    let emitter_ev = app_handle.clone();
+    let usb_ev = usb_manager.clone();
+
+    let transport = Arc::new(ble_transport::imp::BleTransport::new(
+        move |generation, line| {
+            let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) else {
+                return;
+            };
+            let Some(topic) = parsed.get("topic").and_then(serde_json::Value::as_str) else {
+                return;
+            };
+            let topic = topic.to_string();
+            let payload = parsed
+                .get("payload")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            if !usb_line.handle_ble_message(generation, &topic, &payload) {
+                return;
+            }
+
+            if topic == "hello" {
+                // Immediately send a heartbeat carrying host local clock + wasmUv
+                // so time-dependent widgets (e.g. Hope Train) calibrate right away.
+                let _ = usb_line.send(
+                    "system/heartbeat",
+                    &serde_json::json!({ "tsMs": current_timestamp_ms() }),
+                );
+                if !usb_line.status().connected {
+                    let _ = forward_current_state_after_usb_connect(&usb_line);
+                }
+            }
+            if !usb_line.status().connected && topic != "wasm/uv_request" {
+                handle_incoming_usb_message(&emitter_line, topic, payload);
+            }
+        },
+        move |event| match event {
+            ble_transport::imp::BleEvent::Connected => {}
+            ble_transport::imp::BleEvent::Secure(generation) => {
+                // Only send bind immediately when USB is idle; while physical USB owns
+                // the board, `ensure_ble_bind_when_usb_idle` self-heals once USB unplugs.
+                LAST_BLE_BIND_AT_MS.store(0, Ordering::Release);
+                if !usb_ev.status().connected {
+                    send_ble_bind_for_generation(&usb_ev, generation);
+                }
+            }
+            ble_transport::imp::BleEvent::Disconnected(old_generation) => {
+                LAST_BLE_BIND_AT_MS.store(0, Ordering::Release);
+                usb_ev.ble_disconnected(old_generation);
+                if !usb_ev.status().connected {
+                    let _ = emitter_ev.emit("usb-disconnected", ());
+                }
+            }
+            ble_transport::imp::BleEvent::PairingRemoved => {
+                eprintln!("[ble] peer removed pairing information; re-pairing required in macOS Bluetooth settings");
+            }
+        },
+    ));
+    let _ = BLE_TRANSPORT.set(transport.clone());
+    usb_manager.set_ble_backend(Arc::new(MacBleBackend(transport.clone())));
+    transport.start_central();
 }
 
 /// Query or set the board's master volume. Any uncertain result requires a
@@ -9220,21 +9360,22 @@ async fn usb_sync_appearance(
     expected_boot_id: Option<String>,
     request_id: Option<String>,
 ) -> Result<UsbSyncAppearanceResult, String> {
-    let status = usb_manager.status();
+    let status = usb_manager.link_status();
+    let is_ble = status.connected && status.transport == "ble";
     if expected_connection_id.as_ref().is_some_and(|id| !status.connected || *id != status.connection_id)
         || expected_boot_id.as_ref().is_some_and(|id| !status.connected || *id != status.boot_id)
     {
-        return Err("USB 设备连接已变化，请重新确认设备。".into());
+        return Err("设备连接已变化，请重新确认设备。".into());
     }
     let serial_scope = if status.connected && !audio_only.unwrap_or(false) {
-        let generation = status.connection_id.parse::<u64>().map_err(|_| "USB 尚未确认连接")?;
+        let generation = status.connection_id.parse::<u64>().map_err(|_| "设备尚未确认连接")?;
         Some((generation, status.capabilities["debugBootId"].as_str().unwrap_or_default().to_owned()))
     } else {
         None
     };
-    let native_usb_available = usb_serial::p4_native_usb_available();
+    let native_usb_available = !is_ble && usb_serial::p4_native_usb_available();
     if !status.connected && !native_usb_available {
-        return Err("USB 未连接，请先通过 USB 连接设备".to_string());
+        return Err("设备未连接，请先通过 USB 或蓝牙连接设备".to_string());
     }
     let requested_board_device_id = board_device_id.unwrap_or_default().trim().to_string();
     let expected_board_device_id = resolve_appearance_sync_board_device_id(
@@ -9259,6 +9400,9 @@ async fn usb_sync_appearance(
     // Explicit audio scope is dispatched BEFORE full profile inspection,
     // builtin video preparation, cached activation and Full/video capacity gates.
     if audio_only.unwrap_or(false) {
+        if is_ble {
+            return Err("蓝牙连接不支持独立音效更新，请通过 USB 或 Wi-Fi 同步。".into());
+        }
         if !matches!(sync_runtime, UsbAppearanceSyncRuntime::EspP4) {
             return Err("当前设备不支持独立音效更新，请升级设备固件；未自动同步完整形象。".into());
         }
@@ -9314,6 +9458,9 @@ async fn usb_sync_appearance(
     let use_device_builtin = appearance_id == "builtin-terrier"
         && appearance_dir == clips_dir
         && (!serial_connected || status.capabilities["appearance"]["builtinProtected"] == true);
+    if is_ble && !use_device_builtin && status.capabilities["bleAppearanceChunks"] != true {
+        return Err("当前固件不支持通过蓝牙同步形象资源，请使用 USB 连接或升级固件。".into());
+    }
     match sync_runtime {
         UsbAppearanceSyncRuntime::EspP4 => {
             if !use_device_builtin { usb_serial::inspect_prepared_p4_appearance(&appearance_dir)?; }
@@ -10343,9 +10490,9 @@ async fn install_clawpkg_over_usb(
     input: InstallClawpkgInput,
 ) -> Result<InstallClawpkgResult, String> {
     /* connection precondition */
-    let status = usb_manager.status();
+    let status = usb_manager.link_status();
     if !status.connected {
-        return Err("USB 未连接,请先通过 USB 连接设备".to_string());
+        return Err("设备未连接,请先通过 USB 或蓝牙连接设备".to_string());
     }
     if input.expected_board_device_id.as_deref().is_some_and(|id|id!=status.board_device_id){return Err("设备已切换，请重新确认安装目标".into());}
 
@@ -10759,8 +10906,8 @@ async fn list_device_widgets(
         return normalize_device_widget_inventory(&raw, "ssh", "linux", None);
     }
 
-    if transport != "usb" {
-        return Err("组件清单传输方式必须明确为 usb 或 ssh。".to_string());
+    if transport != "usb" && transport != "ble" {
+        return Err("组件清单传输方式必须明确为 usb、ble 或 ssh。".to_string());
     }
     if normalize_widget_ssh_host(&input.ssh_host)?.is_some() {
         return Err("USB 组件清单不能同时指定 SSH 主机。".to_string());
@@ -10769,9 +10916,9 @@ async fn list_device_widgets(
     if expected_board_device_id.is_empty() {
         return Err("USB 组件清单必须指定当前 boardDeviceId。".to_string());
     }
-    let status = usb_manager.status();
+    let status = usb_manager.link_status();
     if !status.connected {
-        return Err("USB 未连接，请先连接设备后再查询组件清单。".to_string());
+        return Err("设备未连接，请先连接设备后再查询组件清单。".to_string());
     }
     if status.board_device_id != expected_board_device_id {
         return Err(format!(
@@ -10868,8 +11015,8 @@ async fn remove_widget_from_device(
         });
     }
 
-    if transport != "usb" {
-        return Err("删除传输方式必须明确为 usb 或 ssh。".to_string());
+    if transport != "usb" && transport != "ble" {
+        return Err("删除传输方式必须明确为 usb、ble 或 ssh。".to_string());
     }
     if normalize_widget_ssh_host(&input.ssh_host)?.is_some() {
         return Err("USB 删除不能同时指定 SSH 主机。".to_string());
@@ -10878,9 +11025,9 @@ async fn remove_widget_from_device(
     if expected_board_device_id.is_empty() {
         return Err("USB 删除必须指定安装时的 boardDeviceId。".to_string());
     }
-    let status = usb_manager.status();
+    let status = usb_manager.link_status();
     if !status.connected {
-        return Err("USB 未连接，请先连接设备后再移除组件。".to_string());
+        return Err("设备未连接，请先连接设备后再移除组件。".to_string());
     }
     if status.board_device_id != expected_board_device_id {
         return Err(format!(
@@ -12010,7 +12157,7 @@ fn pick_usb_bridge_state_for_source(
 }
 
 fn replay_usb_active_state(usb_manager: &usb_serial::UsbSerialManager, owner: &usb_serial::UsbConnectionStatus, generation: u64) -> Result<(), String> {
-    if !usb_replay::same_connection(&usb_manager.status(), owner) {
+    if !usb_replay::same_connection(&usb_manager.link_status(), owner) {
         return Ok(());
     }
     let board_device_id = &owner.board_device_id;
@@ -12055,7 +12202,7 @@ fn replay_usb_active_state(usb_manager: &usb_serial::UsbSerialManager, owner: &u
 fn forward_current_state_after_usb_connect(
     usb_manager: &usb_serial::UsbSerialManager,
 ) -> Result<(), String> {
-    let status = usb_manager.status();
+    let status = usb_manager.link_status();
     if !status.connected || status.board_device_id.trim().is_empty() {
         return Ok(());
     }
@@ -12151,12 +12298,13 @@ fn start_usb_host_heartbeat(usb_manager: usb_serial::UsbSerialManager) {
         loop {
             thread::sleep(Duration::from_secs(2));
             retire_changed_device_voice_transport(&usb_manager);
-            let status = usb_manager.status();
+            let status = usb_manager.link_status();
+            let is_usb = status.transport == "usb";
             if status.connection_id != generation {
                 generation = status.connection_id;
                 fail_streak = 0;
             }
-            if !status.connected || usb_manager.board_wedged() {
+            if !status.connected || (is_usb && usb_manager.board_wedged()) {
                 fail_streak = 0;
                 continue;
             }
@@ -12175,7 +12323,7 @@ fn start_usb_host_heartbeat(usb_manager: usb_serial::UsbSerialManager) {
                     // retire the dead connection and auto-reconnect reopens it.
                     let rx_age_ms =
                         current_timestamp_ms().saturating_sub(usb_manager.last_rx_activity_ms());
-                    if fail_streak >= 5 && rx_age_ms >= 30_000
+                    if is_usb && fail_streak >= 5 && rx_age_ms >= 30_000
                         && usb_manager.status().connection_id == generation {
                         usb_manager.mark_board_wedged();
                         eprintln!(
@@ -12215,14 +12363,17 @@ fn start_usb_state_forwarder(usb_manager: usb_serial::UsbSerialManager) {
         let mut last_ssh_fallback_signature = String::new();
         let mut last_ssh_fallback_attempt_ms: u64 = 0;
         let mut last_ssh_fallback_error_ms: u64 = 0;
-        let mut was_usb_connected = false;
+        let mut last_connection_id = String::new();
         loop {
             thread::sleep(Duration::from_millis(800));
 
             let now_ms = current_timestamp_ms();
-            let status = usb_manager.status();
+            #[cfg(target_os = "macos")]
+            ensure_ble_bind_when_usb_idle(&usb_manager, now_ms);
+
+            let status = usb_manager.link_status();
             if !status.connected {
-                if was_usb_connected {
+                if !last_connection_id.is_empty() {
                     last_source_signatures.clear();
                     last_speech_signatures.clear();
                     last_active_signature.clear();
@@ -12231,8 +12382,8 @@ fn start_usb_state_forwarder(usb_manager: usb_serial::UsbSerialManager) {
                     last_disabled_filter_signature.clear();
                     last_ssh_fallback_signature.clear();
                     last_ssh_fallback_attempt_ms = 0;
+                    last_connection_id.clear();
                 }
-                was_usb_connected = false;
                 if let Some((source, payload)) = pick_best_usb_bridge_state(true, "")
                     .or_else(|| pick_best_usb_bridge_state(false, ""))
                 {
@@ -12267,7 +12418,7 @@ fn start_usb_state_forwarder(usb_manager: usb_serial::UsbSerialManager) {
                 }
                 continue;
             }
-            if !was_usb_connected {
+            if last_connection_id != status.connection_id {
                 last_source_signatures.clear();
                 last_speech_signatures.clear();
                 last_active_signature.clear();
@@ -12276,7 +12427,7 @@ fn start_usb_state_forwarder(usb_manager: usb_serial::UsbSerialManager) {
                 last_disabled_filter_signature.clear();
                 last_ssh_fallback_signature.clear();
                 last_ssh_fallback_attempt_ms = 0;
-                was_usb_connected = true;
+                last_connection_id = status.connection_id.clone();
             }
 
             if now_ms.saturating_sub(last_enabled_refresh_ms) > 2500 {
@@ -12727,6 +12878,9 @@ pub fn run() {
                 return Ok(());
             }
             owns_runtime_at_setup.store(true, Ordering::Release);
+            ble_transport::prevent_macos_app_nap();
+            #[cfg(target_os = "macos")]
+            start_ble_transport(app.handle().clone(), usb_for_auto.clone());
             let authoring_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = prepare_petui_authoring(authoring_app).await {

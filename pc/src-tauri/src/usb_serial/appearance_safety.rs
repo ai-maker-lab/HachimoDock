@@ -405,6 +405,12 @@ impl UsbSerialManager {
     }
     pub(super) fn check_appearance_connection(&self)->Result<(),String>{
         let attempt=self.active_appearance_attempt()?.ok_or("appearance owner missing")?;
+        if crate::ble_transport::is_ble_generation(attempt.generation) {
+            self.verify_ble_board(&attempt.board, attempt.generation)
+                .map_err(|_| "appearance_connection_retired_no_replay".to_string())?;
+            attempt.check(&attempt.board, attempt.generation)?;
+            return self.ensure_wire_available("BLE", Some(&attempt.board));
+        }
         let (_lease,connection)=self.appearance_admission(&attempt)?;
         let c=connection.as_ref().ok_or("appearance connection missing")?;
         self.ensure_wire_available(&c.port_name,Some(&c.board_device_id))
@@ -431,7 +437,23 @@ impl UsbSerialManager {
         self.with_appearance_attempt_bound(board,None,work)
     }
     pub(super) fn with_appearance_attempt_bound<T>(&self,board:&str,expected:Option<(u64,&str)>,work:impl FnOnce()->Result<T,String>)->Result<T,String>{
-        let (generation,cancel)={
+        let use_ble = expected.is_some_and(|(gen, _)| crate::ble_transport::is_ble_generation(gen))
+            || !self.status().connected;
+        let (generation,cancel)=if use_ble {
+            let ble = self.ble_status();
+            let ble_gen = ble.connection_id.parse::<u64>().ok()
+                .filter(|g| crate::ble_transport::is_ble_generation(*g))
+                .ok_or("appearance connection missing")?;
+            if !ble.connected || ble.board_device_id != board {
+                return Err("appearance_connection_retired_no_replay".into());
+            }
+            if let Some((generation, boot)) = expected {
+                if ble_gen != generation || ble.capabilities["debugBootId"].as_str().unwrap_or("") != boot {
+                    return Err("appearance_recovery_connection_changed".into());
+                }
+            }
+            (ble_gen, Arc::new(AtomicBool::new(false)))
+        } else {
             let (_lease,connection)=self.inbound_owner.connection(&self.connection)?;
             let c=connection.as_ref().ok_or("appearance connection missing")?;
             if !c.connected||c.board_device_id!=board||c.cancel_reader.load(Ordering::Acquire)
@@ -456,8 +478,17 @@ impl UsbSerialManager {
             Ok(value)=>{
                 // Retirement cannot linearize between this final admission and
                 // durable intent completion. Never clear unknown on a stale object.
-                let _admission=self.appearance_admission(&attempt)?;
-                if attempt.submitted.load(Ordering::Acquire){attempt.journal.complete(&attempt)?;}
+                if crate::ble_transport::is_ble_generation(attempt.generation) {
+                    self.verify_ble_board(&attempt.board, attempt.generation)
+                        .map_err(|_| "appearance_connection_retired_no_replay".to_string())?;
+                    attempt.check(&attempt.board, attempt.generation)?;
+                    if attempt.submitted.load(Ordering::Acquire){attempt.journal.complete(&attempt)?;}
+                    self.verify_ble_board(&attempt.board, attempt.generation)
+                        .map_err(|_| "appearance_connection_retired_no_replay".to_string())?;
+                } else {
+                    let _admission=self.appearance_admission(&attempt)?;
+                    if attempt.submitted.load(Ordering::Acquire){attempt.journal.complete(&attempt)?;}
+                }
                 Ok(value)
             }
             Err(error)=>{

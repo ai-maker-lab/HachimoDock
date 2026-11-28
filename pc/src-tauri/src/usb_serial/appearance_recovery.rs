@@ -104,6 +104,17 @@ fn parse_observation(ack: &serde_json::Value, nonce: &str, board: &str, generati
 }
 impl UsbSerialManager {
     fn recovery_connection(&self, board: &str, generation: u64, boot: &str) -> Result<(), String> {
+        if crate::ble_transport::is_ble_generation(generation) {
+            let ble = self.ble_status();
+            if !ble.connected
+                || ble.board_device_id != board
+                || ble.connection_id != generation.to_string()
+                || ble.capabilities["debugBootId"].as_str() != Some(boot)
+            {
+                return Err("appearance_recovery_connection_changed".into());
+            }
+            return self.ensure_wire_available("BLE", Some(board));
+        }
         let (_lease, connection) = self.inbound_owner.connection(&self.connection)?;
         let c = connection.as_ref().ok_or("appearance_recovery_connection_changed")?;
         if !c.connected || c.cancel_reader.load(Ordering::Acquire) || !self.inbound_owner.is_current(generation)
@@ -140,7 +151,25 @@ impl UsbSerialManager {
         if self.active_appearance_attempt()?.is_some() { return Err("appearance_recovery_busy".into()); }
         #[cfg(test)] let journal = self.appearance_journal.clone();
         #[cfg(not(test))] let journal = appearance_safety::journal_for_recovery()?;
-        let (generation, boot) = {
+        let use_ble = expected.is_some_and(|(gen, _)| crate::ble_transport::is_ble_generation(gen))
+            || !self.status().connected;
+        let (generation, boot) = if use_ble {
+            let ble = self.ble_status();
+            self.ensure_wire_available("BLE", Some(board))?;
+            let ble_gen = ble.connection_id.parse::<u64>().ok()
+                .filter(|g| crate::ble_transport::is_ble_generation(*g))
+                .ok_or("appearance_recovery_connection_changed")?;
+            if !ble.connected || ble.board_device_id != board {
+                return Err("appearance_recovery_connection_changed".into());
+            }
+            journal.pending_for_recovery(board, intent)?;
+            if ble.capabilities["appearance"]["quiescentQuery"].as_str() != Some(SCHEMA) { return Err(UPDATE.into()); }
+            let boot = ble.capabilities["debugBootId"].as_str().filter(|s| !s.is_empty() && s.len() <= 128).ok_or(UPDATE)?.to_owned();
+            if expected.is_some_and(|(generation, id)| ble_gen != generation || boot != id) {
+                return Err("appearance_recovery_connection_changed".into());
+            }
+            (ble_gen, boot)
+        } else {
             let (_lease, mut connection) = self.inbound_owner.connection(&self.connection)?;
             let c = connection.as_mut().ok_or("appearance_recovery_connection_changed")?;
             self.refresh_pending_hello(c);
@@ -182,6 +211,14 @@ impl UsbSerialManager {
         self.remove_asset_ack_waiter(&nonce, "slot-query", None, None);
         let observed = read_result?;
         // Linearize the exact connection/boot and durable archive with retirement.
+        if crate::ble_transport::is_ble_generation(generation) {
+            if self.appearance_sync_cancel_requested.load(Ordering::Acquire) {
+                return Err("appearance_recovery_connection_changed".into());
+            }
+            self.recovery_connection(board, generation, &boot)?;
+            journal.archive_observation(&pending, &observed, intent)?;
+            return Ok(observed);
+        }
         let (_lease, connection) = self.inbound_owner.connection(&self.connection)?;
         let c = connection.as_ref().ok_or("appearance_recovery_connection_changed")?;
         if !c.connected || c.cancel_reader.load(Ordering::Acquire) || !self.inbound_owner.is_current(generation)

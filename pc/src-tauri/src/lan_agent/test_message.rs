@@ -44,10 +44,10 @@ pub(crate) async fn send_device_test_message(
         if let Some(connection) = connection_id {
             let generation = connection.parse::<u64>().map_err(|_| "USB 连接代次无效")?;
             let current = || {
-                let s = usb.status();
+                let s = usb.link_status();
                 (s.connected && s.connection_id == connection && s.boot_id == boot_id
                     && s.board_device_id == board_device_id && s.capabilities["testMessageReceipt"] == true)
-                    .then_some(()).ok_or_else(|| "USB 设备或启动身份已变化。".to_string())
+                    .then_some(()).ok_or_else(|| "设备连接或启动身份已变化。".to_string())
             };
             current()?;
             return once(&board_device_id, &boot_id, |q| {

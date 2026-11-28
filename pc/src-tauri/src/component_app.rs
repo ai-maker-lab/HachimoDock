@@ -138,7 +138,7 @@ fn prepare_connected_news(h:&Host,board:&str)->Result<Value,&'static str>{
     if inventory["complete"]!=true{return Err("inventory_incomplete");}
     let mut unresolved=false;
     for item in inventory["items"].as_array().into_iter().flatten(){
-        let live=h.usb.status();if !live.connected||live.board_device_id!=board{return Err("connection_changed");}
+        let live=h.usb.link_status();if !live.connected||live.board_device_id!=board{return Err("connection_changed");}
         let Some(id)=item["id"].as_str().filter(|id|crate::component_extension::valid_id(id))else{continue;};
         match crate::component_service_settings::enabled(&h.root.join(id)){
             Ok(false)=>continue,Err(_)=>{unresolved=true;continue;},Ok(true)=>{}
@@ -181,7 +181,7 @@ pub fn configure(root:PathBuf,usb:crate::usb_serial::UsbSerialManager,app:tauri:
                     }}scanned=std::time::Instant::now();
                 }
                 for(id,d)in &declared{if crate::component_service_settings::enabled(&h.root.join(id)).unwrap_or(false){let _=crate::component_news::prefetch(id,d);}else{crate::component_news::disable(id);}}
-                crate::component_news::prepare_audio(&h.usb.status().board_device_id);
+                crate::component_news::prepare_audio(&h.usb.link_status().board_device_id);
             }
             std::thread::sleep(std::time::Duration::from_secs(15));
         }
@@ -190,7 +190,7 @@ pub fn configure(root:PathBuf,usb:crate::usb_serial::UsbSerialManager,app:tauri:
         let mut preparation=ConnectionPreparation::default();
         let clock=std::time::Instant::now();
         loop {
-            let h=HOST.get().expect("configured host");let board=h.usb.status();
+            let h=HOST.get().expect("configured host");let board=h.usb.link_status();
             let now=clock.elapsed().as_secs();
             let connected=if board.connected{board.board_device_id.as_str()}else{""};
             expire_event_route(h);
@@ -652,7 +652,7 @@ pub(crate) fn request_validated(id:&str,dir:&Path,d:&Declaration,runtime:&Value,
         return Ok(result);
     }
     let path=dir.join("state.json");let mut state=load(&path)?;let before=state.clone();
-    let board=usb.status().board_device_id;
+    let board=usb.link_status().board_device_id;
     apply(id,&dir,&d,&mut state,action,&input,&board,notify,usb,&mut values)?;
     let durable=if d.service=="weather"{durable_weather_state(&state)}else{state.clone()};
     if durable!=before{atomic(&path,&durable)?;}
@@ -1103,7 +1103,7 @@ pub(crate) fn publish_fetch(id:&str,generation:u64,result:&Value){
 /// validation and USB output happen on a worker, with no retry or new URL grant.
 pub(crate) fn data_refresh_event(event:&Value){
     let Some(h)=HOST.get()else{return;};
-    let s=h.usb.status();
+    let s=h.usb.link_status();
     if !s.connected || event["boardDeviceId"]!=s.board_device_id{return;}
     let Ok(connection)=s.connection_id.parse()else{return;};
     refresh_event(event,None,Some(connection));
@@ -1143,7 +1143,7 @@ fn refresh_event(event:&Value,wifi:Option<crate::lan_agent::runtime_events::Scop
         if let Some(scope)=&wifi {
             if !scope.current(&h.usb){return;}
         } else {
-            let current=h.usb.status();
+            let current=h.usb.link_status();
             if !current.connected || current.board_device_id!=expected || current.connection_id.parse::<u64>().ok()!=connection{return;}
         }
         if std::time::Instant::now()>=deadline{return;}

@@ -847,7 +847,13 @@ fn start_with_target(app: &AppHandle, mut input: RealtimeChatStartInput, lan_tar
                 target.ensure_current_pair()?;
                 target
             }
-            None => crate::lan_agent::realtime::AudioTarget::find(&board)?,
+            None => crate::lan_agent::realtime::AudioTarget::find(&board).map_err(|error| {
+                if usb.link_status().transport == "ble" {
+                    "当前仅通过蓝牙连接，实时语音需要 USB 或 Wi-Fi 连接".to_string()
+                } else {
+                    error
+                }
+            })?,
         };
         board = target.board_id().to_owned();
         (None, Some(wifi::Link::new(target)), true)

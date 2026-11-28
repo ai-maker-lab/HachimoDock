@@ -6,7 +6,7 @@ use crate::app_catalog::{self as catalog,Journal,Outcome,ReconcileRequest,Recove
 impl UsbSerialManager{
     fn catalog_status(&self,board:&str)->Result<(UsbConnectionStatus,u64),String>{
         if !catalog::valid_board(board){return Err("catalog_invalid_board".into());}
-        let (status,generation)=self.connected_board_snapshot(board)?;
+        let (status,generation)=self.connected_link_snapshot(board)?;
         if generation==0||status.runtime!="esp-p4"||!catalog::supported(&status.capabilities){return Err("catalog_metadata_unsupported".into());}
         Ok((status,generation))
     }
@@ -38,7 +38,12 @@ impl UsbSerialManager{
         let _guard=self.asset_transfer_guard.try_lock().map_err(|_|"catalog_transport_busy")?;
         let board=&request.expected_board_device_id;let (_,generation)=self.catalog_status(board)?;
         if self.media_requests_pending.load(Ordering::Acquire)!=0||self.appearance_sync_active.load(Ordering::Acquire){return Err("catalog_resources_busy".into());}
-        if !self.connection.lock().map_err(|_|"catalog_connection_unavailable")?.as_ref().is_some_and(|c|c.connection_id==generation&&!c.capture_active.load(Ordering::Acquire)){
+        let capture_busy = if crate::ble_transport::is_ble_generation(generation) {
+            false
+        } else {
+            !self.connection.lock().map_err(|_|"catalog_connection_unavailable")?.as_ref().is_some_and(|c|c.connection_id==generation&&!c.capture_active.load(Ordering::Acquire))
+        };
+        if capture_busy {
             return Err("catalog_resources_busy".into());
         }
         let current=self.catalog_inspect_locked(board,generation)?;
@@ -52,8 +57,12 @@ impl UsbSerialManager{
             // FW additionally checks idle/resource gates and CAS under its own
             // storage owner immediately before committing metadata.
             let (_,current_generation)=self.catalog_status(board)?;
-            if generation!=current_generation||self.media_requests_pending.load(Ordering::Acquire)!=0
-                ||!self.connection.lock().map_err(|_|"catalog_connection_unavailable")?.as_ref().is_some_and(|c|c.connection_id==generation&&!c.capture_active.load(Ordering::Acquire)){
+            let capture_busy = if crate::ble_transport::is_ble_generation(generation) {
+                false
+            } else {
+                !self.connection.lock().map_err(|_|"catalog_connection_unavailable")?.as_ref().is_some_and(|c|c.connection_id==generation&&!c.capture_active.load(Ordering::Acquire))
+            };
+            if generation!=current_generation||self.media_requests_pending.load(Ordering::Acquire)!=0||capture_busy{
                 return Err("catalog_owner_changed".into());
             }
             self.catalog_response(board,generation,"widget/catalog_reconcile","widget/catalog_reconcile_result",request_id,&payload)

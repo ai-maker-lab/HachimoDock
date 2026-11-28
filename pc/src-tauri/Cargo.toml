@@ -84,6 +84,7 @@ dispatch2 = "0.3.1"
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["libc", "NSApplication", "NSPasteboard", "NSPasteboardItem", "NSRunningApplication"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSBundle", "NSData", "NSPathUtilities", "NSString", "NSProcessInfo", "NSURL"] }
+objc2-core-bluetooth = { version = "=0.3.2", default-features = false, features = ["CBAdvertisementData", "CBAttribute", "CBPeer", "CBCentralManager", "CBPeripheral", "CBCharacteristic", "CBService", "CBUUID", "CBManager", "dispatch2"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

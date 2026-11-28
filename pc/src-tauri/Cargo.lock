@@ -2947,6 +2947,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-core-bluetooth"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79b30b9eacc37434a61377866f68b27acef9fa5496f25cc9ca8b2549032e0394"
+dependencies = [
+ "bitflags 2.11.0",
+ "dispatch2",
+ "objc2",
+ "objc2-foundation",
+]
+
+[[package]]
 name = "objc2-core-data"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3285,6 +3297,7 @@ dependencies = [
  "num-bigint-dig",
  "objc2",
  "objc2-app-kit",
+ "objc2-core-bluetooth",
  "objc2-foundation",
  "pkcs1",
  "rand 0.8.6",

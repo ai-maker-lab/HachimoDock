@@ -106,6 +106,8 @@ pub(crate) mod catalog;
 pub(crate) mod program_autostart_host;
 #[cfg(test)]
 mod component_sync_safety_tests;
+#[cfg(test)]
+mod ble_link_tests;
 pub(crate) mod bubble_pixels;
 pub(crate) use bubble_pixels::BubbleFrame;
 
@@ -1980,8 +1982,43 @@ enum WidgetTransferStatus {
     Committed,
 }
 
+/// Injectable desktop BLE link backend (CoreBluetooth on macOS, mock in tests).
+/// Never relies on process-global `OnceLock` singletons so unit tests can run
+/// in parallel in-process with isolated instances.
+pub(crate) trait BleLinkBackend: Send + Sync {
+    fn status(&self) -> UsbConnectionStatus;
+    fn send_line_bound(&self, generation: u64, line: &str) -> Result<(), String>;
+    fn verify_current_board(&self, board: &str, generation: u64) -> Result<(), String>;
+    fn clear_tx_queue(&self) {}
+}
+
+struct BleBulkGuard<'a> {
+    count: Option<&'a AtomicUsize>,
+}
+
+impl<'a> BleBulkGuard<'a> {
+    fn acquire(count: &'a AtomicUsize, active: bool) -> Self {
+        if active {
+            count.fetch_add(1, Ordering::AcqRel);
+            Self { count: Some(count) }
+        } else {
+            Self { count: None }
+        }
+    }
+}
+
+impl Drop for BleBulkGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(count) = self.count {
+            count.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct UsbSerialManager {
+    ble_backend: Arc<Mutex<Option<Arc<dyn BleLinkBackend>>>>,
+    ble_bulk_active: Arc<AtomicUsize>,
     bubble_renderer: Arc<Mutex<bubble_pixels::RenderBridge>>,
     bubble_worker: Arc<AtomicBool>,
     last_serial_baud: Arc<Mutex<Option<(String, u32)>>>,
@@ -2416,6 +2453,8 @@ impl UsbSerialManager {
 
     pub fn new() -> Self {
         Self {
+            ble_backend: Arc::new(Mutex::new(None)),
+            ble_bulk_active: Arc::new(AtomicUsize::new(0)),
             bubble_renderer: Arc::new(Mutex::new(bubble_pixels::RenderBridge::default())),
             bubble_worker: Arc::new(AtomicBool::new(false)),
             last_serial_baud: Arc::new(Mutex::new(None)),
@@ -2787,6 +2826,7 @@ impl UsbSerialManager {
             cache_usb_status(&self.status_snapshot, conn.as_ref());
             drop(conn);
             drop(probe_wire);
+            self.retire_ble_on_usb_connect();
             // No connection/waiter/physical-wire mutex is held during callback.
             on_message(initial_hello.topic, initial_hello.payload);
         }
@@ -3147,6 +3187,490 @@ impl UsbSerialManager {
         }
     }
 
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn set_ble_backend(&self, backend: Arc<dyn BleLinkBackend>) {
+        if let Ok(mut slot) = self.ble_backend.lock() {
+            *slot = Some(backend);
+        }
+    }
+
+    fn ble_backend(&self) -> Option<Arc<dyn BleLinkBackend>> {
+        self.ble_backend.lock().ok().and_then(|slot| slot.clone())
+    }
+
+    pub(crate) fn ble_status(&self) -> UsbConnectionStatus {
+        if self.status().connected {
+            return disconnected_usb_status();
+        }
+        self.ble_backend()
+            .map(|backend| backend.status())
+            .filter(|s| s.connected && s.transport == "ble")
+            .unwrap_or_else(disconnected_usb_status)
+    }
+
+    /// Preferred live companion link: USB always takes priority over BLE.
+    pub fn link_status(&self) -> UsbConnectionStatus {
+        let usb = self.status();
+        if usb.connected {
+            return usb;
+        }
+        let ble = self.ble_status();
+        if ble.connected {
+            return ble;
+        }
+        usb
+    }
+
+    pub(crate) fn ble_bulk_active(&self) -> bool {
+        self.ble_bulk_active.load(Ordering::Acquire) > 0
+    }
+
+    pub(crate) fn verify_ble_board(&self, board: &str, generation: u64) -> Result<(), String> {
+        if self.status().connected {
+            return Err("USB 已连接，蓝牙链路已让位".into());
+        }
+        let backend = self.ble_backend().ok_or("蓝牙未连接")?;
+        backend.verify_current_board(board, generation)
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn ble_status_from_hello(
+        generation: u64,
+        hello: &serde_json::Value,
+    ) -> UsbConnectionStatus {
+        let board_device_id =
+            first_json_string(hello, &["boardDeviceId", "localDeviceId", "deviceId"]);
+        let capabilities = hello
+            .get("capabilities")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let boot_id = capabilities["debugBootId"]
+            .as_str()
+            .filter(|s| {
+                s.len() == 16
+                    && s.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+            .unwrap_or_default()
+            .to_owned();
+        let connected = crate::ble_transport::is_ble_generation(generation)
+            && !board_device_id.is_empty();
+        UsbConnectionStatus {
+            connected,
+            board_wedged: false,
+            connection_id: if connected {
+                generation.to_string()
+            } else {
+                String::new()
+            },
+            boot_id: if connected { boot_id } else { String::new() },
+            port_name: if connected {
+                "BLE".to_string()
+            } else {
+                String::new()
+            },
+            baud_rate: 0,
+            board_device_id,
+            transport: if connected {
+                "ble".to_string()
+            } else {
+                "mqtt".to_string()
+            },
+            runtime: runtime_from_hello_payload(hello),
+            device_model: first_json_string(hello, &["deviceModel", "model", "boardModel"]),
+            firmware: first_json_string(hello, &["fw", "firmware", "firmwareVersion"]),
+            build_id: first_json_string(hello, &["buildId"]),
+            git_sha: first_json_string(hello, &["gitSha"]),
+            build_dirty: hello
+                .get("buildDirty")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            protocol_schema: hello
+                .get("protocolSchema")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok())
+                .unwrap_or(0),
+            wire_protocol: first_json_string(hello, &["wireProtocol", "protocol"]),
+            capabilities: if connected {
+                capabilities
+            } else {
+                serde_json::Value::Null
+            },
+        }
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn handle_ble_message(
+        &self,
+        generation: u64,
+        topic: &str,
+        payload: &serde_json::Value,
+    ) -> bool {
+        if !crate::ble_transport::is_ble_generation(generation) || self.status().connected {
+            return false;
+        }
+        let ble = self.ble_status();
+        if !ble.connected || ble.connection_id != generation.to_string() {
+            return false;
+        }
+        self.last_rx_activity_ms
+            .store(crate::current_timestamp_ms(), Ordering::Release);
+        resolve_asset_ack(&self.asset_ack_waiters, topic, payload);
+        resolve_widget_ack(&self.widget_ack_waiters, topic, payload);
+        resolve_device_response(&self.device_response_waiters, topic, payload);
+        if topic == "wasm/uv_request" {
+            if ble.capabilities["widgetWasmHost"] == crate::clawpkg::HACHI_HOST_PROFILE {
+                crate::wasm_uv::requested(generation);
+            }
+            return true;
+        }
+        if topic == "ui/text-pixels/need"
+            && ble.capabilities["bubblePixelsBoot"] == payload["boot"]
+        {
+            let delivery = self.bubble_renderer.lock().ok().map(|mut bridge| {
+                (
+                    bridge.sink(),
+                    bridge.need(payload, generation, &ble.board_device_id),
+                )
+            });
+            if let Some((Some(sink), events)) = delivery {
+                for event in events {
+                    sink(event);
+                }
+            }
+        }
+        true
+    }
+
+    fn retire_ble_on_usb_connect(&self) {
+        let mut had_ble = false;
+        if let Some(backend) = self.ble_backend() {
+            had_ble = backend.status().connected;
+            backend.clear_tx_queue();
+        }
+        if let Ok(Some(attempt)) = self.active_appearance_attempt() {
+            if crate::ble_transport::is_ble_generation(attempt.generation) {
+                attempt.uncertain();
+                had_ble = true;
+            }
+        }
+        if let Ok(mut scope) = self.follow_scope.lock() {
+            if scope
+                .as_ref()
+                .is_some_and(|s| crate::ble_transport::is_ble_generation(s.generation))
+            {
+                *scope = None;
+                had_ble = true;
+            }
+        }
+        if had_ble {
+            if let Ok(mut waiters) = self.asset_ack_waiters.lock() {
+                waiters.clear();
+            }
+            if let Ok(mut waiters) = self.widget_ack_waiters.lock() {
+                waiters.clear();
+            }
+            if let Ok(mut waiters) = self.device_response_waiters.lock() {
+                waiters.clear();
+            }
+            if let Ok(mut bridge) = self.bubble_renderer.lock() {
+                bridge.clear_peer();
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn ble_disconnected(&self, old_generation: u64) {
+        if let Ok(Some(attempt)) = self.active_appearance_attempt() {
+            if crate::ble_transport::is_ble_generation(attempt.generation)
+                && (old_generation == 0 || attempt.generation == old_generation)
+            {
+                attempt.uncertain();
+            }
+        }
+        let superseded_by_newer_ble = old_generation != 0
+            && self.ble_backend().is_some_and(|backend| {
+                let s = backend.status();
+                s.connected && s.connection_id != old_generation.to_string()
+            });
+        if !self.status().connected && !superseded_by_newer_ble {
+            if let Ok(mut waiters) = self.asset_ack_waiters.lock() {
+                waiters.clear();
+            }
+            if let Ok(mut waiters) = self.widget_ack_waiters.lock() {
+                waiters.clear();
+            }
+            if let Ok(mut waiters) = self.device_response_waiters.lock() {
+                waiters.clear();
+            }
+            if let Ok(mut bridge) = self.bubble_renderer.lock() {
+                bridge.clear_peer();
+            }
+            if let Ok(mut scope) = self.follow_scope.lock() {
+                if scope.as_ref().is_some_and(|s| {
+                    crate::ble_transport::is_ble_generation(s.generation)
+                        && (old_generation == 0 || s.generation == old_generation)
+                }) {
+                    *scope = None;
+                }
+            }
+        }
+    }
+
+    fn attach_host_clock(
+        topic: &str,
+        payload: &mut serde_json::Value,
+        capabilities: &serde_json::Value,
+        connection_id: u64,
+    ) {
+        if topic == "system/heartbeat" && payload.is_object() {
+            let services =
+                capabilities["widgetWasmHost"] == crate::clawpkg::HACHI_HOST_PROFILE;
+            if services || capabilities["widgetLocalTools"] == "p4-local-tools-v1" {
+                let now = chrono::Local::now();
+                payload["clock"] = serde_json::json!({
+                    "unixSeconds": now.timestamp(),
+                    "utcOffsetMinutes": now.offset().local_minus_utc() / 60,
+                });
+                if services {
+                    payload["clock"]["subsecondMs"] = now.timestamp_subsec_millis().into();
+                    payload["wasmUv"] = crate::wasm_uv::heartbeat(connection_id, now.timestamp());
+                }
+            }
+        }
+    }
+
+    fn attach_bubble_text(
+        &self,
+        topic: &str,
+        payload: &mut serde_json::Value,
+        capabilities: &serde_json::Value,
+        connection_id: u64,
+        board_device_id: &str,
+    ) -> Result<(Option<bubble_pixels::RenderSink>, Vec<serde_json::Value>), String> {
+        if capabilities["bubblePixels"] == bubble_pixels::SCHEMA
+            && bubble_pixels::is_text_topic(topic)
+            && payload.is_object()
+        {
+            let mut bridge = self
+                .bubble_renderer
+                .lock()
+                .map_err(|_| "BUBBLE_FALLBACK: lifecycle")?;
+            let boot = capabilities["bubblePixelsBoot"].as_str().unwrap_or("");
+            bridge.set_format(
+                capabilities["bubbleGlyphCells"] == true,
+                capabilities["bubbleBodyMasks"] == true,
+                capabilities["bubbleTitleMasks"] == true,
+            );
+            let events = bridge.observe(topic, payload, connection_id, board_device_id, boot);
+            let metadata = bridge.metadata(topic, boot);
+            payload["textPixels"] = metadata;
+            return Ok((bridge.sink(), events));
+        }
+        Ok((None, Vec::new()))
+    }
+
+    fn send_ble_admitted(
+        &self,
+        topic: &str,
+        payload: &serde_json::Value,
+        expected_board_device_id: Option<&str>,
+        expected_connection_id: Option<u64>,
+        test_speech: bool,
+    ) -> Result<(), String> {
+        if self.status().connected {
+            return Err("USB 已连接，蓝牙链路已让位".into());
+        }
+        if !crate::ble_transport::ble_topic_allowed(topic, payload) {
+            return Err(format!("蓝牙连接不支持 {topic}，请使用 USB 连接"));
+        }
+        let backend = self.ble_backend().ok_or("Not connected")?;
+        let ble = backend.status();
+        let ble_gen = ble
+            .connection_id
+            .parse::<u64>()
+            .ok()
+            .filter(|g| crate::ble_transport::is_ble_generation(*g))
+            .ok_or("Not connected")?;
+        if !ble.connected || ble.transport != "ble" {
+            return Err("Not connected".to_string());
+        }
+        if let Some(expected_connection_id) = expected_connection_id {
+            if ble_gen != expected_connection_id {
+                return Err(format!(
+                    "BLE connection changed: expected session {expected_connection_id}, got {ble_gen}"
+                ));
+            }
+        }
+        if let Some(expected_board_device_id) = expected_board_device_id {
+            let expected_board_device_id =
+                validate_expected_board_device_id(expected_board_device_id)?;
+            if ble.board_device_id.is_empty() {
+                return Err("connected BLE board identity is not available yet".to_string());
+            }
+            if ble.board_device_id != expected_board_device_id {
+                return Err(format!(
+                    "connected BLE board changed: expected {expected_board_device_id}, got {}",
+                    ble.board_device_id
+                ));
+            }
+        }
+        if topic.starts_with("asset/") {
+            appearance_safety::command_id(topic, payload)?;
+        }
+        let appearance = if topic.starts_with("asset/") {
+            self.active_appearance_attempt()?
+        } else {
+            None
+        };
+        if let Some(attempt) = &appearance {
+            attempt.check(&ble.board_device_id, ble_gen)?;
+            backend.verify_current_board(&ble.board_device_id, ble_gen)?;
+        } else if appearance_safety::mutation(topic) {
+            self.ensure_unowned_asset_write(&ble.board_device_id)?;
+        }
+        if topic == "widget/data" && self.ble_bulk_active() {
+            return Err("蓝牙正在传输组件或字库，稍后更新组件数据".into());
+        }
+
+        let next_follow = if topic == "control/remote-cli-binding" && payload["enabled"] == true {
+            Some(
+                crate::normalize_agent_id(payload["targetSource"].as_str().unwrap_or(""))
+                    .ok_or("follow source is not recognized")?,
+            )
+        } else {
+            None
+        };
+        let mut test_payload = test_speech.then(|| payload.clone());
+        {
+            let mut scope = self
+                .follow_scope
+                .lock()
+                .map_err(|_| "follow scope unavailable")?;
+            if scope
+                .as_ref()
+                .is_some_and(|s| s.generation != ble_gen || s.board != ble.board_device_id)
+            {
+                *scope = None;
+            }
+            if let Some(agent) = &next_follow {
+                *scope = Some(UsbFollowScope {
+                    generation: ble_gen,
+                    board: ble.board_device_id.clone(),
+                    agent: agent.clone(),
+                    session: None,
+                    submitted: false,
+                });
+            } else if let Some(scope) = scope.as_ref() {
+                if let Some(test) = test_payload.as_mut() {
+                    test["source"] = serde_json::json!(scope.agent);
+                    if let Some(session) = &scope.session {
+                        test["sessionId"] = serde_json::json!(session);
+                    }
+                }
+                if !scope.allows(topic, test_payload.as_ref().unwrap_or(payload)) {
+                    return Err(if test_speech {
+                        "Agent 跟随尚未就绪，请稍后重试测试消息"
+                    } else {
+                        "stale follow agent/session; state not submitted"
+                    }
+                    .into());
+                }
+            }
+        }
+        let payload = test_payload.as_ref().unwrap_or(payload);
+        if topic == "audio/volume" {
+            master_volume::validate_write_ble(
+                &ble,
+                ble_gen,
+                expected_board_device_id,
+                expected_connection_id,
+                payload,
+            )?;
+        }
+
+        let mut payload = payload.clone();
+        let pixel_wire_guard = if topic == "ui/text-pixels" {
+            if self.ble_bulk_active()
+                || self.appearance_sync_active.load(Ordering::Acquire)
+            {
+                return Err("BUBBLE_FALLBACK: protected transport".into());
+            }
+            let bridge = self
+                .bubble_renderer
+                .lock()
+                .map_err(|_| "BUBBLE_FALLBACK: lifecycle")?;
+            let boot = ble.capabilities["bubblePixelsBoot"].as_str().unwrap_or("");
+            if ble.capabilities["bubblePixels"] != bubble_pixels::SCHEMA
+                || !bridge.current_wire(&payload, ble_gen, &ble.board_device_id, boot)
+            {
+                return Err("BUBBLE_FALLBACK: stale peer/content".into());
+            }
+            Some(bridge)
+        } else {
+            None
+        };
+        let (bubble_sink, bubble_events) = self.attach_bubble_text(
+            topic,
+            &mut payload,
+            &ble.capabilities,
+            ble_gen,
+            &ble.board_device_id,
+        )?;
+        Self::attach_host_clock(topic, &mut payload, &ble.capabilities, ble_gen);
+
+        let msg = serde_json::json!({
+            "topic": topic,
+            "payload": payload,
+        });
+        let line = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
+        if let Some(attempt) = &appearance {
+            if appearance_safety::mutation(topic) {
+                attempt.before_mutation(topic, appearance_safety::command_id(topic, &payload)?)?;
+            }
+        }
+        if topic == "asset/activate" {
+            self.activation_update(|t| t.write_started());
+        }
+        let write_result = backend.send_line_bound(ble_gen, &line);
+        if let Err(error) = write_result {
+            if let Some(attempt) = &appearance {
+                attempt.uncertain();
+            }
+            return Err(error);
+        }
+        if topic == "asset/activate" {
+            self.activation_update(|t| t.write_completed());
+        }
+        {
+            let mut scope = self
+                .follow_scope
+                .lock()
+                .map_err(|_| "follow scope unavailable")?;
+            if let Some(scope) = scope
+                .as_mut()
+                .filter(|s| s.generation == ble_gen && s.board == ble.board_device_id)
+            {
+                if next_follow.is_some() {
+                    scope.submitted = true;
+                }
+                if topic == "session/current" {
+                    scope.session = payload["sessionId"]
+                        .as_str()
+                        .filter(|id| !id.is_empty() && *id != "auto")
+                        .map(str::to_owned);
+                }
+            }
+        }
+        drop(pixel_wire_guard);
+        if let Some(sink) = bubble_sink {
+            for event in bubble_events {
+                sink(event);
+            }
+        }
+        Ok(())
+    }
+
     /// Send a message to the device
     pub fn send(&self, topic: &str, payload: &serde_json::Value) -> Result<(), String> {
         self.send_inner(topic, payload, true, None, None, None)
@@ -3186,7 +3710,7 @@ impl UsbSerialManager {
             .decode(&frame.data)
             .map_err(|_| "BUBBLE_FALLBACK: base64")?;
         bubble_pixels::validate_frame(&frame, &bytes)?;
-        let status = self.status();
+        let status = self.link_status();
         if status.capabilities["bubblePixels"] != bubble_pixels::SCHEMA {
             return Err("BUBBLE_FALLBACK: unsupported peer".into());
         }
@@ -3194,7 +3718,8 @@ impl UsbSerialManager {
             .connection_id
             .parse::<u64>()
             .map_err(|_| "BUBBLE_FALLBACK: connection")?;
-        let rate = bubble_pixels::wire_rate(status.baud_rate);
+        let is_ble = status.transport == "ble" || crate::ble_transport::is_ble_generation(connection_id);
+        let rate = if is_ble { 8192 } else { bubble_pixels::wire_rate(status.baud_rate) };
         if bubble_pixels::estimated_wire_bytes(bytes.len())
             > rate * bubble_pixels::DEADLINE_MS as usize / 1000
         {
@@ -3275,7 +3800,7 @@ impl UsbSerialManager {
                 next_write = Instant::now() + Duration::from_secs_f64(cost as f64 / rate as f64);
                 let wait = deadline
                     .saturating_duration_since(Instant::now())
-                    .min(Duration::from_millis(1000));
+                    .min(Duration::from_millis(if is_ble { 2500 } else { 1000 }));
                 let reply = receiver
                     .recv_timeout(wait)
                     .map_err(|_| "BUBBLE_FALLBACK: unknown ACK; no replay")?;
@@ -3384,20 +3909,53 @@ impl UsbSerialManager {
     pub(crate) fn check_session_follow_target(
         &self, board: &str, agent: &str, expected_connection: &str, expected_boot: &str,
     ) -> Result<u64, String> {
-        let mut connection = self.connection.lock().map_err(|_| "session connection unavailable")?;
-        let conn = connection.as_mut().ok_or("Not connected")?;
-        self.refresh_pending_hello(conn);
-        if !conn.connected || conn.cancel_reader.load(Ordering::Acquire)
-            || !self.inbound_owner.is_current(conn.connection_id)
-            || conn.board_device_id != board
-            || (!expected_connection.is_empty() && expected_connection != conn.connection_id.to_string())
-            || (!expected_boot.is_empty() && conn.capabilities["debugBootId"].as_str() != Some(expected_boot))
-        { return Err("USB session scope changed; binding not committed".into()); }
+        let want_ble = expected_connection
+            .parse::<u64>()
+            .ok()
+            .is_some_and(crate::ble_transport::is_ble_generation);
+        let current_generation = if want_ble {
+            let ble = self.ble_status();
+            let ble_gen = ble.connection_id.parse::<u64>().ok()
+                .filter(|g| crate::ble_transport::is_ble_generation(*g))
+                .ok_or("Not connected")?;
+            if !ble.connected || ble.board_device_id != board
+                || (!expected_connection.is_empty() && expected_connection != ble.connection_id)
+                || (!expected_boot.is_empty() && ble.capabilities["debugBootId"].as_str() != Some(expected_boot))
+            {
+                return Err("BLE session scope changed; binding not committed".into());
+            }
+            ble_gen
+        } else {
+            let mut connection = self.connection.lock().map_err(|_| "session connection unavailable")?;
+            if let Some(conn) = connection.as_mut() {
+                self.refresh_pending_hello(conn);
+                if !conn.connected || conn.cancel_reader.load(Ordering::Acquire)
+                    || !self.inbound_owner.is_current(conn.connection_id)
+                    || conn.board_device_id != board
+                    || (!expected_connection.is_empty() && expected_connection != conn.connection_id.to_string())
+                    || (!expected_boot.is_empty() && conn.capabilities["debugBootId"].as_str() != Some(expected_boot))
+                { return Err("USB session scope changed; binding not committed".into()); }
+                conn.connection_id
+            } else {
+                drop(connection);
+                let ble = self.ble_status();
+                let ble_gen = ble.connection_id.parse::<u64>().ok()
+                    .filter(|g| crate::ble_transport::is_ble_generation(*g))
+                    .ok_or("Not connected")?;
+                if !ble.connected || ble.board_device_id != board
+                    || (!expected_connection.is_empty() && expected_connection != ble.connection_id)
+                    || (!expected_boot.is_empty() && ble.capabilities["debugBootId"].as_str() != Some(expected_boot))
+                {
+                    return Err("BLE session scope changed; binding not committed".into());
+                }
+                ble_gen
+            }
+        };
         let scope = self.follow_scope.lock().map_err(|_| "follow scope unavailable")?;
-        if scope.as_ref().filter(|scope| scope.generation == conn.connection_id && scope.board == board)
+        if scope.as_ref().filter(|scope| scope.generation == current_generation && scope.board == board)
             .is_some_and(|scope| !scope.allows("session/current", &serde_json::json!({"agentId":agent})))
         { return Err("stale follow agent/session; binding not committed".into()); }
-        Ok(conn.connection_id)
+        Ok(current_generation)
     }
 
     pub(crate) fn send_follow_change_for_connection(
@@ -3477,6 +4035,9 @@ impl UsbSerialManager {
         &self,topic:&str,payload:&serde_json::Value,flush:bool,
         expected_board_device_id:Option<&str>,expected_connection_id:Option<u64>,write_slice_bytes:Option<usize>,program_epoch:Option<u64>,test_speech:bool,
     )->Result<(),String>{
+        if program_epoch.is_none() && expected_connection_id.is_some_and(crate::ble_transport::is_ble_generation) {
+            return self.send_ble_admitted(topic, payload, expected_board_device_id, expected_connection_id, test_speech);
+        }
         let owned_notes=topic=="audio/control"&&expected_connection_id.is_some()&&payload.get("captureOwner").is_some();
         let preempt_on_send = !owned_notes&&((topic=="audio/conversation"&&payload["enabled"]==true)
             ||(topic=="audio/control"&&payload["action"]=="start")
@@ -3496,6 +4057,13 @@ impl UsbSerialManager {
             let wire=self.wire_guard.lock().map_err(|_|"USB wire owner unavailable")?;
             (None,wire,self.connection.lock().map_err(|e|e.to_string())?)
         };
+        let usb_connected = connection_guard.as_ref().is_some_and(|c| c.connected);
+        if !usb_connected && program_epoch.is_none() && expected_connection_id.is_none() && self.ble_status().connected {
+            drop(connection_guard);
+            drop(_admission);
+            drop(_wire);
+            return self.send_ble_admitted(topic, payload, expected_board_device_id, None, test_speech);
+        }
         let conn = connection_guard.as_mut().ok_or("Not connected")?;
         if self.board_wedged.load(Ordering::Acquire) {
             return Err("board wedged: re-plug the USB cable to recover".into());
@@ -3616,34 +4184,14 @@ impl UsbSerialManager {
             }
             Some(bridge) // Linearize invalidation with this final physical write.
         }else{None};
-        let mut bubble_events=Vec::new();let mut bubble_sink=None;
-        if conn.capabilities["bubblePixels"]==bubble_pixels::SCHEMA&&bubble_pixels::is_text_topic(topic)&&payload.is_object(){
-            let mut bridge=self.bubble_renderer.lock().map_err(|_|"BUBBLE_FALLBACK: lifecycle")?;
-            let boot=conn.capabilities["bubblePixelsBoot"].as_str().unwrap_or("");
-            bridge.set_format(
-                conn.capabilities["bubbleGlyphCells"] == true,
-                conn.capabilities["bubbleBodyMasks"] == true,
-                conn.capabilities["bubbleTitleMasks"] == true,
-            );
-            bubble_events=bridge.observe(topic,&payload,conn.connection_id,&conn.board_device_id,boot);
-            let metadata = bridge.metadata(topic, boot);
-            payload["textPixels"] = metadata;
-            bubble_sink=bridge.sink();
-        }
-        if topic == "system/heartbeat" && payload.is_object() {
-            let services = conn.capabilities["widgetWasmHost"] == crate::clawpkg::HACHI_HOST_PROFILE;
-            if services || conn.capabilities["widgetLocalTools"] == "p4-local-tools-v1" {
-                let now = chrono::Local::now();
-                payload["clock"] = serde_json::json!({
-                    "unixSeconds": now.timestamp(),
-                    "utcOffsetMinutes": now.offset().local_minus_utc() / 60,
-                });
-                if services {
-                    payload["clock"]["subsecondMs"] = now.timestamp_subsec_millis().into();
-                    payload["wasmUv"] = crate::wasm_uv::heartbeat(conn.connection_id, now.timestamp());
-                }
-            }
-        }
+        let (bubble_sink, bubble_events) = self.attach_bubble_text(
+            topic,
+            &mut payload,
+            &conn.capabilities,
+            conn.connection_id,
+            &conn.board_device_id,
+        )?;
+        Self::attach_host_clock(topic, &mut payload, &conn.capabilities, conn.connection_id);
         let msg = serde_json::json!({
             "topic": topic,
             "payload": payload,
@@ -3816,26 +4364,31 @@ impl UsbSerialManager {
 
     /// Read-only preflight: never stops capture/playback or retries an install.
     pub(crate) fn component_sync_audio_status(&self, board: &str) -> Result<serde_json::Value, String> {
-        let (status, connection_id) = self.connected_board_snapshot(board)?;
-        let capture_active = self.connection.lock().map_err(|e| e.to_string())?
-            .as_ref().ok_or("USB 未连接")?.capture_active.load(Ordering::Acquire);
-        if capture_active {
-            return Ok(serde_json::json!({"blocked":true,"reason":"voice","message":"设备正在录音或实时语音中。请先结束语音，再重新检查同步；不会自动中断语音。"}));
+        let (status, connection_id) = self.connected_link_snapshot(board)?;
+        let is_ble = status.transport == "ble";
+        if !is_ble {
+            let capture_active = self.connection.lock().map_err(|e| e.to_string())?
+                .as_ref().ok_or("USB 未连接")?.capture_active.load(Ordering::Acquire);
+            if capture_active {
+                return Ok(serde_json::json!({"blocked":true,"reason":"voice","message":"设备正在录音或实时语音中。请先结束语音，再重新检查同步；不会自动中断语音。"}));
+            }
         }
         let diagnostic = self.query_diagnostics(board)
             .map_err(|_| "无法确认设备音频状态，尚未开始同步；请稍后重新检查。".to_string())?;
         let playback = diagnostic["runtime"]["audioPlaybackActive"].as_bool()
             .ok_or("设备未返回可确认的播放状态；尚未开始同步，请更新固件或稍后重新检查。")?;
-        let media = if status.capabilities["widgetMedia"] == "p4-media-v1" {
+        let media = if !is_ble && status.capabilities["widgetMedia"] == "p4-media-v1" {
             self.media_request(board,"media/query",serde_json::json!({}))
                 .map_err(|_| "无法确认后台播放状态，尚未开始同步；请停止播放后重新检查。".to_string())?
         } else { serde_json::json!({"state":"idle"}) };
         let state = media["state"].as_str().ok_or("设备播放状态不完整；尚未开始同步。")?;
         let blocked = playback || component_sync_media_blocks(state);
-        let capture_now = self.connection.lock().map_err(|e|e.to_string())?
-            .as_ref().ok_or("USB 未连接")?.capture_active.load(Ordering::Acquire);
-        if capture_now { return Ok(serde_json::json!({"blocked":true,"reason":"voice","message":"设备正在录音或实时语音中。请先结束语音，再重新检查同步；不会自动中断语音。"})); }
-        let (_, current_id) = self.connected_board_snapshot(board)?;
+        if !is_ble {
+            let capture_now = self.connection.lock().map_err(|e|e.to_string())?
+                .as_ref().ok_or("USB 未连接")?.capture_active.load(Ordering::Acquire);
+            if capture_now { return Ok(serde_json::json!({"blocked":true,"reason":"voice","message":"设备正在录音或实时语音中。请先结束语音，再重新检查同步；不会自动中断语音。"})); }
+        }
+        let (_, current_id) = self.connected_link_snapshot(board)?;
         if current_id != connection_id { return Err("设备连接已变化，请重新检查同步目标；尚未开始同步。".into()); }
         Ok(serde_json::json!({"blocked":blocked,"reason":if blocked {"playback"} else {"ready"},
             "message":if blocked {"设备仍在播放或准备音频。请先停止播放，再重新检查并同步；返回主屏不等于停止播放。"} else {"音频空闲"}}))
@@ -3848,7 +4401,7 @@ impl UsbSerialManager {
         payload: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         if connection_id == 0 ||
-            self.status().capabilities["bluetoothKeyboardConfig"] != "p4-ble-keyboard-config-v1"
+            self.link_status().capabilities["bluetoothKeyboardConfig"] != "p4-ble-keyboard-config-v1"
         {
             return Err("当前设备固件不支持蓝牙键盘配置".into());
         }
@@ -3917,7 +4470,7 @@ impl UsbSerialManager {
             .asset_transfer_guard
             .lock()
             .map_err(|error| error.to_string())?;
-        let status = self.connected_board_status(expected_board_device_id)?;
+        let status = self.connected_link_status(expected_board_device_id)?;
         ensure_widget_inventory_supported(&status)?;
         self.send_device_request_and_wait(
             expected_board_device_id,
@@ -3927,7 +4480,7 @@ impl UsbSerialManager {
     }
 
     fn background_program_supported(&self,board:&str)->Result<(),String>{
-        let status=self.connected_board_status(board)?;
+        let status=self.connected_link_status(board)?;
         if status.runtime!="esp-p4"||!crate::app_program_background::supported(&status.capabilities){
             return Err("当前设备未开放后台程序管理，未更改程序状态".into());
         }
@@ -3991,7 +4544,7 @@ impl UsbSerialManager {
     pub fn activate_installed_widget(&self,board:&str,widget_id:&str,show:bool)->Result<serde_json::Value,String>{
         if !crate::component_extension::valid_id(widget_id){return Err("组件 ID 无效，未打开".into());}
         let _guard=self.asset_transfer_guard.try_lock().map_err(|_|"设备传输忙，未切换组件")?;
-        let status=self.connected_board_status(board)?;
+        let status=self.connected_link_status(board)?;
         if status.capabilities["widgetActivation"]!="p4-widget-activation-v1"{return Err("设备不支持直接打开已安装组件，请先升级固件；未覆盖安装".into());}
         self.send_device_payload_and_wait(board,"widget/activate","protocol/ack",serde_json::json!({"widgetId":widget_id,"show":show}))
     }
@@ -4034,8 +4587,15 @@ impl UsbSerialManager {
             self.remove_device_response_waiter(&request_id, response_topic);
             return Err(error);
         }
+        let is_ble = connection_id.is_some_and(crate::ble_transport::is_ble_generation)
+            || (!self.status().connected && self.ble_status().connected);
+        let timeout = if is_ble && request_topic == "resources/bubble-font" {
+            Duration::from_secs(12)
+        } else {
+            P4_DEVICE_RESPONSE_TIMEOUT
+        };
         let response = receiver
-            .recv_timeout(P4_DEVICE_RESPONSE_TIMEOUT)
+            .recv_timeout(timeout)
             .map_err(|_| {
                 self.remove_device_response_waiter(&request_id, response_topic);
                 format!("device response timed out for {request_topic}")
@@ -4075,24 +4635,29 @@ impl UsbSerialManager {
     }
 
     pub(crate) fn ensure_bubble_font(&self, board: &str, connection: &str) -> Result<(), String> {
-        let status = self.connected_board_status(board)?;
+        let status = self.connected_link_status(board)?;
         let generation = connection.parse::<u64>().ok().filter(|n| *n != 0)
-            .ok_or("USB 连接标识无效。")?;
+            .ok_or("设备连接标识无效。")?;
         if status.connection_id != connection || !crate::shared_font::supports(&status.firmware) {
-            return Err("USB 设备或固件版本已变化。".into());
+            return Err("设备或固件版本已变化。".into());
         }
+        let is_ble = status.transport == "ble" || crate::ble_transport::is_ble_generation(generation);
+        if is_ble && status.capabilities["bleBubbleFont"] != true {
+            return Err("当前固件不支持通过蓝牙同步抗锯齿字库，请通过 USB 连接一次完成字库写入。".into());
+        }
+        let _ble_bulk = BleBulkGuard::acquire(&self.ble_bulk_active, is_ble);
         crate::shared_font::ensure_with_stream(board, |payload| self.send_device_payload_and_wait_scoped(
             board, Some(generation), "resources/bubble-font", "resources/bubble-font/status", payload),
             None, Some(&self.asset_transfer_guard), || {
-                if self.connected_board_status(board)?.connection_id != connection {
-                    return Err("USB 连接已变化。".into());
+                if self.connected_link_status(board)?.connection_id != connection {
+                    return Err("设备连接已变化。".into());
                 }
                 Ok(())
             })
     }
 
     pub(crate) fn service_image_request(&self,board:&str,connection:u64,payload:serde_json::Value)->Result<serde_json::Value,String>{
-        if self.status().capabilities["widgetServiceBridge"]!="p4-service-bridge-v1"{return Err("设备未声明服务桥图片能力".into());}
+        if self.link_status().capabilities["widgetServiceBridge"]!="p4-service-bridge-v1"{return Err("设备未声明服务桥图片能力".into());}
         if self.media_requests_pending.load(Ordering::Acquire)>0{return Err("音频传输优先，图片稍后更新".into());}
         let _guard=self.asset_transfer_guard.try_lock().map_err(|_|"资源传输繁忙，图片稍后更新")?;
         self.send_device_payload_and_wait_scoped(board,Some(connection),"app/image","protocol/ack",payload)
@@ -4609,12 +5174,43 @@ impl UsbSerialManager {
         })
     }
 
-    fn connected_board_status(
+    fn connected_link_status(
         &self,
         expected_board_device_id: &str,
     ) -> Result<UsbConnectionStatus, String> {
-        self.connected_board_snapshot(expected_board_device_id)
+        self.connected_link_snapshot(expected_board_device_id)
             .map(|(status, _)| status)
+    }
+
+    fn connected_link_snapshot(
+        &self,
+        expected_board_device_id: &str,
+    ) -> Result<(UsbConnectionStatus, u64), String> {
+        if self.status().connected {
+            return self.connected_board_snapshot(expected_board_device_id);
+        }
+        let expected_board_device_id = validate_expected_board_device_id(expected_board_device_id)?;
+        let ble = self.ble_status();
+        let ble_gen = ble
+            .connection_id
+            .parse::<u64>()
+            .ok()
+            .filter(|g| crate::ble_transport::is_ble_generation(*g))
+            .ok_or("USB is not connected")?;
+        if !ble.connected {
+            return Err("USB is not connected".to_string());
+        }
+        if ble.board_device_id != expected_board_device_id {
+            return Err(format!(
+                "connected BLE board changed: expected {expected_board_device_id}, got {}",
+                if ble.board_device_id.is_empty() {
+                    "<missing>"
+                } else {
+                    &ble.board_device_id
+                }
+            ));
+        }
+        Ok((ble, ble_gen))
     }
 
     fn connected_board_snapshot(
@@ -5453,7 +6049,7 @@ impl UsbSerialManager {
     }
 
     fn supports_p4_appearance_slot_reuse(&self) -> bool {
-        let capabilities = self.status().capabilities;
+        let capabilities = self.link_status().capabilities;
         capabilities
             .get("appearanceSlotReuse")
             .and_then(|value| value.as_bool())
@@ -5499,7 +6095,7 @@ impl UsbSerialManager {
     }
 
     fn supports_p4_raw_appearance_slot(&self) -> bool {
-        let capabilities = self.status().capabilities;
+        let capabilities = self.link_status().capabilities;
         capabilities
             .get("rawAppearanceSlot1")
             .and_then(|value| value.as_bool())
@@ -5544,11 +6140,11 @@ impl UsbSerialManager {
         let mut reported_busy = false;
         let mut backoff = Duration::from_millis(120);
         let deadline = Instant::now() + APPEARANCE_SLOT_WAIT;
-        let boot = self.status().boot_id;
+        let boot = self.link_status().boot_id;
         loop {
             self.ensure_appearance_sync_not_cancelled(None)?;
             self.check_appearance_connection()?;
-            if !boot.is_empty() && self.status().boot_id != boot {
+            if !boot.is_empty() && self.link_status().boot_id != boot {
                 return Err("appearance_connection_retired_no_replay".into());
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -5557,7 +6153,7 @@ impl UsbSerialManager {
             }
             let error = match self.query_p4_appearance_slots_with_timeout(&id, remaining.min(ASSET_STAT_TIMEOUT)) {
                 Ok(state) => {
-                    if !boot.is_empty() && self.status().boot_id != boot {
+                    if !boot.is_empty() && self.link_status().boot_id != boot {
                         return Err("appearance_connection_retired_no_replay".into());
                     }
                     return Ok(state);
@@ -5900,7 +6496,8 @@ impl UsbSerialManager {
             .asset_transfer_guard
             .lock()
             .map_err(|error| error.to_string())?;
-        let (status,connection_id) = self.connected_board_snapshot(expected_board_device_id)?;
+        let (status,connection_id) = self.connected_link_snapshot(expected_board_device_id)?;
+        let _ble_bulk = BleBulkGuard::acquire(&self.ble_bulk_active, status.transport == "ble");
         ensure_widget_delete_supported(&status)?;
         if preserve_save&&status.capabilities["widgetDeletePreserveSave"]!=true{return Err("设备不支持保留存档卸载；未删除组件".into());}
         let transfer_id = format!("widget-delete-{}", uuid::Uuid::new_v4());
@@ -5949,7 +6546,7 @@ impl UsbSerialManager {
             "widget/inventory",
             serde_json::json!({}),
         ).map_err(|_| unconfirmed())?;
-        if self.connected_board_snapshot(board).map(|(_, id)| id) != Ok(connection_id)
+        if self.connected_link_snapshot(board).map(|(_, id)| id) != Ok(connection_id)
             || inventory["schemaVersion"] != 1
             || inventory["boardDeviceId"] != *board
             || inventory["ok"] != true
@@ -5986,7 +6583,7 @@ impl UsbSerialManager {
     where
         F: Fn(u32, u32, u64),
     {
-        let target=self.status().board_device_id;
+        let target=self.link_status().board_device_id;
         self.install_widget_clawpkg_on_board(&target,widget_id,widget_dir,binding_overrides,on_progress)
     }
 
@@ -6014,7 +6611,8 @@ impl UsbSerialManager {
 
     pub(crate) fn repair_center_thumb(&self, board: &str,id: &str,files: &[(String,Vec<u8>)]) -> Result<(),String> {
         let _guard=self.asset_transfer_guard.lock().map_err(|e|e.to_string())?;
-        let (status,connection)=self.connected_board_snapshot(board)?;
+        let (status,connection)=self.connected_link_snapshot(board)?;
+        let _ble_bulk = BleBulkGuard::acquire(&self.ble_bulk_active, status.transport == "ble");
         if status.capabilities["widgetCenterThumb"]!=center_thumb::PROFILE
             || status.capabilities["widgetTransfer"]!=widget_transaction::WIDGET_FILE_TRANSFER {
             return Err("此固件不支持仅补封面，请先更新设备固件".into());
@@ -6023,7 +6621,7 @@ impl UsbSerialManager {
     }
 
     pub(crate) fn repair_widget_resources(&self,board:&str,id:&str,dir:&std::path::Path)->Result<(u32,u64),String>{
-        if self.status().capabilities["widgetResourceIntegrity"]!="p4-resource-integrity-v1"{
+        if self.link_status().capabilities["widgetResourceIntegrity"]!="p4-resource-integrity-v1"{
             return Err("设备尚不支持保留配置的资源恢复".into());
         }
         self.install_widget_clawpkg_mode(board,id,dir,&std::collections::HashMap::new(),|_,_,_|{},true,None)
@@ -6242,11 +6840,11 @@ impl UsbSerialManager {
 
     pub(crate) fn check_petui_delivery(&self, widget_id: &str, package: &std::path::Path)
         -> Result<Option<()>, String> {
-        let status = self.status();
+        let status = self.link_status();
         if !status.connected || !status.runtime.eq_ignore_ascii_case("esp-p4") || status.board_device_id.is_empty() {
             return Ok(None);
         }
-        let (status, _) = self.connected_board_snapshot(&status.board_device_id)?;
+        let (status, _) = self.connected_link_snapshot(&status.board_device_id)?;
         let mut entries = Self::prepare_widget_delivery(widget_id, package,
             &std::collections::HashMap::new(), None, Some(&status.capabilities))?;
         if widget_transaction::supports_sorted_widget_transfer(&status.capabilities, &entries) {
@@ -6270,7 +6868,11 @@ impl UsbSerialManager {
             .asset_transfer_guard
             .lock()
             .map_err(|error| error.to_string())?;
-        let (install_status,connection_id)=self.connected_board_snapshot(expected_board_device_id)?;
+        let (install_status,connection_id)=self.connected_link_snapshot(expected_board_device_id)?;
+        let is_ble = install_status.transport == "ble" || crate::ble_transport::is_ble_generation(connection_id);
+        let _ble_bulk = BleBulkGuard::acquire(&self.ble_bulk_active, is_ble);
+        let begin_ack_timeout = if is_ble { WIDGET_BEGIN_ACK_TIMEOUT.max(Duration::from_secs(5)) } else { WIDGET_BEGIN_ACK_TIMEOUT };
+        let chunk_ack_timeout = if is_ble { WIDGET_CHUNK_ACK_TIMEOUT.max(Duration::from_secs(5)) } else { WIDGET_CHUNK_ACK_TIMEOUT };
         let send_bound=|topic:&str,payload:&serde_json::Value|self.send_inner(topic,payload,true,Some(expected_board_device_id),Some(connection_id),None);
         // Stay below the P4 runtime's 64-byte transaction buffer even when
         // the manifest uses the maximum 47-byte component id.
@@ -6313,12 +6915,12 @@ impl UsbSerialManager {
         let begin_rx = self.register_widget_ack_waiter(&transfer_id, "begin", None, None)?;
         let begin_started = std::time::Instant::now();
         record_phase("phase_started", "begin", begin_started,
-            serde_json::json!({"timeoutMs": WIDGET_BEGIN_ACK_TIMEOUT.as_millis()}));
+            serde_json::json!({"timeoutMs": begin_ack_timeout.as_millis()}));
         if let Err(error)=send_bound("widget/begin",&begin_payload){
             record_phase("phase_send_failed", "begin", begin_started, serde_json::json!({}));
             self.remove_widget_ack_waiter(&transfer_id,"begin",None,None);return Err(error);
         }
-        match begin_rx.recv_timeout(WIDGET_BEGIN_ACK_TIMEOUT) {
+        match begin_rx.recv_timeout(begin_ack_timeout) {
             Ok(ack) => {
                 record_phase("phase_ack", "begin", begin_started,
                     serde_json::json!({"ok": ack.get("ok").and_then(|v| v.as_bool())}));
@@ -6367,7 +6969,7 @@ impl UsbSerialManager {
                 let chunk_metadata = |ok: Option<bool>| serde_json::json!({
                     "fileIndex": i, "chunkIndex": chunk_index, "attempt": attempt,
                     "decodedSize": bytes.len(), "ok": ok,
-                    "timeoutMs": WIDGET_CHUNK_ACK_TIMEOUT.as_millis(),
+                    "timeoutMs": chunk_ack_timeout.as_millis(),
                 });
                 record_phase("phase_started", "chunk", chunk_started, chunk_metadata(None));
                 if let Err(error) = send_bound("widget/chunk",&build_widget_chunk_payload(&transfer_id,rel,&encoded,chunk_index,bytes.len(),&checksum)) {
@@ -6376,7 +6978,12 @@ impl UsbSerialManager {
                     self.remove_widget_ack_waiter(&transfer_id, "chunk", Some(rel), Some(chunk_index));
                     return Err(error);
                 }
-                match chunk_rx.recv_timeout(WIDGET_CHUNK_ACK_TIMEOUT) {
+                let chunk_reply = if is_ble {
+                    chunk_rx.recv_timeout(chunk_ack_timeout)
+                } else {
+                    chunk_rx.recv_timeout(WIDGET_CHUNK_ACK_TIMEOUT)
+                };
+                match chunk_reply {
                     Ok(ack) if ack.get("ok").and_then(|value| value.as_bool()) == Some(true) => {
                         record_phase("phase_ack", "chunk", chunk_started, chunk_metadata(Some(true)));
                         #[cfg(test)] installer_acceptance::outcome(&transfer_id,rel,chunk_index,"acknowledged");
@@ -6460,8 +7067,13 @@ impl UsbSerialManager {
         let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
         let receiver = self.register_widget_ack_waiter(id, "status", None, Some(nonce))?;
         let request = serde_json::json!({"transferId":id,"packageSha256":digest,"index":nonce});
+        let status_timeout = if crate::ble_transport::is_ble_generation(connection_id) {
+            WIDGET_CHUNK_ACK_TIMEOUT.max(Duration::from_secs(5))
+        } else {
+            WIDGET_CHUNK_ACK_TIMEOUT
+        };
         let result = self.send_inner("widget/status", &request, true, Some(board), Some(connection_id), None)
-            .and_then(|()| receiver.recv_timeout(WIDGET_CHUNK_ACK_TIMEOUT)
+            .and_then(|()| receiver.recv_timeout(status_timeout)
                 .map_err(|_| "无法确认设备上的组件传输状态，重新连接后可继续。".to_owned()));
         self.remove_widget_ack_waiter(id, "status", None, Some(nonce));
         let reply = result?;
@@ -6484,6 +7096,9 @@ impl UsbSerialManager {
         use base64::Engine;
         use widget_transaction::{WIDGET_FILE_CHUNK_BYTES as CHUNK, WIDGET_FILE_TRANSFER};
 
+        let is_ble = crate::ble_transport::is_ble_generation(connection_id);
+        let begin_ack_timeout = if is_ble { WIDGET_BEGIN_ACK_TIMEOUT.max(Duration::from_secs(5)) } else { WIDGET_BEGIN_ACK_TIMEOUT };
+        let chunk_ack_timeout = if is_ble { WIDGET_CHUNK_ACK_TIMEOUT.max(Duration::from_secs(5)) } else { WIDGET_CHUNK_ACK_TIMEOUT };
         let (digest, total_bytes) = widget_transaction::widget_package_digest(entries)?;
         let total_files = entries.len() as u32;
         let total_chunks: usize = entries.iter().map(|(_, data)| data.len().div_ceil(CHUNK)).sum();
@@ -6524,7 +7139,7 @@ impl UsbSerialManager {
                 begin["packageSha256"] = digest.clone().into();
                 begin["fileCount"] = total_files.into();
                 begin["totalBytes"] = total_bytes.into();
-                match send_phase("widget/begin", "begin", &begin, None, None, WIDGET_BEGIN_ACK_TIMEOUT)? {
+                match send_phase("widget/begin", "begin", &begin, None, None, begin_ack_timeout)? {
                     Some(ack) if ack["ok"] == true => 0,
                     Some(ack) => return Err(ack["msg"].as_str().unwrap_or("设备拒绝开始组件同步").into()),
                     None => match status()? {
@@ -6557,7 +7172,7 @@ impl UsbSerialManager {
                     let mut confirmed = false;
                     for attempt in 1..=WIDGET_CHUNK_MAX_ATTEMPTS {
                         let reply = send_phase("widget/chunk", "chunk", &payload, Some(path),
-                            Some(index as u32), WIDGET_CHUNK_ACK_TIMEOUT)?;
+                            Some(index as u32), chunk_ack_timeout)?;
                         let ok = reply.as_ref().and_then(|ack| ack["ok"].as_bool());
                         transfer_log::record("widget", if ok.is_some() { "phase_ack" } else { "phase_timed_out" },
                             serde_json::json!({"phase":"chunk","fileIndex":file_index,"chunkIndex":index,
@@ -6892,9 +7507,14 @@ impl UsbSerialManager {
             .lock()
             .map_err(|error| error.to_string())?;
         self.with_appearance_user_intent(expected_board_device_id, expected_scope, &_asset_transfer_guard, || {
-        self.connected_board_status(expected_board_device_id)?;
+        let link = self.connected_link_status(expected_board_device_id)?;
+        let is_ble = link.transport == "ble";
+        let _ble_bulk = BleBulkGuard::acquire(&self.ble_bulk_active, is_ble);
+        if is_ble && !use_device_builtin && link.capabilities["bleAppearanceChunks"] != true {
+            return Err("当前固件不支持通过蓝牙同步形象资源，请使用 USB 或升级固件。".into());
+        }
         self.ensure_appearance_sync_not_cancelled(None)?;
-        if p4_native_usb_available() {
+        if !is_ble && p4_native_usb_available() {
             if let Some(result)=self.native_appearance_or_fallback(||sync_appearance_p4_native(
                 self,appearance_dir,app_data_dir,expected_board_device_id,use_device_builtin,
                 &self.appearance_sync_cancel_requested,&on_progress,
@@ -6969,7 +7589,7 @@ impl UsbSerialManager {
                 Err(error) => return Err(error),
             }
         }
-        if !force_full_sync {
+        if !force_full_sync && !is_ble {
             stage("comparing_assets");
             let digests = digest_appearance_assets(&assets)?;
             match self.plan_incremental_appearance_sync(&digests, &[]) {
@@ -6989,10 +7609,10 @@ impl UsbSerialManager {
             }
         }
 
-        let use_raw_chunks = self.supports_p4_raw_asset_chunks();
-        let use_raw_slot = use_raw_chunks && self.supports_p4_raw_appearance_slot();
+        let use_raw_chunks = !is_ble && self.supports_p4_raw_asset_chunks();
+        let use_raw_slot = (use_raw_chunks || is_ble) && self.supports_p4_raw_appearance_slot();
         if use_raw_slot {
-            let capabilities = self.status().capabilities;
+            let capabilities = self.link_status().capabilities;
             let raw_capacity = capabilities
                 .get("rawAppearanceCapacityBytes")
                 .and_then(|value| value.as_u64())
@@ -7009,7 +7629,7 @@ impl UsbSerialManager {
                 ));
             }
         }
-        let negotiated_baud = self.status().baud_rate;
+        let negotiated_baud = self.link_status().baud_rate;
         let preferred_chunk_size = if use_raw_chunks {
             self.p4_raw_asset_chunk_size()
         } else {
