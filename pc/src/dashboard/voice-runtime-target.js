@@ -1,6 +1,7 @@
 // Runtime identity comes from the USB handshake or the authenticated Wi-Fi status.
 export function voiceRuntimeTarget(usb, agentId = '', wifi = null) {
-  if (usb?.connected !== true && wifi?.wifiConnected === true && wifi.controlTrusted === true
+  const usbWired = usb?.connected === true && usb?.transport !== 'ble';
+  if (!usbWired && wifi?.wifiConnected === true && wifi.controlTrusted === true
     && wifi.wirelessVoiceInput === true && wifi.panelControl === true
     && /^p4-[0-9a-f]{12}$/.test(wifi.boardDeviceId || '') && /^[0-9a-f]{16}$/.test(wifi.bootId || '')) {
     return {kind:'wifi',key:JSON.stringify(['wifi',wifi.boardDeviceId,wifi.bootId,agentId])};
@@ -11,7 +12,7 @@ export function voiceRuntimeTarget(usb, agentId = '', wifi = null) {
     && /^[1-9][0-9]{0,19}$/.test(usb.connectionId)
     && BigInt(usb.connectionId) <= 18446744073709551615n ? usb.connectionId : '';
   const bootId = typeof usb?.bootId === 'string' && /^[0-9a-f]{16}$/.test(usb.bootId) ? usb.bootId : '';
-  const ready = usb?.connected === true && known && Boolean(usb?.boardDeviceId) && Boolean(connectionId);
+  const ready = usbWired && known && Boolean(usb?.boardDeviceId) && Boolean(connectionId);
   return {
     kind: ready ? (runtime === 'esp-p4' ? 'p4' : 'legacy') : 'waiting',
     key: JSON.stringify([ready, runtime, usb?.boardDeviceId || '', bootId, connectionId, agentId]),

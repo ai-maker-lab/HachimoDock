@@ -83,7 +83,9 @@ export default function FirmwareUpdateNavItem({ usb = {}, wifi }) {
   const { boardDeviceId, connectionId, firmware } = usb;
   const reportedBoard = usb.capabilities?.firmwareUpdate?.hardwareBoardModel;
   const chipRevision = usb.capabilities?.firmwareUpdate?.chipRevision;
-  const connectedP4 = usb.connected === true && usb.runtime === "esp-p4" && Boolean(boardDeviceId && connectionId);
+  const isBle = usb.connected === true && usb.transport === "ble";
+  const connectedP4 = usb.connected === true && !isBle && usb.runtime === "esp-p4" && Boolean(boardDeviceId && connectionId);
+  const bleFontReady = isBle && usb.runtime === "esp-p4" && usb.capabilities?.bleBubbleFont === true && Boolean(boardDeviceId && connectionId);
   const hardwareProbePending = usb.capabilities?.firmwareUpdate?.hardwareBoardProbe === "pending";
   const probeKey = JSON.stringify([boardDeviceId, connectionId, firmware, reportedBoard, chipRevision, hardwareProbePending]);
   const awaitingBoardProbe = hardwareProbePending && expiredProbe !== probeKey;
@@ -136,10 +138,11 @@ export default function FirmwareUpdateNavItem({ usb = {}, wifi }) {
   const showRollback = (usbRollback && disposition !== "latest") || wifiRollback;
 
   // Also reconcile when a client reconnects after an interrupted update.
-  const fontBoard = connectedP4 ? boardDeviceId : !usb.connected && wifi?.controlTrusted ? wifi.boardDeviceId : "";
-  const fontConnection = connectedP4 ? connectionId : null;
-  const fontBoot = connectedP4 ? null : wifi?.bootId;
-  const needsFontCheck = parseFirmwareRevision(connectedP4 ? firmware : wifi?.firmware) >= 302;
+  const directFontLink = connectedP4 || bleFontReady;
+  const fontBoard = directFontLink ? boardDeviceId : !usb.connected && wifi?.controlTrusted ? wifi.boardDeviceId : "";
+  const fontConnection = directFontLink ? connectionId : null;
+  const fontBoot = directFontLink ? null : wifi?.bootId;
+  const needsFontCheck = parseFirmwareRevision(directFontLink ? firmware : wifi?.firmware) >= 302;
   const fontKey = JSON.stringify([fontBoard, fontConnection, fontBoot]);
   const [fontCheck, setFontCheck] = useState(null);
   const [fontAttempt, setFontAttempt] = useState(0);
@@ -260,6 +263,9 @@ export default function FirmwareUpdateNavItem({ usb = {}, wifi }) {
       {pending ? <LoaderCircle size={16} className="spin" /> : <Download size={16} />}
       <span className="sidebar-nav-label">固件升级</span>
       {!usb.connected && !wifi && <span className="sidebar-firmware-update__latest">未连接</span>}
+      {isBle && !pending && fontState !== "checking" && fontState !== "failed" && (
+        <span className="sidebar-firmware-update__latest" title="蓝牙模式不支持固件升级，请连接 USB 后升级">需 USB 升级</span>
+      )}
       {connectedP4 && !pending && !showRollback && !boardLabel && !requiresBoardChoice && disposition !== "latest" && (
         <span className="sidebar-firmware-update__latest" role="status">
           {currentProbe?.label || "正在识别"}

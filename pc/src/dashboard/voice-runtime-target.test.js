@@ -78,6 +78,9 @@ test("Wi-Fi PTT requires trusted firmware capability and yields to USB", async (
   assert.equal(voiceRuntimeTarget({}, "mimocode", {...wifi, wirelessVoiceInput:false}).kind, "waiting");
   assert.equal(voiceRuntimeTarget({}, "mimocode", {...wifi, controlTrusted:false}).kind, "waiting");
   assert.equal(voiceRuntimeTarget({connected:true}, "mimocode", wifi).kind, "waiting");
+  const bleUsb = {connected:true, transport:"ble", runtime:"esp-p4", boardDeviceId:"p4-0123456789ab", connectionId:"9223372036854775809", bootId:"0123456789abcdef"};
+  assert.equal(voiceRuntimeTarget(bleUsb, "mimocode", null).kind, "waiting");
+  assert.equal(voiceRuntimeTarget(bleUsb, "mimocode", wifi).kind, "wifi");
   const calls = [];
   const poller = createVoiceRuntimePoller({target:first, isCurrent:()=>true,
     invoke: async (...args)=>{calls.push(args); return {running:true};}, publish:()=>{}});

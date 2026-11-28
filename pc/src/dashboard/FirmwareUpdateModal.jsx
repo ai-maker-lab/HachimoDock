@@ -63,7 +63,7 @@ export default function FirmwareUpdateModal({
   const wireless = Boolean(expectedWifiBootId);
   const matchingConnection = wireless
     ? !usb?.connected && wifi?.wirelessOta && wifi?.controlTrusted && wifi?.bootId === expectedWifiBootId && wifi?.boardDeviceId === expectedBoardDeviceId
-    : usb?.connected && usb.connectionId && usb.boardDeviceId === expectedBoardDeviceId;
+    : usb?.connected && usb.transport !== "ble" && usb.connectionId && usb.boardDeviceId === expectedBoardDeviceId;
   const canSelect = Boolean(open && expectedBoardDeviceId && matchingConnection);
   const pending = running && running.session === dialogSession.current;
   useExitProtection(running ? "固件升级中，请等待设备重新连接并校验完成" : "");

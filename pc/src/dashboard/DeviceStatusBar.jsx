@@ -6,7 +6,7 @@
  */
 
 import React, { useEffect, useState } from "react";
-import { Monitor, RefreshCw, Usb, Wifi, WifiOff } from "lucide-react";
+import { Bluetooth, Monitor, RefreshCw, Usb, Wifi, WifiOff } from "lucide-react";
 import { deviceDisplayId } from "../shell/DeviceContext.pure.js";
 import { useDeviceContext } from "../shell/DeviceContext.jsx";
 import { useToast } from "../shell/ToastStack.jsx";
@@ -97,9 +97,11 @@ export default function DeviceStatusBar({ onOpenDeviceSettings }) {
   const legacyTransportLabel = String(binding?.boardDeviceId === activeBoardDeviceId ? binding.wifiSsid || "" : "").trim();
   const usbOnlyBindingMatch = legacyTransportLabel.match(/^USB\((.+)\)$/);
   const savedUsbPortName = usbOnlyBindingMatch?.[1] || "";
+  const isBle = usb.connected && usb.transport === "ble";
   const usbPortLabel = usb.connected ? usb.portName || savedUsbPortName || "已连接" : "未连接";
-  const connectionLabel = usb.connected ? "USB 已连接" : wifi ? "Wi-Fi 已连接" : "设备离线";
-  const ConnectionIcon = usb.connected ? Usb : wifi ? Wifi : WifiOff;
+  const baseConnectionLabel = usb.connected ? "USB 已连接" : wifi ? "Wi-Fi 已连接" : "设备离线";
+  const connectionLabel = isBle ? "蓝牙已连接" : baseConnectionLabel;
+  const ConnectionIcon = isBle ? Bluetooth : usb.connected ? Usb : wifi ? Wifi : WifiOff;
   return (
     <>
       <div className="dashboard-status-bar">
@@ -109,7 +111,7 @@ export default function DeviceStatusBar({ onOpenDeviceSettings }) {
         <div className="dashboard-status-bar__copy">
           <strong className="dashboard-status-bar__board-id" title={activeBoardDeviceId}>{deviceDisplayId(activeBoardDeviceId)}</strong>
           <span className="dashboard-status-bar__sub">
-            {usb.connected ? `USB: ${usbPortLabel}` : wifi ? "当前 Wi-Fi 配对设备" : "USB: 未连接"}
+            {isBle ? "蓝牙无线连接" : usb.connected ? `USB: ${usbPortLabel}` : wifi ? "当前 Wi-Fi 配对设备" : "USB: 未连接"}
           </span>
         </div>
         {!usb.connected && onOpenDeviceSettings && (

@@ -225,9 +225,10 @@ export async function applyDesktopPetAssignment({
         if (!Number.isSafeInteger(bytesSent) || !Number.isSafeInteger(bytesTotal)
             || bytesSent <= 0 || bytesSent > bytesTotal) return;
         const percent = Math.round((bytesSent / bytesTotal) * 100);
+        const linkLabel = confirmedUsb?.transport === "ble" ? "蓝牙" : "USB";
         onProgress?.({
           type: "info",
-          text: `USB 传输中… ${currentFile}/${totalFiles} 个素材 (${formatBytes(bytesSent)}/${formatBytes(bytesTotal)}) ${percent}%`,
+          text: `${linkLabel} 传输中… ${currentFile}/${totalFiles} 个素材 (${formatBytes(bytesSent)}/${formatBytes(bytesTotal)}) ${percent}%`,
           currentFile,
           totalFiles,
           bytesSent,
