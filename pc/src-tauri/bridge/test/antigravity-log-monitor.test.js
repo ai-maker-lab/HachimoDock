@@ -244,3 +244,137 @@ test("identical replies do not hide a new turn when both records arrive in one p
     ["done", "second"],
   ]);
 });
+
+test("ask_question and RequestFeedback artifacts enter waiting_user without leaking args or auto-clearing", (t) => {
+  const { transcript, writeCurrent, monitor, events, advance } = fixture(t, 30_000);
+  monitor.poll();
+
+  // 1) Parallel update_focus + ask_question: stay in waiting_user until ask_question finishes.
+  writeCurrent("choice", jsonl(
+    prompt("选一个方案"),
+    {
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      tool_calls: [
+        { name: "update_focus", args: { focus: "PRIVATE_FOCUS" } },
+        { name: "ask_question", args: { questions: [{ question: "PRIVATE_Q" }] } },
+      ],
+    },
+    { type: "GENERIC", status: "DONE", content: "OK" },
+    { type: "GENERIC", status: "RUNNING", content: "waiting" },
+  ));
+  monitor.poll();
+  assert.equal(events.at(-1).state, "waiting_user");
+  assert.equal(events.at(-1).content, "等你选择");
+  // waiting_user must not auto-clear to idle after idleClearMs.
+  advance(90_000);
+  assert.equal(events.at(-1).state, "waiting_user");
+  assert.equal(events.at(-1).content, "等你选择");
+
+  // Once the user answers ask_question (2nd GENERIC DONE), return to working.
+  fs.appendFileSync(transcript("choice"), jsonl({ type: "GENERIC", status: "DONE", content: "PRIVATE_CHOICE" }));
+  monitor.poll();
+  assert.equal(events.at(-1).state, "working");
+  assert.equal(events.at(-1).content, "正在处理工具结果");
+
+  // 2) write_file with stringified ArtifactMetadata.RequestFeedback=true enters waiting_user on turn end.
+  writeCurrent("plan", jsonl(
+    prompt("写重构计划"),
+    {
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      tool_calls: [
+        { name: "update_focus", args: { focus: "PRIVATE" } },
+        {
+          name: "write_file",
+          args: {
+            ArtifactMetadata: JSON.stringify({ RequestFeedback: true, Summary: "PRIVATE_SUMMARY", UserFacing: true }),
+            Content: "PRIVATE_PLAN",
+            Path: "/tmp/plan.md",
+          },
+        },
+      ],
+    },
+    { type: "GENERIC", status: "DONE", content: "OK" },
+    { type: "GENERIC", status: "DONE", content: "OK" },
+    answer("方案已写好，请确认是否执行"),
+  ));
+  monitor.poll();
+  assert.equal(events.at(-1).state, "waiting_user");
+  assert.equal(events.at(-1).content, "方案已写好，请确认是否执行");
+  advance(90_000);
+  assert.equal(events.at(-1).state, "waiting_user");
+
+  // User clicking Proceed / replying clears waiting_user back to working.
+  fs.appendFileSync(transcript("plan"), jsonl(prompt("Proceed")));
+  monitor.poll();
+  assert.equal(events.at(-1).state, "working");
+
+  // 3) RequestFeedback=false ends as normal done, and ERROR_MESSAGE emits error.
+  let prev;
+  for (const row of [
+    prompt("写普通报告"),
+    {
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      tool_calls: [{ name: "write_file", args: { ArtifactMetadata: { RequestFeedback: false } } }],
+    },
+    { type: "GENERIC", status: "DONE", content: "OK" },
+    answer("报告已完成"),
+  ]) {
+    prev = parseAntigravityStep(JSON.stringify(row), prev);
+  }
+  assert.equal(prev.state, "done");
+  assert.equal(prev.content, "报告已完成");
+  const errStep = parseAntigravityStep(JSON.stringify({ source: "SYSTEM", type: "ERROR_MESSAGE", status: "DONE", content: "PRIVATE" }), prev);
+  assert.equal(errStep.state, "error");
+  assert.equal(errStep.content, "执行失败");
+
+  // 4) RequestFeedback preserved across a same-turn ask_question, and non-DONE
+  // terminal GENERIC statuses (e.g. CANCELED) exit ask_question without wedging.
+  let combined;
+  for (const row of [
+    prompt("组合审批与提问"),
+    {
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      tool_calls: [
+        { name: "write_file", args: { ArtifactMetadata: { RequestFeedback: true, Summary: "PRIVATE_COMBINED" } } },
+        { name: "ask_question", args: { questions: [{ question: "PRIVATE_COMBINED_Q" }] } },
+      ],
+    },
+    { type: "GENERIC", status: "DONE", content: "OK" },
+    { type: "GENERIC", status: "CANCELED", content: "PRIVATE_CANCELED" },
+  ]) {
+    combined = parseAntigravityStep(JSON.stringify(row), combined);
+  }
+  assert.equal(combined.state, "working");
+  const finalCombined = parseAntigravityStep(JSON.stringify(answer("请点击 Proceed")), combined);
+  assert.equal(finalCombined.state, "waiting_user");
+  assert.equal(finalCombined.content, "请点击 Proceed");
+
+  // 5) A failed or canceled solo RequestFeedback write clears pendingFeedback so the
+  // subsequent explanation does not falsely enter waiting_user.
+  for (const status of ["FAILED", "CANCELED"]) {
+    let failedArtifact;
+    for (const row of [
+      prompt("写计划但失败"),
+      {
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        tool_calls: [
+          { name: "write_file", args: { ArtifactMetadata: { RequestFeedback: true, Summary: "PRIVATE_FAIL" } } },
+        ],
+      },
+      { type: "GENERIC", status, content: "PRIVATE_ERR" },
+      answer("写入失败，未能生成计划"),
+    ]) {
+      failedArtifact = parseAntigravityStep(JSON.stringify(row), failedArtifact);
+    }
+    assert.equal(failedArtifact.state, "done");
+    assert.equal(failedArtifact.content, "写入失败，未能生成计划");
+  }
+
+  // Privacy: none of the emitted monitor events may contain any PRIVATE sentinel.
+  assert.equal(JSON.stringify(events).includes("PRIVATE"), false);
+});
