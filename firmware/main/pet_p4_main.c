@@ -52,6 +52,8 @@
 
 #include "pet_p4_lcd.h"
 #include "pet_p4_audio.h"
+#include "pet_p4_ble.h"
+#include "pet_p4_voice_policy.h"
 #include "pet_p4_system_cues.h"
 #include "pet_p4_audio_frontend.h"
 #include "pet_p4_diagnostics.h"
@@ -157,6 +159,7 @@ typedef enum {
   PET_P4_TRANSPORT_BROADCAST = 0,
   PET_P4_TRANSPORT_UART,
   PET_P4_TRANSPORT_USB_SERIAL_JTAG,
+  PET_P4_TRANSPORT_BLE,
 } pet_p4_transport_route_t;
 
 typedef struct {
@@ -173,11 +176,17 @@ typedef struct {
   void *community_job;
   uint32_t settings_av;
 #endif
+#if PET_P4_HAS_BLE
+  uint32_t ble_epoch;
+#endif
 #if PET_P4_HELLO_ASYNC
   bool unsolicited_hello;
 #endif
 } pet_p4_protocol_request_t;
 
+#if PET_P4_HAS_BLE
+static const pet_p4_transport_route_t g_ble_route = PET_P4_TRANSPORT_BLE;
+#endif
 static const pet_p4_transport_route_t g_uart_route = PET_P4_TRANSPORT_UART;
 static const pet_p4_transport_route_t g_usb_serial_jtag_route = PET_P4_TRANSPORT_USB_SERIAL_JTAG;
 #if PET_P4_SERIAL_CONTROL_NEGOTIATED
@@ -789,6 +798,13 @@ static void transport_send_line_impl(const char *line, void *ctx, bool drain) {
     pet_transport_audit_disarm(&g_transport_reply_audit);
   }
   if (g_transport_mutex) xSemaphoreGive(g_transport_mutex);
+#if PET_P4_HAS_BLE
+  /* Unsolicited events (buttons, state, bubble needs, volume-state) also reach
+     a bonded BLE desktop; ble_send_line_shim enforces the strict topic allowlist. */
+  if (route == PET_P4_TRANSPORT_BROADCAST && pet_p4_ble_link_ready() && line) {
+    ble_send_line_shim(line, NULL);
+  }
+#endif
 #if PET_P4_NATIVE_WORK_WINDOW
   if(work_window){bool released=pet_native_work_window_end();configASSERT(released);(void)released;}
 #endif
@@ -1602,6 +1618,60 @@ static void volume_worker_idle_commit(void) {
   pet_audio_volume_idle_commit((uint64_t)esp_timer_get_time()/1000ULL,idle,volume_worker_idle);
 }
 
+#if PET_P4_HAS_BLE
+/* Route BLE-originated protocol lines into the shared FIFO protocol worker
+ * tagged with their connection epoch so stale sessions cannot execute or reply. */
+void pet_p4_ble_dispatch_line(const char *line, uint32_t ble_epoch) {
+  if (!line || !line[0] || !g_protocol_queue || !ble_epoch) return;
+  if (!pet_p4_ble_link_ready() || ble_epoch != pet_p4_ble_link_epoch()) return;
+  if (atomic_load_explicit(&g_storage_query_window, memory_order_acquire)
+      && xSemaphoreTake(g_state_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    pet_p4_query_reply_t reply = {0};
+    bool handled = atomic_load_explicit(&g_storage_query_window, memory_order_acquire)
+      && pet_p4_handle_storage_query_transport(&g_state, true, line, &reply);
+    xSemaphoreGive(g_state_mutex);
+    if (handled) {
+      if (reply.line) { pet_p4_ble_send_line_epoch(reply.line, ble_epoch); cJSON_free(reply.line); }
+      return;
+    }
+    cJSON_free(reply.line);
+  }
+  size_t line_len = strlen(line);
+  portENTER_CRITICAL(&g_protocol_budget_lock);
+  bool admitted = pet_protocol_budget_acquire(&g_protocol_budget, line_len + 1);
+  portEXIT_CRITICAL(&g_protocol_budget_lock);
+  if (!admitted) {
+    pet_p4_ble_send_line_epoch("{\"topic\":\"protocol/error\",\"payload\":{\"ok\":false,\"error\":\"command_queue_busy\"}}", ble_epoch);
+    return;
+  }
+  char *line_copy = (char *)heap_caps_malloc(line_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!line_copy) {
+    portENTER_CRITICAL(&g_protocol_budget_lock);
+    pet_protocol_budget_release(&g_protocol_budget, line_len + 1);
+    if (g_protocol_budget.allocation_failures != UINT32_MAX) ++g_protocol_budget.allocation_failures;
+    portEXIT_CRITICAL(&g_protocol_budget_lock);
+    pet_p4_ble_send_line_epoch("{\"topic\":\"protocol/error\",\"payload\":{\"ok\":false,\"error\":\"command_queue_busy\"}}", ble_epoch);
+    return;
+  }
+  memcpy(line_copy, line, line_len + 1);
+  pet_p4_protocol_request_t request = {
+    .line = line_copy,
+    .charged_bytes = line_len + 1,
+    .enqueued_us = (uint64_t)esp_timer_get_time(),
+    .send_line = ble_send_line_shim,
+    .reply_ctx = (void *)&g_ble_route,
+    .ble_epoch = ble_epoch,
+  };
+  if (xQueueSend(g_protocol_queue, &request, pdMS_TO_TICKS(20)) == pdTRUE) return;
+  free(line_copy);
+  portENTER_CRITICAL(&g_protocol_budget_lock);
+  pet_protocol_budget_release(&g_protocol_budget, line_len + 1);
+  if (g_protocol_budget.queue_full != UINT32_MAX) ++g_protocol_budget.queue_full;
+  portEXIT_CRITICAL(&g_protocol_budget_lock);
+  pet_p4_ble_send_line_epoch("{\"topic\":\"protocol/error\",\"payload\":{\"ok\":false,\"error\":\"command_queue_busy\"}}", ble_epoch);
+}
+#endif
+
 #if PET_P4_SYSTEM_WIFI
 static void volume_worker_lan(void) {
   if (!volume_worker_idle() || !pet_p4_audio_playback_ready() ||
@@ -1800,6 +1870,14 @@ static void protocol_worker_task(void *arg) {
         && !pet_p4_native_usb_route_current(request.reply_ctx)) {
       free(request.line); release_protocol_memory(request.charged_bytes); continue;
     }
+#if PET_P4_HAS_BLE
+    const bool is_ble_request = pet_p4_ble_is_transport(request.send_line);
+    if (is_ble_request
+        && (!pet_p4_ble_link_ready() || request.ble_epoch != pet_p4_ble_link_epoch())) {
+      free(request.line); release_protocol_memory(request.charged_bytes); continue;
+    }
+    if (is_ble_request) pet_p4_ble_set_reply_epoch(request.ble_epoch);
+#endif
 #if PET_P4_QUERY_REPLY_TRACE
     uint64_t query_begin=(uint64_t)esp_timer_get_time();
 #if PET_P4_QUERY_OBSERVATION
@@ -1812,7 +1890,11 @@ static void protocol_worker_task(void *arg) {
      * Invalid input falls through to the existing invalid_json ACK, not an
      * attempted suffix repair, state change or diagnostic operation. */
     bool bounded_debug_source=protocol_debug_source_bounded(request.line);
-    bool handled_debug = bounded_debug_source && (maybe_handle_transport_audit(request.line,request.send_line,request.reply_ctx)
+    bool handled_debug =
+#if PET_P4_HAS_BLE
+      !is_ble_request &&
+#endif
+      bounded_debug_source && (maybe_handle_transport_audit(request.line,request.send_line,request.reply_ctx)
       || pet_p4_sched_trace_rpc_handle(request.line,request.send_line,request.reply_ctx)
       || pet_storage_io_rpc_handle(request.line,request.send_line,request.reply_ctx)
       || maybe_handle_program_probe_line(request.line,request.send_line,request.reply_ctx)
@@ -1901,6 +1983,9 @@ static void protocol_worker_task(void *arg) {
         PET_P4_QUERY_REPLY_DEFERRED != 0);
 #endif
     }
+#if PET_P4_HAS_BLE
+    if (is_ble_request) pet_p4_ble_set_reply_epoch(0);
+#endif
     free(request.line);
     uint32_t waited_us = pet_protocol_duration(protocol_started_us - request.enqueued_us);
     uint32_t handled_us = pet_protocol_duration((uint64_t)esp_timer_get_time() - protocol_started_us);
@@ -2518,6 +2603,17 @@ void app_main(void) {
 #if PET_P4_SYSTEM_WIFI
     pet_settings_maintain(&g_state, pet_p4_conversation_active(&g_state));
     pet_p4_lan_process(&g_state, now_ms);
+#endif
+#if PET_P4_HAS_BLE
+    g_state.ble_only_desktop = pet_p4_voice_ble_only(
+      pet_p4_ble_link_ready(),
+      g_state.usb_client_last_seen_ms,
+      g_state.lan_client_connected,
+      now_ms,
+      PET_P4_HOST_HEARTBEAT_TIMEOUT_MS
+    );
+#else
+    g_state.ble_only_desktop = false;
 #endif
     pet_p4_touch_process(&g_state, transport_send_line, NULL);
     pet_p4_input_process(&g_state, transport_send_line, NULL);

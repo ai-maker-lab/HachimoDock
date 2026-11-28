@@ -69,7 +69,7 @@ pub(super) fn valid_identity(board: &str, boot: &str) -> bool {
 
 impl Target {
     pub(crate) fn current(usb: &UsbSerialManager) -> Option<Self> {
-        let status = usb.status();
+        let status = usb.link_status();
         if status.connected {
             let connection = status.connection_id.parse::<u64>().ok()?;
             return (connection != 0

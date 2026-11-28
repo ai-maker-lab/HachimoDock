@@ -1397,6 +1397,13 @@ and 19 are reserved and read back as zero. The device waits up to 280 ms
 for a second button press when a double is mapped. Authenticated Bluetooth HID connection and enabled mode together
 give Bluetooth ownership of the physical controls.
 
+WiFi6 v3 also accepts `keyboard/config` and desktop control/data traffic over
+its bonded desktop BLE service (`ble-jsonl-v1`). Turning keyboard mode off while
+bonded restores local button and joystick input while keeping desktop data
+available after reboot. The board's existing unpair action clears the binding
+for both services and releases the radio for BLE accessories. See the
+[desktop BLE guide](../pc/docs/ble-wireless.md) for transport coverage.
+
 ## Hardware Input Configuration
 
 Inputs are sampled every 5ms. Buttons are active-low with internal pull-ups,

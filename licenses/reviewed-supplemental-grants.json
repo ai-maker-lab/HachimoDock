@@ -1700,6 +1700,52 @@
       ],
       "copyrightPolicy": "Upstream copyright/declarations preserved verbatim; no owner/year invented or substituted. Referenced standard text is accompanied by its exact upstream scope declaration.",
       "rightsReviewNotes": []
+    },
+    "cargo:objc2-core-bluetooth@0.3.2": {
+      "crateArchiveSha256": "79b30b9eacc37434a61377866f68b27acef9fa5496f25cc9ca8b2549032e0394",
+      "metadataLicenseExpression": "Zlib OR Apache-2.0 OR MIT",
+      "publishedVcs": {
+        "git": {
+          "sha1": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b"
+        },
+        "path_in_vcs": "framework-crates/objc2-core-bluetooth"
+      },
+      "repository": "https://github.com/madsmtm/objc2",
+      "grantContextKind": "versioned-explicit-license-by-reference-plus-canonical-text",
+      "texts": [
+        {
+          "file": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54.txt",
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+          "bytes": 1339,
+          "upstreamURL": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+          "upstreamPath": "LICENSE.md",
+          "role": "upstream-license-or-notice"
+        },
+        {
+          "file": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5.txt",
+          "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+          "bytes": 1078,
+          "upstreamURL": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/MIT.txt",
+          "upstreamPath": "MIT.txt",
+          "role": "standard-MIT-text-explicitly-referenced-by-versioned-upstream-declaration"
+        }
+      ],
+      "evidence": [
+        {
+          "repository": "https://github.com/madsmtm/objc2",
+          "commit": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+          "rootTree": {
+            "url": "https://api.github.com/repos/madsmtm/objc2/git/trees/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+            "finalURL": "https://api.github.com/repos/madsmtm/objc2/git/trees/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+            "status": 200,
+            "sha256": "ccb9fc3dfa8a99f2ac0972cd9a144ebabfb554a029322851ffe17e8718363bd4"
+          }
+        }
+      ],
+      "copyrightPolicy": "Upstream copyright/declarations preserved verbatim; no owner/year invented or substituted. Referenced standard text is accompanied by its exact upstream scope declaration.",
+      "rightsReviewNotes": [
+        "Upstream objc2 LICENSE.md explicitly records Apple-SDK-derived binding licensing uncertainty; preserved in original context. Text collection is not an independent clearance of Apple SDK rights."
+      ]
     }
   },
   "notGenericFallback": true,

@@ -1327,7 +1327,8 @@ pub(crate) fn start(app: tauri::AppHandle, usb: crate::usb_serial::UsbSerialMana
             let Ok(_follow) = FOLLOW.try_lock() else {
                 continue;
             };
-            if usb.status().connected {
+            if usb.link_status().connected {
+                bubble_pixels::reset();
                 last_sent = None;
                 continue;
             }

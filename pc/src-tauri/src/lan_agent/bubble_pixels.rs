@@ -193,7 +193,7 @@ pub(super) fn prepare(peer: &Peer, usb: &UsbSerialManager, body: &mut Value) {
     let Ok(mut c) = controller().try_lock() else {
         return;
     };
-    if usb.status().connected
+    if usb.link_status().connected
         || c.bridge.sink().is_none()
         || !load_peer().as_ref().is_some_and(|p| same_peer(peer, p))
     {
@@ -219,7 +219,7 @@ pub(super) fn prepare(peer: &Peer, usb: &UsbSerialManager, body: &mut Value) {
             || !status.panel_control
             || !status.wifi_connected
             || status.board_device_id.is_empty()
-            || usb.status().connected
+            || usb.link_status().connected
         {
             return;
         }
@@ -308,7 +308,7 @@ pub(super) fn prepare(peer: &Peer, usb: &UsbSerialManager, body: &mut Value) {
     }
     if s.sent.is_some() && s.polled.elapsed() >= Duration::from_millis(1000) {
         s.polled = Instant::now();
-        if usb.status().connected {
+        if usb.link_status().connected {
             retire(&mut c);
             body.as_object_mut().unwrap().remove("textPixels");
             return;
@@ -371,7 +371,7 @@ pub(crate) fn send(usb: &UsbSerialManager, frame: BubbleFrame) -> Result<(), Str
     let mut next_write = Instant::now();
     shared::transfer_frame(&frame, &bytes, |phase, extra| {
         while Instant::now() < next_write {
-            if Instant::now() >= deadline || usb.status().connected || !current(&frame) {
+            if Instant::now() >= deadline || usb.link_status().connected || !current(&frame) {
                 return Err("BUBBLE_FALLBACK: retired".into());
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -387,7 +387,7 @@ pub(crate) fn send(usb: &UsbSerialManager, frame: BubbleFrame) -> Result<(), Str
                     return Err("BUBBLE_FALLBACK: control lane".into())
                 }
                 Err(std::sync::TryLockError::WouldBlock) => {
-                    if Instant::now() >= deadline || usb.status().connected || !current(&frame) {
+                    if Instant::now() >= deadline || usb.link_status().connected || !current(&frame) {
                         return Err("BUBBLE_FALLBACK: retired".into());
                     }
                     std::thread::sleep(Duration::from_millis(10));
@@ -401,7 +401,7 @@ pub(crate) fn send(usb: &UsbSerialManager, frame: BubbleFrame) -> Result<(), Str
             .lock()
             .map_err(|_| "BUBBLE_FALLBACK: lifecycle")?;
         let s = c.session.as_ref().ok_or("BUBBLE_FALLBACK: retired")?;
-        if usb.status().connected
+        if usb.link_status().connected
             || !c.bridge.current(&frame)
             || !s.sent.is_some_and(|at| at.elapsed() < SNAPSHOT_MAX_AGE)
             || !load_peer().as_ref().is_some_and(|p| same_peer(&s.peer, p))

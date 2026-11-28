@@ -195,13 +195,48 @@ pub(super) fn validate_write(
     generation: Option<u64>,
     payload: &serde_json::Value,
 ) -> Result<(), String> {
+    validate_write_fields(
+        &connection.board_device_id,
+        connection.connection_id,
+        connection.capabilities["audioMasterVolume"].as_str(),
+        board,
+        generation,
+        payload,
+    )
+}
+
+pub(super) fn validate_write_ble(
+    status: &UsbConnectionStatus,
+    actual_generation: u64,
+    board: Option<&str>,
+    generation: Option<u64>,
+    payload: &serde_json::Value,
+) -> Result<(), String> {
+    validate_write_fields(
+        &status.board_device_id,
+        actual_generation,
+        status.capabilities["audioMasterVolume"].as_str(),
+        board,
+        generation,
+        payload,
+    )
+}
+
+fn validate_write_fields(
+    actual_board: &str,
+    actual_generation: u64,
+    capability: Option<&str>,
+    board: Option<&str>,
+    generation: Option<u64>,
+    payload: &serde_json::Value,
+) -> Result<(), String> {
     let board = board.ok_or("master volume requires an exact board binding")?;
     let generation = generation
         .filter(|v| *v != 0)
         .ok_or("master volume requires a connection generation")?;
-    if connection.connection_id != generation
-        || connection.board_device_id != board
-        || connection.capabilities["audioMasterVolume"] != ENGINE
+    if actual_generation != generation
+        || actual_board != board
+        || capability != Some(ENGINE)
     {
         return Err("master volume binding or capability changed; not submitted".into());
     }
@@ -273,9 +308,28 @@ impl UsbSerialManager {
             })?;
         let (generation, cancel) = {
             let (_lease, slot) = self.inbound_owner.connection(&self.connection)?;
-            let connection = slot.as_ref().ok_or("USB is not connected")?;
-            check_connection(self, connection, board, connection.connection_id)?;
-            (connection.connection_id, connection.cancel_reader.clone())
+            if let Some(connection) = slot.as_ref().filter(|c| c.connected) {
+                check_connection(self, connection, board, connection.connection_id)?;
+                (connection.connection_id, Some(connection.cancel_reader.clone()))
+            } else {
+                drop(slot);
+                drop(_lease);
+                let ble = self.ble_status();
+                let ble_gen = ble.connection_id.parse::<u64>().ok()
+                    .filter(|g| crate::ble_transport::is_ble_generation(*g))
+                    .ok_or("USB is not connected")?;
+                policy::session(
+                    board,
+                    ble_gen,
+                    &ble.board_device_id,
+                    ble_gen,
+                    ble.connected,
+                    false,
+                    true,
+                    ble.capabilities["audioMasterVolume"].as_str(),
+                ).map_err(str::to_owned)?;
+                (ble_gen, None)
+            }
         };
         let request = format!("volume-{}", uuid::Uuid::new_v4());
         let mut payload = serde_json::json!({"operation":if volume.is_some(){"set"}else{"query"},
@@ -314,7 +368,7 @@ impl UsbSerialManager {
             .map_err(|e| format!("{UNKNOWN}: {e}"))?;
         // The receipt can already be queued when disconnect/replacement wins.
         // Linearize success under the same owner gate as inbound dispatch.
-        {
+        if let Some(cancel) = cancel {
             let (_lease, slot) = self
                 .inbound_owner
                 .connection(&self.connection)
@@ -326,6 +380,9 @@ impl UsbSerialManager {
                 return Err(format!("{UNKNOWN}: connection cancelled"));
             }
             check_connection(self, connection, board, generation)
+                .map_err(|e| format!("{UNKNOWN}: {e}"))?;
+        } else {
+            self.verify_ble_board(board, generation)
                 .map_err(|e| format!("{UNKNOWN}: {e}"))?;
         }
         Ok(response)

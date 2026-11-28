@@ -376,3 +376,25 @@ test("LAN snapshots retain capabilities only for the authenticated board, associ
   assert.equal(pairedWifiTarget({...status,bootId:"0000000000000001"}).componentTarget,null);
   assert.equal(pairedWifiTarget({...status,controlTrusted:false}).componentTarget,null);
 });
+
+test("BLE transport metadata is preserved and foreground focus triggers link refresh", () => {
+  const ble = normalizeUsbStatusPayload({
+    connected: true,
+    transport: "ble",
+    portName: "BLE",
+    boardDeviceId: "p4-aabbccddeeff",
+    connectionId: "9223372036854775809",
+    bootId: "0123456789abcdef",
+    runtime: "esp-p4",
+    capabilities: { ble: true, bleBubbleFont: true },
+  });
+  assert.equal(ble.transport, "ble");
+  assert.equal(ble.connected, true);
+  assert.equal(usbStatusSnapshotsEqual(ble, normalizeUsbStatusPayload({ ...ble, transport: "usb" })), false);
+  assert.equal(normalizeUsbStatusPayload({ connected: false, transport: "ble" }).transport, "");
+
+  const pollEffect = source.match(/\/\/ --- USB status poll[\s\S]*?\n  \}, \[[^\]]*\]\);/);
+  assert.ok(pollEffect, "expected USB/BLE status poll effect");
+  assert.match(pollEffect[0], /window\.addEventListener\("focus",\s*requestRefresh\)/);
+  assert.match(pollEffect[0], /document\.addEventListener\("visibilitychange",\s*onVisibilityRefresh\)/);
+});

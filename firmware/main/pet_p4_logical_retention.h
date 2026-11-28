@@ -11,10 +11,13 @@ typedef struct {
 } pet_logical_common_plan_t;
 typedef struct {pet_logical_common_plan_t plan;bool valid;} pet_logical_retention_t;
 enum {
-  PET_CONNECTION_NONE, PET_CONNECTION_OFFLINE, PET_CONNECTION_USB, PET_CONNECTION_WIFI
+  PET_CONNECTION_NONE, PET_CONNECTION_OFFLINE, PET_CONNECTION_USB, PET_CONNECTION_WIFI, PET_CONNECTION_BLE
 };
 static inline uint8_t pet_connection_banner(bool usb, bool wifi) {
   return usb ? PET_CONNECTION_USB : wifi ? PET_CONNECTION_WIFI : PET_CONNECTION_OFFLINE;
+}
+static inline uint8_t pet_connection_banner_with_ble(bool usb, bool wifi, bool ble) {
+  return usb ? PET_CONNECTION_USB : ble ? PET_CONNECTION_BLE : wifi ? PET_CONNECTION_WIFI : PET_CONNECTION_OFFLINE;
 }
 static inline pet_logical_common_plan_t pet_logical_common_plan(bool state_present,
     bool touch,int32_t x,int32_t y,uint8_t banner,bool boot){

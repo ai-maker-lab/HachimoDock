@@ -3,6 +3,11 @@
 # [Pos] ESP32-P4 main firmware component build definition.
 # [Sync] If this file changes, update `firmware/.folder.md` and `protocol.md`.
 
+set(ble_desktop_source "pet_p4_ble_disabled.c")
+if("$ENV{PET_P4_SYSTEM_WIFI}" STREQUAL "1" AND "$ENV{PET_P4_CHIP_FAMILY}" STREQUAL "v3" AND CONFIG_BT_NIMBLE_ENABLED)
+  set(ble_desktop_source "pet_p4_ble.c")
+endif()
+
 if("$ENV{PET_P4_LCD_PANEL_AUTO}" STREQUAL "1")
   set(panel_touch_source "pet_p4_cst328.c")
 endif()
@@ -143,6 +148,7 @@ idf_component_register(
     "pet_p4_renderer.c"
     "pet_p4_view.c"
     "pet_p4_voice_feedback.c"
+    ${ble_desktop_source}
   INCLUDE_DIRS
     "."
   PRIV_INCLUDE_DIRS
@@ -173,6 +179,11 @@ idf_component_register(
     spiffs
     tinyusb
 )
+
+if("$ENV{PET_P4_SYSTEM_WIFI}" STREQUAL "1" AND "$ENV{PET_P4_CHIP_FAMILY}" STREQUAL "v3" AND CONFIG_BT_NIMBLE_ENABLED)
+  target_compile_definitions(${COMPONENT_LIB} PRIVATE PET_P4_HAS_BLE=1)
+  set_property(SOURCE "pet_p4_ble.c" APPEND PROPERTY COMPILE_OPTIONS "-Oz")
+endif()
 
 if("$ENV{PET_P4_SYSTEM_WIFI}" STREQUAL "1")
   set_property(SOURCE "pet_p4_community.c" "pet_p4_community_crypto.c" "pet_p4_community_profile.c"

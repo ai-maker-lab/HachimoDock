@@ -69,7 +69,7 @@ pub fn post(app: Option<&tauri::AppHandle>, usb: Option<&crate::usb_serial::UsbS
     let toast = app.map(|a| a.emit(EVENT, json!({"componentId":component,"title":payload["title"],"text":payload.get("text").cloned().unwrap_or(Value::Null),"badge":payload.get("badge").cloned().unwrap_or(Value::Null),"bubble":bubble_title(payload),"fromDevice":from_device})).is_ok()).unwrap_or(false);
     let device = match usb {
         Some(usb) if !from_device => {
-            let status = usb.status();
+            let status = usb.link_status();
             if !status.connected { crate::lan_agent::runtime_events::notify(usb, payload) }
             else if status.capabilities[CAPABILITY] != ENGINE { Err("设备未声明 p4-notify-v1，仅显示客户端提示".into()) }
             else { usb.send(TOPIC, payload) }

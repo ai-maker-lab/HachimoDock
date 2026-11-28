@@ -4,5 +4,7 @@
 <dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>发现并配对你的 Hachimodock 设备，在同一局域网同步桌宠状态。</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>通过蓝牙低功耗连接 Hachimodock 桌面宠物板，用于同步状态、组件数据、字库与按键事件。</string>
 </dict>
 </plist>

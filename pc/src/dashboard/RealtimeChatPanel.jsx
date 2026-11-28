@@ -64,7 +64,7 @@ export default function RealtimeChatPanel({ keyBound = false, onOpenApiSettings,
     window.addEventListener("focus", load);
     return () => { cancelled = true; window.removeEventListener(API_CONFIGURATION_UPDATED_EVENT, load); window.removeEventListener("focus", load); };
   }, [checkRevision]);
-  const readiness = realtimeReadiness({ deviceOnline: usb.connected || realtimeWifiReady, appearance, personaReady, ...check });
+  const readiness = realtimeReadiness({ deviceOnline: (usb.connected && usb.transport !== "ble") || realtimeWifiReady, appearance, personaReady, ...check });
   const nextAction = readiness?.action === "api" ? onOpenApiSettings
     : readiness?.action === "persona" ? onOpenPersona
     : readiness?.action === "appearance" ? onOpenGallery

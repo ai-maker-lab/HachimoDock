@@ -1913,7 +1913,7 @@ export default function ComponentCenter({ active = true, onOpenWirelessMaintenan
                 </p>
                 <div className="ota-modal__usb-status">
                   <span className={`ota-modal__dot ${usb.connected ? "is-on" : "is-off"}`} />
-                  {usb.connected ? "USB 已连接,准备推送…" : "等待 USB 连接…"}
+                  {usb.connected ? (usb.transport === "ble" ? "蓝牙已连接，准备推送…" : "USB 已连接,准备推送…") : "等待 USB 连接…"}
                 </div>
               </>
             )}

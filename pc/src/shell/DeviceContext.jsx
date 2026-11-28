@@ -226,6 +226,15 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
       requestRefresh();
     }).catch(() => {});
     listen("usb-disconnected", requestRefresh).then(retainListener).catch(() => {});
+    const onVisibilityRefresh = () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "hidden") requestRefresh();
+    };
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+      window.addEventListener("focus", requestRefresh);
+    }
+    if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+      document.addEventListener("visibilitychange", onVisibilityRefresh);
+    }
     check();
     const id = setInterval(check, USB_STATUS_POLL_MS);
     return () => {
@@ -233,6 +242,12 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
       revision += 1;
       refreshPending = false;
       clearInterval(id);
+      if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+        window.removeEventListener("focus", requestRefresh);
+      }
+      if (typeof document !== "undefined" && typeof document.removeEventListener === "function") {
+        document.removeEventListener("visibilitychange", onVisibilityRefresh);
+      }
       if (slowWarningTimer) clearTimeout(slowWarningTimer);
       unlisteners.forEach((stop) => { try { stop(); } catch { /* already closed */ } });
     };
@@ -687,7 +702,8 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
     if (!owner) return { requested: false };
     owner.cancelRequested = true;
     const text = appearanceSync.progress?.indeterminate ? "正在取消形象切换…"
-      : appearanceSync.transport === "wifi" ? "正在中断 Wi-Fi 形象传输…" : "正在中断 USB 形象传输…";
+      : appearanceSync.transport === "wifi" ? "正在中断 Wi-Fi 形象传输…"
+        : usb.transport === "ble" ? "正在中断蓝牙形象传输…" : "正在中断 USB 形象传输…";
     setAppearanceSync(current => ({
       ...current,
       cancelling: true,
@@ -705,7 +721,7 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
       if (appearanceAssignmentOwnerRef.current === owner) setAppearanceSync(current => ({ ...current, cancelling: false }));
       throw error;
     }
-  }, [appearanceSync.cancelling, appearanceSync.pending, appearanceSync.progress, appearanceSync.transport]);
+  }, [appearanceSync.cancelling, appearanceSync.pending, appearanceSync.progress, appearanceSync.transport, usb.transport]);
 
   const saveAgentAppearance = useCallback((agentId, appearanceId) => {
     const nextMap = assignAppearanceToAgent(agentAppearanceMap, agentId, appearanceId);
