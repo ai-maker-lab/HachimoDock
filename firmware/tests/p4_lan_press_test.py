@@ -61,7 +61,7 @@ def test_legacy_probe_and_producer_routes_preserved():
     assert '    return;\n  }\n#endif' in producer
     assert 'pet_p4_lan_realtime_press' not in source.split('static void send_input_event(',1)[0]
     protocol = (ROOT / 'main/pet_p4_protocol.c').read_text()
-    assert protocol.count('if (state->desktop_device_id[0]) pet_p4_lan_usb_active();') == 3
+    assert protocol.count('if (!ble_request && state->desktop_device_id[0]) pet_p4_lan_usb_active();') == 3
 
 def test_component_descriptors_reuse_usb_build_and_storage_limits():
     protocol = (ROOT / "main/pet_p4_protocol.c").read_text()

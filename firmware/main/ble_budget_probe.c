@@ -2,6 +2,9 @@
  * physical-action path and only sent to an authenticated, bonded peer. */
 #include "pet_p4_ble_shortcut.h"
 #include "pet_p4_ble_accessory.h"
+#if PET_P4_HAS_BLE
+#include "pet_p4_ble.h"
+#endif
 #include "esp_hosted.h"
 #include "esp_random.h"
 #include "esp_timer.h"
@@ -117,6 +120,10 @@ static keyboard_config_t keyboard = {
   .keys = { [0] = 0x0106, [3] = 0x0119, [6] = 0x0104 },
 };
 static atomic_bool keyboard_enabled;
+#if PET_P4_HAS_BLE
+/* Read the authoritative NimBLE bond store once the host is synchronized. */
+static atomic_bool check_saved_bond;
+#endif
 
 void pet_ble_keyboard_load(void) {
   nvs_handle_t nvs;
@@ -124,13 +131,24 @@ void pet_ble_keyboard_load(void) {
   size_t size = sizeof(saved);
   if (nvs_open("pet_ble", NVS_READONLY, &nvs) == ESP_OK) {
     if (nvs_get_blob(nvs, "layout_v1", &saved, &size) == ESP_OK &&
-        size == sizeof(saved) && saved.enabled <= 1) keyboard = saved;
+        size == sizeof(saved) && saved.enabled <= 1) {
+      keyboard = saved;
+#if PET_P4_HAS_BLE
+      /* Older layouts can have a bond with both mode bytes set to zero. */
+      atomic_store(&check_saved_bond, true);
+#endif
+    }
     nvs_close(nvs);
   }
   atomic_store(&keyboard_enabled, keyboard.enabled);
 }
 
-bool pet_ble_shortcut_restore_requested(void) { return pet_ble_keyboard_enabled(); }
+bool pet_ble_shortcut_restore_requested(void) {
+#if PET_P4_HAS_BLE
+  if (atomic_load(&check_saved_bond) || pet_ble_shortcut_paired()) return true;
+#endif
+  return pet_ble_keyboard_enabled();
+}
 bool pet_ble_keyboard_enabled(void) { return atomic_load(&keyboard_enabled); }
 bool pet_ble_keyboard_connected(void) { return pet_ble_keyboard_enabled() && atomic_load(&ready); }
 
@@ -180,6 +198,12 @@ static bool trusted_peer(void) {
   return bonded_identity_valid && !ble_gap_conn_find(peer,&d)
     && !ble_addr_cmp(&d.peer_id_addr,&bonded_identity);
 }
+
+#if PET_P4_HAS_BLE
+bool pet_p4_ble_peer_authorized(uint16_t connection) {
+  return connection == peer && peer != NO_PEER && secure(peer) && trusted_peer();
+}
+#endif
 
 static void update_ready(void) {
   const bool can_send=pet_ble_keyboard_enabled() && peer != NO_PEER && !suspended && trusted_peer() && secure(peer) &&
@@ -268,6 +292,9 @@ static int register_keyboard(void) {
 
 static int gap_event(struct ble_gap_event *event, void *arg) {
   (void)arg;
+#if PET_P4_HAS_BLE
+  pet_p4_ble_gap_event(event);
+#endif
   switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
       if (event->connect.status==0) {
@@ -304,7 +331,13 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
         atomic_store(&paired,1);
         pet_ble_shortcut_close_pair();
         update_ready();
+#if PET_P4_HAS_BLE
+        pet_p4_ble_on_auth_changed(peer, pet_p4_ble_peer_authorized(peer));
+#endif
       } else if (peer!=NO_PEER) {
+#if PET_P4_HAS_BLE
+        pet_p4_ble_on_auth_changed(peer, false);
+#endif
         (void)ble_gap_terminate(peer,BLE_ERR_REM_USER_CONN_TERM);
       }
       break;
@@ -343,6 +376,9 @@ static void tick(struct ble_npl_event *event) {
     pet_ble_shortcut_close_pair();
     atomic_store(&ready,0);
     pet_hid_clear(&chord_queue);
+#if PET_P4_HAS_BLE
+    pet_p4_ble_on_auth_changed(peer, false);
+#endif
     if (peer!=NO_PEER) (void)ble_gap_terminate(peer,BLE_ERR_REM_USER_CONN_TERM);
     ble_addr_t bonded;
     int count=0;
@@ -354,8 +390,9 @@ static void tick(struct ble_npl_event *event) {
     if (ble_gap_adv_active()) (void)ble_gap_adv_stop();
   }
 #if PET_BLE_ACCESSORY
-  if (pet_accessory_poll(local_address, pet_ble_keyboard_enabled() || pairing_open() ||
-                         peer!=NO_PEER || ble_gap_adv_active(),
+  if (pet_accessory_poll(local_address,
+                         pet_ble_keyboard_enabled() || pet_ble_shortcut_restore_requested() ||
+                         pairing_open() || peer!=NO_PEER || ble_gap_adv_active(),
                          bonded_identity_valid ? bonded_identity.val : NULL)) {
     ble_npl_callout_reset(&poll,ble_npl_time_ms_to_ticks32(25));
     return;
@@ -364,6 +401,8 @@ static void tick(struct ble_npl_event *event) {
   if (!pet_ble_keyboard_enabled()) {
     atomic_store(&ready,0);
     pet_hid_clear(&chord_queue);
+  }
+  if (!pet_ble_shortcut_restore_requested()) {
     if (ble_gap_adv_active()) (void)ble_gap_adv_stop();
     if (peer!=NO_PEER) {
       if (release_due) (void)send_report(release_handle,(const uint8_t[8]){0});
@@ -432,6 +471,9 @@ static void reset(int reason) {
 #if PET_BLE_ACCESSORY
   pet_accessory_reset();
 #endif
+#if PET_P4_HAS_BLE
+  pet_p4_ble_reset();
+#endif
   (void)reason;
   peer=NO_PEER;
   input_subscribed=false; boot_subscribed=false; suspended=false;
@@ -455,6 +497,9 @@ static void synced(void) {
     atomic_store(&available,-1);
     return;
   }
+#if PET_P4_HAS_BLE
+  pet_p4_ble_advertise_service();
+#endif
   uint8_t address[6];
   uint32_t digest=2166136261u;
   if (!ble_hs_id_copy_addr(local_address,address,NULL)) {
@@ -465,6 +510,9 @@ static void synced(void) {
   int bond_status=ble_store_util_bonded_peers(&bonded_identity,&count,1);
   bonded_identity_valid=!bond_status && count==1;
   atomic_store(&paired,bonded_identity_valid);
+#if PET_P4_HAS_BLE
+  atomic_store(&check_saved_bond,false);
+#endif
   atomic_store(&radio_error,0);
   atomic_store(&available,1);
 #if PET_BLE_ACCESSORY
@@ -491,6 +539,11 @@ void ble_budget_probe(void) {
   if (register_keyboard()) {
     atomic_store(&available,-1); return;
   }
+#if PET_P4_HAS_BLE
+  if (pet_p4_ble_register() != 0) {
+    atomic_store(&available,-1); return;
+  }
+#endif
   ble_hs_cfg.sync_cb=synced;
   ble_hs_cfg.reset_cb=reset;
   ble_hs_cfg.sm_bonding=1; ble_hs_cfg.sm_mitm=1; ble_hs_cfg.sm_sc=1;

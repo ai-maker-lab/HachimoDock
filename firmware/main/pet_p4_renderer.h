@@ -24,6 +24,7 @@ extern "C" {
 #endif
 
 esp_err_t pet_p4_renderer_init(void);
+void pet_p4_renderer_voice_usb_notice(unsigned long long now_ms);
 pet_render_cache_memory_t pet_p4_renderer_cache_memory(void);
 typedef struct {
   uint32_t last_us, p95_us, max_us, last_decode_us;

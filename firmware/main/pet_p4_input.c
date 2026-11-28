@@ -52,6 +52,7 @@
 
 #include "pet_p4_audio.h"
 #include "pet_p4_input_core.h"
+#include "pet_p4_renderer.h"
 #include "pet_p4_observation.h"
 #include "pet_p4_miniapp.h"
 #include "pet_p4_media.h"
@@ -1537,6 +1538,17 @@ static void dispatch_binding_event(
   if (binding && !strcmp(binding->action, PET_SETTINGS_ACTION)) {
     // Keep device navigation local even if the current page cannot open Settings.
     (void)pet_settings_open(state, event->ts_ms);
+    return;
+  }
+#endif
+#if PET_P4_HAS_BLE
+  if (state && state->ble_only_desktop && binding
+      && (!strcmp(binding->action, "voice_ptt") || !strcmp(binding->action, "realtime_chat"))) {
+    if (strcmp(gesture, "hold_end") != 0
+        && (!strcmp(state->screen_page, "main") || !strcmp(binding->action, "realtime_chat"))) {
+      pet_p4_renderer_voice_usb_notice(event->ts_ms);
+    }
+    send_ignored_component_event(state, send_line, ctx, event, event_name, gesture);
     return;
   }
 #endif

@@ -56,6 +56,7 @@
 #include "pet_p4_audio.h"
 #include "pet_p4_audio_volume.h"
 #include "pet_p4_audio_frontend.h"
+#include "pet_p4_ble.h"
 #include "pet_p4_build_info.h"
 #include "pet_p4_diagnostics.h"
 #include "pet_p4_input.h"
@@ -2191,6 +2192,13 @@ static void asset_phase_capture(const char *line,void *context){
   if(r->invalid)raw_phase_note(r,RAW_PHASE_CAPTURE,"ready_capture_failed");
 }
 static bool asset_phase_send_current(pet_p4_send_line_fn send,void *route){
+#if PET_P4_HAS_BLE
+  if (pet_p4_ble_is_transport(send)) {
+    uint32_t expected_epoch = pet_p4_ble_reply_epoch();
+    if (!pet_p4_ble_link_ready()) return false;
+    return !expected_epoch || pet_p4_ble_link_epoch() == expected_epoch;
+  }
+#endif
 #if PET_P4_SYSTEM_WIFI
   if (send == pet_p4_lan_appearance_reply) return pet_p4_lan_appearance_current(route);
 #endif
@@ -2309,6 +2317,10 @@ static void serial_retire_locked(pet_p4_runtime_state_t *state){
 static bool font_usb_current(void *owner, uint32_t generation) {
   (void)generation;
   return pet_p4_native_usb_route_current(owner);
+}
+static bool font_ble_current(void *owner, uint32_t generation) {
+  (void)owner;
+  return pet_p4_ble_link_ready() && pet_p4_ble_link_epoch() == generation;
 }
 #endif
 #include "pet_p4_protocol_audio_patch.inc"
@@ -3570,7 +3582,15 @@ __attribute__((optimize("Oz"))) void pet_p4_send_hello_for_board(const char *boa
   cJSON_AddItemToObject(payload, "hardware", hardware);
 
   cJSON_AddNumberToObject(capabilities, "version", 1);
+#if PET_P4_HAS_BLE
+  cJSON_AddBoolToObject(capabilities, "usbOnly", false);
+  cJSON *ble = cJSON_AddObjectToObject(capabilities, "ble");
+  cJSON_AddStringToObject(ble, "controlTransport", "ble-jsonl-v1");
+  cJSON_AddNumberToObject(ble, "controlLineMaxBytes", 32768);
+  cJSON_AddBoolToObject(ble, "voice", false);
+#else
   cJSON_AddBoolToObject(capabilities, "usbOnly", true);
+#endif
   cJSON_AddBoolToObject(capabilities, "nativeUsb", true);
   cJSON_AddStringToObject(capabilities, "nativeUsbHid", "p4-hid-keyboard-v1");
 #if PET_P4_SYSTEM_WIFI && CONFIG_BT_NIMBLE_ENABLED
@@ -3689,6 +3709,10 @@ __attribute__((optimize("Oz"))) void pet_p4_send_hello_for_board(const char *boa
   cJSON_AddBoolToObject(capabilities, "bubbleGlyphCells", true);
   cJSON_AddBoolToObject(capabilities, "bubbleBodyMasks", !pet_shared_font_ready());
   cJSON_AddBoolToObject(capabilities, "bubbleTitleMasks", !pet_shared_font_ready());
+#if PET_P4_HAS_BLE
+  cJSON_AddBoolToObject(capabilities, "bleAppearanceChunks", true);
+  cJSON_AddBoolToObject(capabilities, "bleBubbleFont", true);
+#endif
   cJSON_AddBoolToObject(capabilities, "screenshot", true);
   cJSON_AddStringToObject(capabilities, "screenshotTransfer", "pull-fnv1a32-v1");
 #if PET_P4_SCREENSHOT_CLOSE_ACK
@@ -3723,7 +3747,11 @@ __attribute__((optimize("Oz"))) void pet_p4_send_hello_for_board(const char *boa
   cJSON_AddItemToArray(asset_formats, cJSON_CreateString("p4-pcm-wav-v1"));
   cJSON_AddItemToObject(capabilities, "assetFormats", asset_formats);
 
+#if PET_P4_HAS_BLE
+  cJSON_AddBoolToObject(transport, "usbOnly", false);
+#else
   cJSON_AddBoolToObject(transport, "usbOnly", true);
+#endif
   cJSON_AddBoolToObject(transport, "usbUart", true);
   cJSON_AddNumberToObject(transport, "usbUartBaud", PET_P4_UART_BAUD);
   cJSON_AddBoolToObject(transport, "rawAssetChunks", true);
@@ -4395,7 +4423,12 @@ bool pet_p4_handle_line_with_reply(
     return false;
   }
   pet_app_host_transport(send_line,ctx,state->board_device_id);
-  pet_p4_media_transport(send_line,ctx);
+#if PET_P4_HAS_BLE
+  bool ble_request = pet_p4_ble_is_transport(send_line);
+#else
+  bool ble_request = false;
+#endif
+  if (!ble_request) pet_p4_media_transport(send_line,ctx);
   root = cJSON_ParseWithOpts(line, NULL, true);
   if (!cJSON_IsObject(root)) {
     send_protocol_ack(send_line, ctx, "", NULL, false, "invalid_json", "message must be a JSON object");
@@ -4414,6 +4447,20 @@ bool pet_p4_handle_line_with_reply(
       "invalid_message",
       "topic and object payload are required"
     );
+    cJSON_Delete(root);
+    return false;
+  }
+  if (ble_request && (!strncmp(topic, "firmware/", 9) || !strcmp(topic, "lan/trust")
+      || !strncmp(topic, "media/", 6) || !strcmp(topic, "asset/raw-chunk")
+      || !strncmp(topic, "asset/audio-", 12))) {
+    send_protocol_ack(send_line, ctx, topic, payload, false, "unsupported_over_ble", "USB required");
+    cJSON_Delete(root);
+    return false;
+  }
+  if (ble_request && ((!strncmp(topic, "audio/", 6) && strcmp(topic, "audio/volume") != 0)
+      || (!strcmp(topic, "control/command") && !strcmp(json_string(payload, "type"), "audio_bridge"))
+      || !strcmp(topic, "ui/voice-feedback") || !strcmp(topic, "ui/conversation"))) {
+    send_protocol_ack(send_line, ctx, topic, payload, false, "unsupported_over_ble", "voice is USB-only");
     cJSON_Delete(root);
     return false;
   }
@@ -4454,10 +4501,11 @@ bool pet_p4_handle_line_with_reply(
         || !pet_p4_state_usb_client_connected(state, state->host_last_seen_ms))
       pet_voice_feedback_clear(&state->voice_feedback);
     copy_text(state->desktop_device_id, sizeof(state->desktop_device_id), desktop);
-    state->usb_client_last_seen_ms = state->desktop_device_id[0] ? state->host_last_seen_ms : 0;
+    if (!ble_request) state->usb_client_last_seen_ms = state->desktop_device_id[0] ? state->host_last_seen_ms : 0;
 #if PET_P4_SYSTEM_WIFI
-    if (state->desktop_device_id[0]) pet_p4_lan_usb_active();
+    if (!ble_request && state->desktop_device_id[0]) pet_p4_lan_usb_active();
 #endif
+    if (!ble_request) pet_p4_audio_set_transport(send_line, ctx);
     pet_p4_send_hello(state, send_line, ctx);
   } else if (strcmp(topic,"debug/identity")==0){
     const char *request=pet_evidence_source_valid(line)?pet_evidence_request(payload):NULL;const esp_app_desc_t *app=esp_app_get_description();
@@ -4488,9 +4536,14 @@ bool pet_p4_handle_line_with_reply(
     send_protocol_ack_if_requested(send_line, ctx, topic, payload);
 #ifdef ESP_PLATFORM
   } else if (!strcmp(topic, "resources/bubble-font")) {
-    cJSON *result = pet_p4_font_delivery(payload, (pet_font_route_t){
-        .owner = ctx, .resume = send_line == pet_p4_native_usb_send_json_line ? font_usb_current : NULL
-      }, state->board_device_id,
+    pet_font_route_t font_route = {
+      .owner = ctx,
+      .generation = ble_request ? pet_p4_ble_link_epoch() : 0,
+      .resume = send_line == pet_p4_native_usb_send_json_line
+        ? font_usb_current
+        : (ble_request ? font_ble_current : NULL),
+    };
+    cJSON *result = pet_p4_font_delivery(payload, font_route, state->board_device_id,
         !state->asset_transfer_active && !pet_p4_ota_active() && !pet_p4_audio_conversation_active());
     send_topic_payload(send_line, ctx, "resources/bubble-font/status", result);
 #endif
@@ -4508,7 +4561,7 @@ bool pet_p4_handle_line_with_reply(
       (void)pet_bubble_pixels_handle_owned(payload,ctx,(uint64_t)(esp_timer_get_time()/1000),reply);
       send_topic_payload(send_line,ctx,"ui/text-pixels/status",reply);
     }
-  } else if (!strcmp(topic, "ui/test-message") && pet_p4_lan_trust_wired(send_line, ctx)) {
+  } else if (!strcmp(topic, "ui/test-message") && (pet_p4_lan_trust_wired(send_line, ctx) || ble_request)) {
     cJSON *reply = pet_p4_test_message(state, payload, 0,
       !pet_p4_ota_active() && !pet_p4_audio_conversation_active() && !pet_p4_audio_music_active());
     if (reply) send_topic_payload(send_line, ctx, "ui/test-message/status", reply);
@@ -4762,9 +4815,9 @@ bool pet_p4_handle_line_with_reply(
   } else if (strcmp(topic, "system/heartbeat") == 0) {
     const cJSON *clock=cJSON_GetObjectItemCaseSensitive(payload,"clock");
     unsigned long long heartbeat_now_ms = (unsigned long long) (esp_timer_get_time() / 1000ULL);
-    if (state->desktop_device_id[0]) state->usb_client_last_seen_ms = heartbeat_now_ms;
+    if (!ble_request && state->desktop_device_id[0]) state->usb_client_last_seen_ms = heartbeat_now_ms;
 #if PET_P4_SYSTEM_WIFI
-    if (state->desktop_device_id[0]) pet_p4_lan_usb_active();
+    if (!ble_request && state->desktop_device_id[0]) pet_p4_lan_usb_active();
 #endif
     /* The PC bridge sends Unix epoch tsMs every two seconds. Keep it as the
      * wall-clock anchor used to translate approval expiresAtMs deadlines. */
@@ -4879,8 +4932,8 @@ static void storage_query_capture(const char *line, void *ctx) {
   reply->line = cJSON_malloc(bytes);
   if (reply->line) memcpy(reply->line, line, bytes);
 }
-bool pet_p4_handle_storage_query(pet_p4_runtime_state_t *state,
-    const char *line, pet_p4_query_reply_t *reply) {
+bool pet_p4_handle_storage_query_transport(pet_p4_runtime_state_t *state,
+    bool ble_request, const char *line, pet_p4_query_reply_t *reply) {
   if (!state || !line || !reply || reply->line || strlen(line) > 1024
       || !pet_p4_protocol_source_valid(line)) return false;
   cJSON *root = cJSON_ParseWithOpts(line, NULL, true);
@@ -4889,9 +4942,9 @@ bool pet_p4_handle_storage_query(pet_p4_runtime_state_t *state,
   bool handled = false;
   if (cJSON_IsObject(root) && cJSON_IsObject(payload)) {
     if (!strcmp(topic, "system/heartbeat")) {
-      if (state->desktop_device_id[0]) state->usb_client_last_seen_ms = esp_timer_get_time() / 1000ULL;
+      if (!ble_request && state->desktop_device_id[0]) state->usb_client_last_seen_ms = esp_timer_get_time() / 1000ULL;
 #if PET_P4_SYSTEM_WIFI
-    if (state->desktop_device_id[0]) pet_p4_lan_usb_active();
+      if (!ble_request && state->desktop_device_id[0]) pet_p4_lan_usb_active();
 #endif
       const cJSON *clock = cJSON_GetObjectItemCaseSensitive(payload, "clock");
       if (clock) (void)pet_p4_miniapp_clock_sync(clock, esp_timer_get_time()/1000ULL);
@@ -4913,6 +4966,11 @@ bool pet_p4_handle_storage_query(pet_p4_runtime_state_t *state,
   }
   cJSON_Delete(root);
   return handled;
+}
+
+bool pet_p4_handle_storage_query(pet_p4_runtime_state_t *state,
+    const char *line, pet_p4_query_reply_t *reply) {
+  return pet_p4_handle_storage_query_transport(state, false, line, reply);
 }
 
 bool pet_p4_handle_line(

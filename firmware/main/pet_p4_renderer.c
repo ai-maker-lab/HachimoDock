@@ -98,6 +98,28 @@ static uint32_t g_lcd_underruns_at_last_submit;
 static uint64_t g_lcd_next_retry_ms;
 #endif
 static uint32_t g_lcd_submitted, g_lcd_skipped;
+static portMUX_TYPE g_notice_lock = portMUX_INITIALIZER_UNLOCKED;
+static unsigned long long g_voice_usb_notice_until_ms;
+#if PET_P4_HAS_BLE
+static bool g_last_voice_notice_visible;
+#endif
+
+void pet_p4_renderer_voice_usb_notice(unsigned long long now_ms) {
+  portENTER_CRITICAL(&g_notice_lock);
+  g_voice_usb_notice_until_ms = now_ms + 2000ULL;
+  portEXIT_CRITICAL(&g_notice_lock);
+}
+
+#if PET_P4_HAS_BLE
+static bool voice_usb_notice_active(unsigned long long now_ms) {
+  unsigned long long notice_until_ms;
+  portENTER_CRITICAL(&g_notice_lock);
+  notice_until_ms = g_voice_usb_notice_until_ms;
+  portEXIT_CRITICAL(&g_notice_lock);
+  return now_ms < notice_until_ms;
+}
+#endif
+
 static portMUX_TYPE g_metrics_lock = portMUX_INITIALIZER_UNLOCKED;
 static pet_p4_render_metrics_t g_metrics;
 #if PET_P4_APP_CLEAR_OPAQUE_CENTER
@@ -3365,7 +3387,7 @@ static pet_p4_asset_cache_entry_t *conversation_animation_cached(unsigned int re
   return NULL;
 }
 #endif
-static bool render_asset_pet_frame(const pet_p4_runtime_state_t *state, const pet_p4_view_model_t *view,
+static __attribute__((noinline)) bool render_asset_pet_frame(const pet_p4_runtime_state_t *state, const pet_p4_view_model_t *view,
                                    unsigned long long now_ms, int *presented_frame,
                                    bool *prefetched_tail) {
   char fs_path[80];
@@ -4182,6 +4204,9 @@ static void draw_common_connection(uint8_t banner) {
       break;
     case PET_CONNECTION_WIFI:
       draw_connection_banner_pixels("已WIFI连接", rgb565(0, 170, 162));
+      break;
+    case PET_CONNECTION_BLE:
+      draw_connection_banner_pixels("已蓝牙连接", rgb565(0, 170, 162));
       break;
     case PET_CONNECTION_OFFLINE:
       draw_connection_banner_pixels("未连接客户端", rgb565(242, 168, 45));
@@ -7788,6 +7813,13 @@ static void draw_approval_overlay(
                        rgb565(255, 150, 140));
 }
 
+#if PET_P4_HAS_BLE
+static __attribute__((noinline)) void draw_voice_usb_notice(void) {
+  fill_rect(20, 190, 600, 80, rgb565(17, 30, 29));
+  draw_text_center("语音需要 USB 连接", 320, 215, 560, rgb565(245, 240, 220), 1);
+}
+#endif
+
 esp_err_t pet_p4_renderer_render_boot(
   const pet_p4_runtime_state_t *state,
   const pet_p4_view_model_t *view,
@@ -7896,9 +7928,15 @@ esp_err_t pet_p4_renderer_render(
     pet_compact_underlay_forget(&g_main_compact_underlay);
   }
   pet_p4_render_trace_begin(&g_render_trace, ++g_render_trace_frame, page);
+#if PET_P4_HAS_BLE
+  const uint8_t connection = state && !strcmp(page, "main")
+    ? pet_connection_banner_with_ble(pet_p4_state_usb_client_connected(state, now_ms), state->lan_client_connected, state->ble_only_desktop)
+    : PET_CONNECTION_NONE;
+#else
   const uint8_t connection = state && !strcmp(page, "main")
     ? pet_connection_banner(pet_p4_state_usb_client_connected(state, now_ms), state->lan_client_connected)
     : PET_CONNECTION_NONE;
+#endif
 #if PET_P4_APP_RETAIN_LOGICAL
   /* Keep all new planning work INSIDE the unchanged whole-frame clock. */
   g_app_common_plan=pet_logical_common_plan(state!=NULL,
@@ -7944,12 +7982,19 @@ esp_err_t pet_p4_renderer_render(
   }
   const bool approval_visible = state && pet_p4_state_approval_pending(state, now_ms);
   const bool approval_changed = approval_visible != g_last_approval_visible;
+#if PET_P4_HAS_BLE
+  const bool voice_notice_visible = voice_usb_notice_active(now_ms);
+  const bool voice_notice_changed = voice_notice_visible != g_last_voice_notice_visible;
+#else
+  const bool voice_notice_visible = false;
+  const bool voice_notice_changed = false;
+#endif
 #if PET_P4_APP_RETAIN_LOGICAL
   /* A final retained APP frame includes common overlays. Never reuse or publish
-   * that final frame across an approval modal/countdown; keep the clean texture. */
-  if (approval_visible || approval_changed) g_app_may_retain = false;
+   * that final frame across an approval modal/countdown or transient notice; keep the clean texture. */
+  if (approval_visible || approval_changed || voice_notice_visible || voice_notice_changed) g_app_may_retain = false;
 #endif
-  if (approval_changed) {
+  if (approval_changed || voice_notice_changed) {
     // The modal dims arbitrary pixels; repaint the page beneath from black so
     // entering/leaving it cannot leave a ghost card on pages (for example a
     // missing appearance frame) that only repaint their own controls.
@@ -7958,6 +8003,9 @@ esp_err_t pet_p4_renderer_render(
     g_main_appearance_ready = false;
     pet_compact_underlay_forget(&g_main_compact_underlay);
     g_last_approval_visible = approval_visible;
+#if PET_P4_HAS_BLE
+    g_last_voice_notice_visible = voice_notice_visible;
+#endif
   }
 #if PET_P4_EVENTS
   if (!strcmp(page,PET_ALARM_PAGE)) {
@@ -8061,6 +8109,9 @@ esp_err_t pet_p4_renderer_render(
   if (!dedicated_page) draw_boot_diagnostic(now_ms);
 #endif
   draw_approval_overlay(state, now_ms);
+#if PET_P4_HAS_BLE
+  if (voice_notice_visible) draw_voice_usb_notice();
+#endif
 #if PET_P4_SYSTEM_WIFI
   pet_p4_lcd_render_phase(PET_LCD_ROTATE);
 #endif
@@ -8131,7 +8182,7 @@ esp_err_t pet_p4_renderer_render(
 #endif
 #if PET_P4_APP_RETAIN_LOGICAL
   pet_logical_retention_finish(&g_app_final_retention,g_app_common_plan,
-    lcd_err==ESP_OK&&g_app_final_eligible&&!approval_visible&&!strcmp(page,"app"));
+    lcd_err==ESP_OK&&g_app_final_eligible&&!approval_visible&&!voice_notice_visible&&!strcmp(page,"app"));
 #endif
   if (unchanged) g_lcd_skipped++;
   else if (lcd_err == ESP_OK) g_lcd_submitted++;

@@ -10,6 +10,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "pet_p4_stats.h"
 #include "pet_p4_assets.h"
@@ -102,6 +103,7 @@ typedef struct {
   pet_p4_session_queue_item_t session_queue_staging[PET_P4_SESSION_QUEUE_MAX];
   unsigned int session_queue_count;
   bool session_voice_active;
+  bool ble_only_desktop;
   pet_voice_feedback_t voice_feedback;
 #if PET_P4_SYSTEM_WIFI
   uint8_t session_voice_lan_button;
@@ -317,6 +319,8 @@ bool pet_p4_protocol_source_valid(const char *line);
 /* State-locked RAM query lane; send/free reply after unlocking. */
 bool pet_p4_handle_storage_query(pet_p4_runtime_state_t *state,
   const char *line, pet_p4_query_reply_t *reply);
+bool pet_p4_handle_storage_query_transport(pet_p4_runtime_state_t *state,
+  bool ble_request, const char *line, pet_p4_query_reply_t *reply);
 #if PET_P4_MUTATION_ACK_DEFERRED
 /* Dispatcher-owned slot for the current locked dispatch; see pet_p4_query_reply.h. */
 void pet_p4_protocol_set_deferred_reply(pet_p4_query_reply_t *reply);
